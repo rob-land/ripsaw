@@ -24,3 +24,8 @@ repo/
 /data/*.desktop
 /data/*.metainfo.xml
 /data/resources/*.gresource
+
+# Secrets / local-only
+.env
+.envrc
+*.local

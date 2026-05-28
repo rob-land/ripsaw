@@ -149,3 +149,64 @@ the current stable ffmpeg and a regression test that decodes a known
 - **Patent/licence.** MVC is patent-encumbered, similar to H.264. The
   decoder bundle inherits whatever risk x264 builds already carry; the
   project's GPL-3 licence is compatible with our use.
+
+## Britz fork build spike (2026-05-28)
+
+Cloned `github.com/Britz/FFmpeg @ mvc` (shallow, 45 MB). The `mvc`
+branch has a single commit from **2013-02-21** — `initial MVC import to
+git`. The fork is FFmpeg **0.11.1** (libavcodec 54.23), ~13 years and
+~7 major versions behind current FFmpeg 7.x.
+
+A minimal build against Fedora 43 / GCC 15 succeeds with three small
+adjustments:
+
+1. `--extra-cflags='-Wno-incompatible-pointer-types -Wno-int-conversion
+   -Wno-implicit-function-declaration'` — modern GCC promotes the
+   relaxed-C-rules diagnostics to errors by default; the fork's code
+   pre-dates those tightenings.
+2. `--disable-asm` — `libavcodec/x86/mathops.h` uses inline-asm `shr`
+   forms current binutils rejects as operand-type ambiguous. Disabling
+   asm trades performance for buildability; for our spike that's fine.
+3. One-line patch to `libavcodec/h264_mvc.c`: insert
+   `typedef unsigned int uint;` after the includes (the file uses the
+   BSD `uint` shorthand which modern glibc no longer exposes via the
+   includes already pulled in).
+
+Result: `ffmpeg 0.11.1` and `ffprobe` binaries (2.4 MB each), with
+`h264_mvc.o` linked into `libavcodec.a` and the MVC symbols
+(`ff_h264_mvc_decode_nal_header`, `ff_h264_mvc_decode_sps`,
+`ff_h264_mvc_decode_vui_parameters`, etc.) present. Build time ~30s on
+a current desktop.
+
+**What this does not prove:** end-to-end correctness on real MVC
+streams. The fork ships no MVC test samples; we need an MVC bitstream
+extracted via MakeMKV from a known 3D BD to validate.
+
+**Verdict.** The decoder is *reachable* — we can produce a working
+binary from the unmaintained 2013 fork with three small patches. It is
+*not viable* as a long-term dependency: FFmpeg 0.11 is past every
+distro's support horizon, has known unfixed CVEs, and is incompatible
+with anything else in the pipeline that expects modern libav* APIs.
+
+**Path forward, in order of attractiveness:**
+
+1. **Forward-port the MVC patches onto current FFmpeg 7.x.** The MVC
+   delta is contained: `libavcodec/h264_mvc.{c,h}` plus modifications
+   to `h264.c`, `h264_refs.c`, `h264_ps.c`, and a few demuxer touches.
+   The current FFmpeg h264 decoder structure has diverged but the
+   conceptual changes (parse subset SPS, manage a second DPB, output
+   paired frames) remain implementable. Realistic effort: 2–4 weeks of
+   focused work by someone fluent in the h264 codec.
+2. **Use the 2013 fork as an out-of-process binary (`threedrip-mvcdec`)
+   for Phase 1.** Build it once with the spike patches, vendor under
+   `third_party/ffmpeg-mvc-britz/` with the patch series, ship it as a
+   private helper binary, validate against one real 3D BD, ship Phase 1
+   SBS/HSBS output. Treat this as a six-month bridge while option 1 is
+   pursued upstream.
+3. **JM reference decoder (ldecod).** Slow but correct. Useful as a
+   testing oracle to cross-check option 2's output and as the
+   correctness baseline option 1 must match.
+
+Recommendation: do option 2 to ship Phase 1, do option 1 in parallel
+as the long-term dependency. Do not attempt to maintain a pinned 2013
+ffmpeg as a production component.
