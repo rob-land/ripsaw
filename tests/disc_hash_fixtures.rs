@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use threedrip::identify::disc_hash::{content_hash, DiscFile};
+use threedrip::identify::disc_hash::{content_hash, enumerate_disc_files, DiscFile};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -81,4 +81,63 @@ fn every_fixture_hashes_to_published_value() {
         }
     }
     assert!(failures.is_empty(), "fixture failures:\n  {}", failures.join("\n  "));
+}
+
+/// End-to-end: synthesise each fixture's file tree on the filesystem as
+/// sparse files, walk it with `enumerate_disc_files`, hash the result,
+/// verify it matches the published `expected_hash`. This proves the
+/// enumeration's sort order, directory selection, and extension filter
+/// reproduce TheDiscDB's `ImportBuddy/DiskContentHash.HashMediaDisc`
+/// behaviour on real disc structures.
+#[test]
+fn enumerate_then_hash_matches_published_value() {
+    let fxs = load_fixtures();
+    assert!(!fxs.is_empty());
+
+    let mut failures = Vec::new();
+    for fx in &fxs {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mount = tmp.path();
+
+        // Reconstruct the on-disc layout. BD/UHD => BDMV/STREAM/, DVD => VIDEO_TS/.
+        let target_dir = match fx.format.as_str() {
+            "bluray" | "uhd" => mount.join("BDMV").join("STREAM"),
+            "dvd" => mount.join("VIDEO_TS"),
+            other => {
+                failures.push(format!("{}: unknown format {other}", fx.label));
+                continue;
+            }
+        };
+        fs::create_dir_all(&target_dir).unwrap();
+        for f in &fx.files {
+            let path = target_dir.join(&f.name);
+            let file = fs::File::create(&path).expect("create sparse file");
+            file.set_len(f.size).expect("set_len on sparse file");
+        }
+
+        let walked = match enumerate_disc_files(mount) {
+            Ok(v) => v,
+            Err(e) => {
+                failures.push(format!("{}: enumerate_disc_files failed: {e}", fx.label));
+                continue;
+            }
+        };
+        if walked.len() != fx.files.len() {
+            failures.push(format!(
+                "{}: walked {} files but fixture has {}",
+                fx.label,
+                walked.len(),
+                fx.files.len()
+            ));
+            continue;
+        }
+        let got = content_hash(&walked);
+        if got != fx.expected_hash {
+            failures.push(format!(
+                "{} ({}, {} files): walked hash {} != expected {}",
+                fx.label, fx.format, fx.file_count, got, fx.expected_hash,
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "end-to-end failures:\n  {}", failures.join("\n  "));
 }
