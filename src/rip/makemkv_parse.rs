@@ -58,6 +58,15 @@ pub enum Record {
         value: u32,
         text: String,
     },
+    /// `PRGT:code,id,"label"` — *total* progress title (the overall operation,
+    /// e.g. "Saving title to MKV file").
+    Prgt { code: u32, id: u32, name: String },
+    /// `PRGC:code,id,"label"` — *current* progress title (sub-operation,
+    /// e.g. "Analyzing seamless segments").
+    Prgc { code: u32, id: u32, name: String },
+    /// `PRGV:current,total,max` — progress values. `max` is typically 65536
+    /// and gives the scale of `current` and `total`.
+    Prgv { current: u32, total: u32, max: u32 },
     /// A record type we don't currently model.
     Unknown { kind: String },
 }
@@ -194,6 +203,21 @@ pub fn parse_line(line: &str) -> Result<Option<Record>, ParseError> {
             code: parse_u32(&fields, 2)?,
             value: parse_u32(&fields, 3)?,
             text: take_string(&fields, 4),
+        },
+        "PRGT" => Record::Prgt {
+            code: parse_u32(&fields, 0)?,
+            id: parse_u32(&fields, 1)?,
+            name: take_string(&fields, 2),
+        },
+        "PRGC" => Record::Prgc {
+            code: parse_u32(&fields, 0)?,
+            id: parse_u32(&fields, 1)?,
+            name: take_string(&fields, 2),
+        },
+        "PRGV" => Record::Prgv {
+            current: parse_u32(&fields, 0)?,
+            total: parse_u32(&fields, 1)?,
+            max: parse_u32(&fields, 2)?,
         },
         other => Record::Unknown { kind: other.to_string() },
     };
@@ -373,7 +397,12 @@ pub fn to_makemkv_scan(records: &[Record]) -> MakemkvScan {
                 };
                 apply_sinfo(&mut title_attrs.streams[stream_pos], *code, text);
             }
-            Record::Tcount(_) | Record::Drv { .. } | Record::Unknown { .. } => {}
+            Record::Tcount(_)
+            | Record::Drv { .. }
+            | Record::Prgt { .. }
+            | Record::Prgc { .. }
+            | Record::Prgv { .. }
+            | Record::Unknown { .. } => {}
         }
     }
 
@@ -581,5 +610,23 @@ mod tests {
         let mut agg = Aggregator::new();
         agg.push_line(r#"CINFO:2,0,"never closes"#);
         assert!(agg.finish().is_empty());
+    }
+
+    #[test]
+    fn parses_prgv_progress_values() {
+        let r = parse_line("PRGV:12345,32768,65536").unwrap().unwrap();
+        assert_eq!(r, Record::Prgv { current: 12345, total: 32768, max: 65536 });
+    }
+
+    #[test]
+    fn parses_prgt_total_label() {
+        let r = parse_line(r#"PRGT:5018,0,"Saving to MKV file""#).unwrap().unwrap();
+        assert_eq!(r, Record::Prgt { code: 5018, id: 0, name: "Saving to MKV file".into() });
+    }
+
+    #[test]
+    fn parses_prgc_current_label() {
+        let r = parse_line(r#"PRGC:5017,0,"Analyzing seamless segments""#).unwrap().unwrap();
+        assert_eq!(r, Record::Prgc { code: 5017, id: 0, name: "Analyzing seamless segments".into() });
     }
 }

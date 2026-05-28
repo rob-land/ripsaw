@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use super::makemkv_parse::{to_makemkv_scan, Aggregator, MakemkvScan};
+use super::makemkv_parse::{to_makemkv_scan, Aggregator, MakemkvScan, MsgRecord, Record};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
@@ -143,20 +143,171 @@ pub async fn scan(source: &ScanSource) -> Result<MakemkvScan> {
     Ok(to_makemkv_scan(&records))
 }
 
-pub async fn extract_title(
-    _disc_index: u32,
-    _title_index: u32,
-    _output_dir: &Path,
-    _progress: tokio::sync::mpsc::Sender<Progress>,
-) -> Result<PathBuf> {
-    todo!("spawn makemkvcon mkv, stream PRGV: progress, return final mkv path")
+/// Current progress state aggregated from PRGT (overall label) /
+/// PRGC (sub-operation label) / PRGV (numeric scale) records.
+///
+/// `current` / `total` are out of `max` (typically 65536).
+#[derive(Debug, Clone, Default)]
+pub struct ExtractProgress {
+    pub current: u32,
+    pub total: u32,
+    pub max: u32,
+    pub current_label: Option<String>,
+    pub total_label: Option<String>,
 }
 
+impl ExtractProgress {
+    pub fn current_fraction(&self) -> f32 {
+        if self.max == 0 { 0.0 } else { self.current as f32 / self.max as f32 }
+    }
+
+    pub fn total_fraction(&self) -> f32 {
+        if self.max == 0 { 0.0 } else { self.total as f32 / self.max as f32 }
+    }
+}
+
+/// Live event from a running extraction. Sent on the channel the caller
+/// passes to `extract_title`; the caller (typically the UI) reads them
+/// and updates its progress bar / log expander.
 #[derive(Debug, Clone)]
-pub struct Progress {
-    pub current: u64,
-    pub total: u64,
-    pub message: Option<String>,
+pub enum ExtractEvent {
+    Progress(ExtractProgress),
+    Message(MsgRecord),
+}
+
+/// Apply a single `Record` to a running `ExtractProgress`, returning an
+/// `ExtractEvent` to emit if one is warranted. Pure function — exposed
+/// here so its behaviour can be unit-tested without spawning subprocesses.
+pub fn apply_record(state: &mut ExtractProgress, record: &Record) -> Option<ExtractEvent> {
+    match record {
+        Record::Prgt { name, .. } => {
+            state.total_label = Some(name.clone());
+            None
+        }
+        Record::Prgc { name, .. } => {
+            state.current_label = Some(name.clone());
+            None
+        }
+        Record::Prgv { current, total, max } => {
+            state.current = *current;
+            state.total = *total;
+            state.max = *max;
+            Some(ExtractEvent::Progress(state.clone()))
+        }
+        Record::Msg { code, priority, text, .. } => Some(ExtractEvent::Message(MsgRecord {
+            code: *code,
+            priority: *priority,
+            text: text.clone(),
+        })),
+        _ => None,
+    }
+}
+
+/// Run `makemkvcon -r mkv <source> <title_index> <output_dir>` and stream
+/// progress events through the optional `event_tx` channel. Returns the
+/// path of the produced `.mkv` file on success.
+///
+/// `expected_output_filename` should match the title's MakeMKV-assigned
+/// output filename (CINFO/TINFO code 27 in a prior scan); we use it to
+/// resolve the produced file. If MakeMKV's actual output name differs,
+/// the function falls back to scanning `output_dir` for the most recently
+/// created `.mkv`.
+///
+/// The subprocess is set up with `kill_on_drop(true)`, so a cancelled
+/// task tears down the running makemkvcon cleanly.
+pub async fn extract_title(
+    source: &ScanSource,
+    title_index: u32,
+    output_dir: &Path,
+    expected_output_filename: &str,
+    event_tx: Option<tokio::sync::mpsc::Sender<ExtractEvent>>,
+) -> Result<PathBuf> {
+    tokio::fs::create_dir_all(output_dir)
+        .await
+        .with_context(|| format!("ensuring output dir {} exists", output_dir.display()))?;
+
+    let arg = source.as_argument();
+    let mut child = Command::new("makemkvcon")
+        .arg("-r")
+        .arg("--noscan")
+        .arg("--messages=-stdout")
+        .arg("--progress=-stdout")
+        .arg("mkv")
+        .arg(&arg)
+        .arg(title_index.to_string())
+        .arg(output_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn makemkvcon mkv")?;
+
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("makemkvcon stdout was not piped"))?;
+    let mut reader = BufReader::new(stdout).lines();
+
+    let mut agg = Aggregator::new();
+    let mut state = ExtractProgress::default();
+
+    while let Some(line) = reader.next_line().await.context("reading makemkvcon stdout")? {
+        for rec in agg.push_line(&line) {
+            if let Some(event) = apply_record(&mut state, &rec) {
+                if let Some(tx) = &event_tx {
+                    // Drop events when the consumer is full rather than
+                    // blocking parsing. Progress is coalescing-safe.
+                    let _ = tx.try_send(event);
+                }
+            }
+        }
+    }
+    for rec in agg.finish() {
+        if let Some(event) = apply_record(&mut state, &rec) {
+            if let Some(tx) = &event_tx {
+                let _ = tx.try_send(event);
+            }
+        }
+    }
+
+    let status = child.wait().await.context("waiting for makemkvcon")?;
+    if !status.success() {
+        let mut stderr_buf = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let _ = e.read_to_string(&mut stderr_buf).await;
+        }
+        return Err(anyhow!(
+            "makemkvcon mkv exited with status {}; stderr: {}",
+            status,
+            stderr_buf.trim()
+        ));
+    }
+
+    resolve_output_file(output_dir, expected_output_filename).await
+}
+
+async fn resolve_output_file(dir: &Path, expected: &str) -> Result<PathBuf> {
+    let primary = dir.join(expected);
+    if tokio::fs::try_exists(&primary).await.unwrap_or(false) {
+        return Ok(primary);
+    }
+    // Fall-back: pick the newest *.mkv in the output directory.
+    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut entries = tokio::fs::read_dir(dir).await.context("reading output dir")?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("mkv") {
+            continue;
+        }
+        let modified = entry.metadata().await?.modified()?;
+        if latest.as_ref().is_none_or(|(t, _)| modified > *t) {
+            latest = Some((modified, path));
+        }
+    }
+    latest.map(|(_, p)| p).ok_or_else(|| {
+        anyhow!(
+            "makemkvcon exited successfully but no .mkv file was produced in {}",
+            dir.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -197,6 +348,92 @@ mod tests {
         assert_eq!(ScanSource::Iso(PathBuf::from("/x/y.iso")).as_argument(), "iso:/x/y.iso");
         assert_eq!(ScanSource::Folder(PathBuf::from("/mnt/bd")).as_argument(), "file:/mnt/bd");
         assert_eq!(ScanSource::Device(PathBuf::from("/dev/sr0")).as_argument(), "dev:/dev/sr0");
+    }
+
+    #[test]
+    fn extract_progress_fractions_are_safe_when_max_is_zero() {
+        let p = ExtractProgress::default();
+        assert_eq!(p.current_fraction(), 0.0);
+        assert_eq!(p.total_fraction(), 0.0);
+    }
+
+    #[test]
+    fn extract_progress_fractions_scale_to_max() {
+        let p = ExtractProgress { current: 16384, total: 32768, max: 65536, ..Default::default() };
+        assert!((p.current_fraction() - 0.25).abs() < 1e-6);
+        assert!((p.total_fraction() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn apply_record_updates_progress_and_emits_event() {
+        let mut state = ExtractProgress::default();
+
+        // PRGT sets the overall label without emitting.
+        let r = Record::Prgt { code: 5018, id: 0, name: "Saving title to MKV file".into() };
+        assert!(matches!(apply_record(&mut state, &r), None));
+        assert_eq!(state.total_label.as_deref(), Some("Saving title to MKV file"));
+
+        // PRGC sets the sub-operation label without emitting.
+        let r = Record::Prgc { code: 5017, id: 0, name: "Analyzing seamless segments".into() };
+        assert!(matches!(apply_record(&mut state, &r), None));
+        assert_eq!(state.current_label.as_deref(), Some("Analyzing seamless segments"));
+
+        // PRGV sets numbers AND emits a Progress event.
+        let r = Record::Prgv { current: 100, total: 200, max: 65536 };
+        let event = apply_record(&mut state, &r).expect("PRGV must emit");
+        match event {
+            ExtractEvent::Progress(p) => {
+                assert_eq!(p.current, 100);
+                assert_eq!(p.total, 200);
+                assert_eq!(p.max, 65536);
+                assert_eq!(p.current_label.as_deref(), Some("Analyzing seamless segments"));
+                assert_eq!(p.total_label.as_deref(), Some("Saving title to MKV file"));
+            }
+            other => panic!("expected Progress, got {other:?}"),
+        }
+
+        // MSG emits a Message event without touching progress numbers.
+        let r = Record::Msg { code: 5036, flags: 0, priority: 2, text: "Copy complete.".into() };
+        let event = apply_record(&mut state, &r).expect("MSG must emit");
+        match event {
+            ExtractEvent::Message(m) => {
+                assert_eq!(m.code, 5036);
+                assert_eq!(m.text, "Copy complete.");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+        // PRGV state should be unchanged by the MSG.
+        assert_eq!(state.current, 100);
+    }
+
+    #[tokio::test]
+    async fn resolve_output_file_finds_named_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = "title_t00.mkv";
+        tokio::fs::write(dir.path().join(expected), b"fake").await.unwrap();
+        let resolved = resolve_output_file(dir.path(), expected).await.unwrap();
+        assert_eq!(resolved.file_name().unwrap().to_str().unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn resolve_output_file_falls_back_to_newest_mkv() {
+        let dir = tempfile::tempdir().unwrap();
+        // We expected something MakeMKV chose not to write; instead, find the newest .mkv.
+        tokio::fs::write(dir.path().join("older.mkv"), b"a").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::fs::write(dir.path().join("newer.mkv"), b"b").await.unwrap();
+        // Plus an unrelated file to be skipped:
+        tokio::fs::write(dir.path().join("notes.txt"), b"x").await.unwrap();
+        let resolved = resolve_output_file(dir.path(), "missing.mkv").await.unwrap();
+        assert_eq!(resolved.file_name().unwrap().to_str().unwrap(), "newer.mkv");
+    }
+
+    #[tokio::test]
+    async fn resolve_output_file_errors_when_no_mkv_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("notes.txt"), b"x").await.unwrap();
+        let err = resolve_output_file(dir.path(), "expected.mkv").await.unwrap_err();
+        assert!(format!("{err}").contains("no .mkv file was produced"));
     }
 }
 
