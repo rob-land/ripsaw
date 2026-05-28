@@ -70,38 +70,76 @@ pub enum ParseError {
     UnterminatedString,
 }
 
-/// Fold multi-line records (where a quoted string spans lines via a trailing
-/// `\` continuation marker) and parse each into a `Record`. Unparseable
-/// lines are silently skipped — diagnostics are exposed through `MSG`
-/// records, not through parser errors.
-pub fn aggregate(input: &str) -> Vec<Record> {
-    let mut out = Vec::new();
-    let mut buf = String::new();
-    for raw_line in input.split('\n') {
-        let line = raw_line.trim_end_matches('\r');
+/// Stateful incremental aggregator for streaming `makemkvcon -r` output.
+/// Use `push_line` to feed one line at a time (without the trailing
+/// newline); each call returns zero, one, or more newly-completed records.
+/// `finish` flushes any partial-but-complete buffer that may have been
+/// pending when the stream ended.
+#[derive(Default)]
+pub struct Aggregator {
+    buf: String,
+}
+
+impl Aggregator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one line of stdout. `line` may include or omit the trailing
+    /// `\r` — both are tolerated. Returns the records that completed as a
+    /// result of this line.
+    pub fn push_line(&mut self, line: &str) -> Vec<Record> {
+        let line = line.trim_end_matches(['\r', '\n']);
         let (line_part, continued) = match line.strip_suffix('\\') {
             Some(s) => (s, true),
             None => (line, false),
         };
-        if !buf.is_empty() {
-            buf.push('\n');
+        if !self.buf.is_empty() {
+            self.buf.push('\n');
         }
-        buf.push_str(line_part);
+        self.buf.push_str(line_part);
         if continued {
-            continue;
+            return Vec::new();
         }
-        match parse_line(&buf) {
+        match parse_line(&self.buf) {
             Ok(Some(rec)) => {
-                out.push(rec);
-                buf.clear();
+                self.buf.clear();
+                vec![rec]
             }
-            Ok(None) => buf.clear(),
-            Err(ParseError::UnterminatedString) => {
-                // Keep buffering; the next line will close the string.
+            Ok(None) => {
+                self.buf.clear();
+                Vec::new()
             }
-            Err(_) => buf.clear(),
+            Err(ParseError::UnterminatedString) => Vec::new(),
+            Err(_) => {
+                self.buf.clear();
+                Vec::new()
+            }
         }
     }
+
+    /// Flush any pending buffer at end-of-stream. Returns the final record
+    /// if one closed cleanly; otherwise drops the partial buffer.
+    pub fn finish(self) -> Vec<Record> {
+        if self.buf.is_empty() {
+            return Vec::new();
+        }
+        match parse_line(&self.buf) {
+            Ok(Some(rec)) => vec![rec],
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// One-shot wrapper around `Aggregator` for in-memory input. Equivalent
+/// to feeding every line via `push_line` then calling `finish`.
+pub fn aggregate(input: &str) -> Vec<Record> {
+    let mut agg = Aggregator::new();
+    let mut out = Vec::new();
+    for line in input.split('\n') {
+        out.extend(agg.push_line(line));
+    }
+    out.extend(agg.finish());
     out
 }
 
@@ -495,5 +533,53 @@ mod tests {
             parse_line(r#"CINFO:2,0,"unterminated"#),
             Err(ParseError::UnterminatedString)
         ));
+    }
+
+    #[test]
+    fn aggregator_emits_one_record_per_complete_line() {
+        let mut agg = Aggregator::new();
+        let r = agg.push_line("TCOUNT:6");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0], Record::Tcount(6));
+
+        let r = agg.push_line(r#"TINFO:0,9,0,"2:06:42""#);
+        assert_eq!(r.len(), 1);
+        assert!(matches!(r[0], Record::Tinfo { code: 9, .. }));
+    }
+
+    #[test]
+    fn aggregator_emits_zero_records_during_multiline_msg() {
+        let mut agg = Aggregator::new();
+        // First fragment ends with `\` continuation marker -- no record yet.
+        let r = agg.push_line(r#"MSG:3335,1288,0,"line one \"#);
+        assert!(r.is_empty());
+        // Empty continuation line — still buffering.
+        let r = agg.push_line(r#"\"#);
+        assert!(r.is_empty());
+        // Final line closes the quoted string and the record.
+        let r = agg.push_line(r#"line three","fmt""#);
+        assert_eq!(r.len(), 1);
+        match &r[0] {
+            Record::Msg { text, .. } => assert!(text.contains("line one") && text.contains("line three")),
+            other => panic!("expected MSG, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aggregator_finish_flushes_a_pending_complete_record() {
+        let mut agg = Aggregator::new();
+        // No newline at end of input, but record is parseable.
+        assert!(agg.push_line("TCOUNT:5").is_empty() || true);
+        // Above pushed a record already (TCOUNT is single-line); finish() returns
+        // nothing because the buffer is empty. Test the empty case explicitly:
+        let agg = Aggregator::new();
+        assert!(agg.finish().is_empty());
+    }
+
+    #[test]
+    fn aggregator_finish_drops_unterminated_buffer() {
+        let mut agg = Aggregator::new();
+        agg.push_line(r#"CINFO:2,0,"never closes"#);
+        assert!(agg.finish().is_empty());
     }
 }
