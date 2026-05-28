@@ -1,0 +1,26 @@
+{
+  "label": "jurassic_park_2013_3d",
+  "comment": "Real makemkvcon 1.17.8 scan of a 3D BD Jurassic Park ISO. 6 titles, all atomic (no composite relationships).",
+  "disc": {
+    "name": "Jurassic Park 3D",
+    "volume_label": "JURASSIC_PARK_3D_G74",
+    "type": "BluRay3D",
+    "language": "eng"
+  },
+  "titles": [
+    {"index": 0, "duration_seconds": 7602, "size_bytes": 43274268672, "source_file": "00803.mpls", "segment_map": "23/95", "segment_count": 1, "chapter_count": 20},
+    {"index": 1, "duration_seconds": 507, "size_bytes": 2394611712, "source_file": "00300.mpls", "segment_map": "24/50358", "segment_count": 1, "chapter_count": 1},
+    {"index": 2, "duration_seconds": 44, "size_bytes": 168069120, "source_file": "00023.mpls", "segment_map": "22/138", "segment_count": 1, "chapter_count": 2},
+    {"index": 3, "duration_seconds": 59, "size_bytes": 136617984, "source_file": "00016.m2ts", "segment_map": "16", "segment_count": 1, "chapter_count": 0},
+    {"index": 4, "duration_seconds": 59, "size_bytes": 136617984, "source_file": "00017.m2ts", "segment_map": "17", "segment_count": 1, "chapter_count": 0},
+    {"index": 5, "duration_seconds": 59, "size_bytes": 136617984, "source_file": "00020.m2ts", "segment_map": "20", "segment_count": 1, "chapter_count": 0}
+  ],
+  "expected_relations": {
+    "0": {"kind": "atomic"},
+    "1": {"kind": "atomic"},
+    "2": {"kind": "atomic"},
+    "3": {"kind": "atomic"},
+    "4": {"kind": "atomic"},
+    "5": {"kind": "atomic"}
+  }
+}

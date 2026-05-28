@@ -1,0 +1,26 @@
+{
+  "label": "synthetic_deleted_scenes_reel",
+  "comment": "Hand-crafted: a movie disc whose 'deleted scenes' playlist concatenates three individually-accessible scenes. The main feature and trailer are atomic; scenes 1-3 are constituents of the deleted-scenes reel.",
+  "disc": {
+    "name": "Some Movie",
+    "volume_label": "SOME_MOVIE",
+    "type": "BluRay",
+    "language": "eng"
+  },
+  "titles": [
+    {"index": 0, "duration_seconds": 6840, "size_bytes": 30000000000, "source_file": "00800.mpls", "segment_map": "100",         "segment_count": 1, "chapter_count": 24},
+    {"index": 1, "duration_seconds":  150, "size_bytes":   600000000, "source_file": "00900.mpls", "segment_map": "200",         "segment_count": 1, "chapter_count": 1},
+    {"index": 2, "duration_seconds":  720, "size_bytes":  2880000000, "source_file": "00910.mpls", "segment_map": "300+301+302", "segment_count": 3, "chapter_count": 3},
+    {"index": 3, "duration_seconds":  240, "size_bytes":   960000000, "source_file": "00911.mpls", "segment_map": "300",         "segment_count": 1, "chapter_count": 1},
+    {"index": 4, "duration_seconds":  240, "size_bytes":   960000000, "source_file": "00912.mpls", "segment_map": "301",         "segment_count": 1, "chapter_count": 1},
+    {"index": 5, "duration_seconds":  240, "size_bytes":   960000000, "source_file": "00913.mpls", "segment_map": "302",         "segment_count": 1, "chapter_count": 1}
+  ],
+  "expected_relations": {
+    "0": {"kind": "atomic"},
+    "1": {"kind": "atomic"},
+    "2": {"kind": "composite", "constituents": [3, 4, 5]},
+    "3": {"kind": "constituent", "containers": [2]},
+    "4": {"kind": "constituent", "containers": [2]},
+    "5": {"kind": "constituent", "containers": [2]}
+  }
+}

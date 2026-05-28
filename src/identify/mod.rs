@@ -1,5 +1,6 @@
 // Disc identification. See docs/identify.md.
 
+pub mod composite;
 pub mod disc_hash;
 pub mod thediscdb;
 pub mod tmdb;

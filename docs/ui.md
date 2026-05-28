@@ -102,17 +102,83 @@ Submit button is dual-action:
 
 ### TitleSelectionPage
 
-A `Gtk.ColumnView` with rows per title:
+A `Gtk.ColumnView` with one row per title. Each row carries everything
+the user needs to decide whether to rip it without leaving the page.
 
-| ✓ | # | Duration | Size | Role | Source file | Languages |
-|---|---|----------|------|------|-------------|-----------|
+| ✓ | # | Duration | Size | Role | Relation | Preview | Source file | Languages |
+|---|---|----------|------|------|----------|---------|-------------|-----------|
 
-The role column is an `AdwComboRow`-style cell with the
-main/trailer/featurette/… options pre-populated from TheDiscDB and
-editable.
+- **✓**: `Gtk.CheckButton` per row, plus a tri-state header checkbox.
+- **#**: title index from the makemkvcon scan.
+- **Duration** / **Size**: from the scan record.
+- **Role**: `AdwComboRow`-style cell — main feature / trailer /
+  behind-the-scenes / deleted scene / featurette / interview / scene /
+  short / other. Pre-populated from TheDiscDB when identified, editable
+  always.
+- **Relation**: shows the title's composite-classification — see
+  [identify.md § "Composite titles"](identify.md#composite-titles).
+  Rendering:
+  - Atomic: empty cell.
+  - Composite: an `Gtk.Label` styled with the `.accent` CSS class
+    reading "Contains 4 titles", and a chevron button that toggles an
+    expander row beneath this row listing the constituent indices,
+    durations, and a quick-tick to select them all.
+  - Constituent: a smaller `Gtk.Label` "Part of #0" — clicking it
+    scrolls the column view to title 0 and flashes that row.
+- **Preview**: a `Gtk.Button` with the `media-playback-start-symbolic`
+  icon. Clicking opens a modal `AdwDialog` that plays a short snippet
+  of the title's video. Implementation:
+  - Backed by a `GtkVideo` widget wired to a GStreamer pipeline.
+  - Source: for disc / mounted ISO, build an `appsrc` pipeline fed by
+    a `ffmpeg -ss N -t 30 -i <title.source> -c:v copy -c:a copy -f
+    mpegts pipe:` subprocess. For raw M2TS or MKV, GStreamer's
+    `playbin3` reads the file directly.
+  - For 3D BD titles, the preview plays only the base view (no need
+    for MVC just to identify content).
+  - Seek bar with chapter markers.
+  - "Skip forward 30s" button — for long titles, the start is often
+    a static studio bumper that doesn't help identify the content.
+- **Source file**: `00803.mpls`, `00016.m2ts`, etc. — useful when a
+  user is comparing against TheDiscDB JSON manually.
+- **Languages**: aggregated from per-stream `language_code` fields.
 
-"Select main feature only" / "Select all main + extras" / "Select all"
-quick actions at the top.
+Header toolbar quick actions:
+
+- **Select main feature only** — picks the longest atomic title.
+- **Select all main + extras** — main feature + all non-constituent
+  atomic titles, skipping composite reels and their constituents.
+- **Select all** — every title.
+- **Select composites only** — for users who want one merged file per
+  reel rather than per-scene granularity.
+- **Select constituents, skip composites** — the inverse, for users
+  who want per-episode or per-scene granularity.
+
+Selection semantics:
+
+- Selecting *both* a composite and one of its constituents is allowed
+  and produces both outputs. A confirmation toast appears the first
+  time this happens per disc: "You're selecting both 'Deleted Scenes
+  (reel)' and its individual scenes. Both will be ripped — duplicate
+  content."
+- Selection state persists if the user navigates away and back.
+
+UI mock-up shape (rendered top-to-bottom, dummy data):
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ ✓ │ # │ Duration  │ Size   │ Role        │ Relation         │ ▶ │ ... │
+├───┼───┼───────────┼────────┼─────────────┼──────────────────┼───┼─────┤
+│ ☑ │ 0 │ 02:06:42  │ 40.3 G │ Main feat.  │ —                │ ▶ │     │
+│ ☐ │ 1 │ 00:08:27  │ 2.2 G  │ Trailer     │ —                │ ▶ │     │
+│ ☐ │ 2 │ 00:12:00  │ 2.9 G  │ Featurette  │ Contains 3 ⌄     │ ▶ │     │
+│   │   │           │        │             │   └ #3 (4 min)   │   │     │
+│   │   │           │        │             │   └ #4 (4 min)   │   │     │
+│   │   │           │        │             │   └ #5 (4 min)   │   │     │
+│ ☐ │ 3 │ 00:04:00  │ 1.0 G  │ Scene       │ Part of #2 →     │ ▶ │     │
+│ ☐ │ 4 │ 00:04:00  │ 1.0 G  │ Scene       │ Part of #2 →     │ ▶ │     │
+│ ☐ │ 5 │ 00:04:00  │ 1.0 G  │ Scene       │ Part of #2 →     │ ▶ │     │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
 ### OutputPlanPage
 

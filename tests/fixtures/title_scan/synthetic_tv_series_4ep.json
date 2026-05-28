@@ -1,0 +1,24 @@
+{
+  "label": "synthetic_tv_series_4ep",
+  "comment": "Hand-crafted: a Blu-ray TV-series disc with one playlist combining all 4 episodes plus per-episode playlists. Composite/constituent detection should classify title 0 as composite of 1-4 and titles 1-4 as constituents of 0.",
+  "disc": {
+    "name": "Some TV Series S01D01",
+    "volume_label": "TV_SERIES_S01D01",
+    "type": "BluRay",
+    "language": "eng"
+  },
+  "titles": [
+    {"index": 0, "duration_seconds": 5400, "size_bytes": 21600000000, "source_file": "00800.mpls", "segment_map": "1+2+3+4",  "segment_count": 4, "chapter_count": 32},
+    {"index": 1, "duration_seconds": 1350, "size_bytes": 5400000000,  "source_file": "00801.mpls", "segment_map": "1",        "segment_count": 1, "chapter_count": 8},
+    {"index": 2, "duration_seconds": 1350, "size_bytes": 5400000000,  "source_file": "00802.mpls", "segment_map": "2",        "segment_count": 1, "chapter_count": 8},
+    {"index": 3, "duration_seconds": 1350, "size_bytes": 5400000000,  "source_file": "00803.mpls", "segment_map": "3",        "segment_count": 1, "chapter_count": 8},
+    {"index": 4, "duration_seconds": 1350, "size_bytes": 5400000000,  "source_file": "00804.mpls", "segment_map": "4",        "segment_count": 1, "chapter_count": 8}
+  ],
+  "expected_relations": {
+    "0": {"kind": "composite", "constituents": [1, 2, 3, 4]},
+    "1": {"kind": "constituent", "containers": [0]},
+    "2": {"kind": "constituent", "containers": [0]},
+    "3": {"kind": "constituent", "containers": [0]},
+    "4": {"kind": "constituent", "containers": [0]}
+  }
+}
