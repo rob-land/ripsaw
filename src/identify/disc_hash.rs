@@ -18,7 +18,10 @@ pub fn content_hash(files: &[DiscFile]) -> String {
 }
 
 pub fn enumerate_disc_files(_mount: &std::path::Path) -> anyhow::Result<Vec<DiscFile>> {
-    todo!("walk BDMV/STREAM or VIDEO_TS in TheDiscDB's documented order")
+    // BD/UHD: BDMV/STREAM/*.m2ts ; DVD: VIDEO_TS/* (no extension filter).
+    // Sort lexicographically by file name; assign Index in iteration order.
+    // See docs/disc-hash.md § "What 'files' means".
+    todo!("walk the disc and emit DiscFile in the documented sort order")
 }
 
 #[cfg(test)]

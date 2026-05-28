@@ -1,0 +1,604 @@
+{
+  "label": "1917_2020_4k_disc01",
+  "format": "uhd",
+  "source": "data/movie/1917 (2019)/2020-4k/disc01",
+  "expected_hash": "7523415F507191611266DD68594593A3",
+  "file_count": 119,
+  "files": [
+    {
+      "index": 0,
+      "name": "00028.m2ts",
+      "size": 577536
+    },
+    {
+      "index": 1,
+      "name": "00029.m2ts",
+      "size": 608256
+    },
+    {
+      "index": 2,
+      "name": "00030.m2ts",
+      "size": 608256
+    },
+    {
+      "index": 3,
+      "name": "00031.m2ts",
+      "size": 276480
+    },
+    {
+      "index": 4,
+      "name": "00032.m2ts",
+      "size": 276480
+    },
+    {
+      "index": 5,
+      "name": "00033.m2ts",
+      "size": 288768
+    },
+    {
+      "index": 6,
+      "name": "00034.m2ts",
+      "size": 135168
+    },
+    {
+      "index": 7,
+      "name": "00035.m2ts",
+      "size": 165888
+    },
+    {
+      "index": 8,
+      "name": "00036.m2ts",
+      "size": 190464
+    },
+    {
+      "index": 9,
+      "name": "00037.m2ts",
+      "size": 116736
+    },
+    {
+      "index": 10,
+      "name": "00038.m2ts",
+      "size": 116736
+    },
+    {
+      "index": 11,
+      "name": "00165.m2ts",
+      "size": 63571968
+    },
+    {
+      "index": 12,
+      "name": "00173.m2ts",
+      "size": 188233728
+    },
+    {
+      "index": 13,
+      "name": "00174.m2ts",
+      "size": 125405184
+    },
+    {
+      "index": 14,
+      "name": "00175.m2ts",
+      "size": 121946112
+    },
+    {
+      "index": 15,
+      "name": "00178.m2ts",
+      "size": 188233728
+    },
+    {
+      "index": 16,
+      "name": "00179.m2ts",
+      "size": 165888
+    },
+    {
+      "index": 17,
+      "name": "00180.m2ts",
+      "size": 165888
+    },
+    {
+      "index": 18,
+      "name": "00181.m2ts",
+      "size": 165888
+    },
+    {
+      "index": 19,
+      "name": "00182.m2ts",
+      "size": 165888
+    },
+    {
+      "index": 20,
+      "name": "00183.m2ts",
+      "size": 165888
+    },
+    {
+      "index": 21,
+      "name": "00184.m2ts",
+      "size": 165888
+    },
+    {
+      "index": 22,
+      "name": "00185.m2ts",
+      "size": 264192
+    },
+    {
+      "index": 23,
+      "name": "00186.m2ts",
+      "size": 10948608
+    },
+    {
+      "index": 24,
+      "name": "00200.m2ts",
+      "size": 122880
+    },
+    {
+      "index": 25,
+      "name": "00203.m2ts",
+      "size": 116736
+    },
+    {
+      "index": 26,
+      "name": "00204.m2ts",
+      "size": 104448
+    },
+    {
+      "index": 27,
+      "name": "00205.m2ts",
+      "size": 116736
+    },
+    {
+      "index": 28,
+      "name": "00206.m2ts",
+      "size": 129024
+    },
+    {
+      "index": 29,
+      "name": "00207.m2ts",
+      "size": 110592
+    },
+    {
+      "index": 30,
+      "name": "00208.m2ts",
+      "size": 98304
+    },
+    {
+      "index": 31,
+      "name": "00209.m2ts",
+      "size": 110592
+    },
+    {
+      "index": 32,
+      "name": "00210.m2ts",
+      "size": 98304
+    },
+    {
+      "index": 33,
+      "name": "00211.m2ts",
+      "size": 98304
+    },
+    {
+      "index": 34,
+      "name": "00212.m2ts",
+      "size": 116736
+    },
+    {
+      "index": 35,
+      "name": "00213.m2ts",
+      "size": 116736
+    },
+    {
+      "index": 36,
+      "name": "00214.m2ts",
+      "size": 92160
+    },
+    {
+      "index": 37,
+      "name": "00215.m2ts",
+      "size": 190464
+    },
+    {
+      "index": 38,
+      "name": "00216.m2ts",
+      "size": 104448
+    },
+    {
+      "index": 39,
+      "name": "00217.m2ts",
+      "size": 104448
+    },
+    {
+      "index": 40,
+      "name": "00218.m2ts",
+      "size": 104448
+    },
+    {
+      "index": 41,
+      "name": "00219.m2ts",
+      "size": 92160
+    },
+    {
+      "index": 42,
+      "name": "00220.m2ts",
+      "size": 110592
+    },
+    {
+      "index": 43,
+      "name": "00221.m2ts",
+      "size": 104448
+    },
+    {
+      "index": 44,
+      "name": "00222.m2ts",
+      "size": 98304
+    },
+    {
+      "index": 45,
+      "name": "00223.m2ts",
+      "size": 104448
+    },
+    {
+      "index": 46,
+      "name": "00224.m2ts",
+      "size": 92160
+    },
+    {
+      "index": 47,
+      "name": "00225.m2ts",
+      "size": 104448
+    },
+    {
+      "index": 48,
+      "name": "00227.m2ts",
+      "size": 104448
+    },
+    {
+      "index": 49,
+      "name": "00228.m2ts",
+      "size": 110592
+    },
+    {
+      "index": 50,
+      "name": "00229.m2ts",
+      "size": 98304
+    },
+    {
+      "index": 51,
+      "name": "00230.m2ts",
+      "size": 116736
+    },
+    {
+      "index": 52,
+      "name": "00231.m2ts",
+      "size": 141312
+    },
+    {
+      "index": 53,
+      "name": "00232.m2ts",
+      "size": 116736
+    },
+    {
+      "index": 54,
+      "name": "00234.m2ts",
+      "size": 92160
+    },
+    {
+      "index": 55,
+      "name": "00235.m2ts",
+      "size": 110592
+    },
+    {
+      "index": 56,
+      "name": "00236.m2ts",
+      "size": 98304
+    },
+    {
+      "index": 57,
+      "name": "00237.m2ts",
+      "size": 110592
+    },
+    {
+      "index": 58,
+      "name": "00238.m2ts",
+      "size": 98304
+    },
+    {
+      "index": 59,
+      "name": "00239.m2ts",
+      "size": 122880
+    },
+    {
+      "index": 60,
+      "name": "00240.m2ts",
+      "size": 98304
+    },
+    {
+      "index": 61,
+      "name": "00241.m2ts",
+      "size": 116736
+    },
+    {
+      "index": 62,
+      "name": "00242.m2ts",
+      "size": 104448
+    },
+    {
+      "index": 63,
+      "name": "00244.m2ts",
+      "size": 104448
+    },
+    {
+      "index": 64,
+      "name": "00245.m2ts",
+      "size": 313344
+    },
+    {
+      "index": 65,
+      "name": "00246.m2ts",
+      "size": 38469519360
+    },
+    {
+      "index": 66,
+      "name": "00247.m2ts",
+      "size": 69341184
+    },
+    {
+      "index": 67,
+      "name": "00342.m2ts",
+      "size": 356352
+    },
+    {
+      "index": 68,
+      "name": "00344.m2ts",
+      "size": 1941504
+    },
+    {
+      "index": 69,
+      "name": "00345.m2ts",
+      "size": 1941504
+    },
+    {
+      "index": 70,
+      "name": "00346.m2ts",
+      "size": 1941504
+    },
+    {
+      "index": 71,
+      "name": "00409.m2ts",
+      "size": 1406976
+    },
+    {
+      "index": 72,
+      "name": "00410.m2ts",
+      "size": 1437696
+    },
+    {
+      "index": 73,
+      "name": "00411.m2ts",
+      "size": 1425408
+    },
+    {
+      "index": 74,
+      "name": "00412.m2ts",
+      "size": 1419264
+    },
+    {
+      "index": 75,
+      "name": "00413.m2ts",
+      "size": 1437696
+    },
+    {
+      "index": 76,
+      "name": "00414.m2ts",
+      "size": 1437696
+    },
+    {
+      "index": 77,
+      "name": "00415.m2ts",
+      "size": 1425408
+    },
+    {
+      "index": 78,
+      "name": "00416.m2ts",
+      "size": 1437696
+    },
+    {
+      "index": 79,
+      "name": "00417.m2ts",
+      "size": 1419264
+    },
+    {
+      "index": 80,
+      "name": "00418.m2ts",
+      "size": 1941504
+    },
+    {
+      "index": 81,
+      "name": "00419.m2ts",
+      "size": 1449984
+    },
+    {
+      "index": 82,
+      "name": "00420.m2ts",
+      "size": 1419264
+    },
+    {
+      "index": 83,
+      "name": "00421.m2ts",
+      "size": 1406976
+    },
+    {
+      "index": 84,
+      "name": "00422.m2ts",
+      "size": 1419264
+    },
+    {
+      "index": 85,
+      "name": "00423.m2ts",
+      "size": 1413120
+    },
+    {
+      "index": 86,
+      "name": "00424.m2ts",
+      "size": 1449984
+    },
+    {
+      "index": 87,
+      "name": "00425.m2ts",
+      "size": 1394688
+    },
+    {
+      "index": 88,
+      "name": "00426.m2ts",
+      "size": 1437696
+    },
+    {
+      "index": 89,
+      "name": "00427.m2ts",
+      "size": 1431552
+    },
+    {
+      "index": 90,
+      "name": "00428.m2ts",
+      "size": 1425408
+    },
+    {
+      "index": 91,
+      "name": "00429.m2ts",
+      "size": 1413120
+    },
+    {
+      "index": 92,
+      "name": "00430.m2ts",
+      "size": 1425408
+    },
+    {
+      "index": 93,
+      "name": "00431.m2ts",
+      "size": 1437696
+    },
+    {
+      "index": 94,
+      "name": "00432.m2ts",
+      "size": 1406976
+    },
+    {
+      "index": 95,
+      "name": "00433.m2ts",
+      "size": 1425408
+    },
+    {
+      "index": 96,
+      "name": "00434.m2ts",
+      "size": 1431552
+    },
+    {
+      "index": 97,
+      "name": "00435.m2ts",
+      "size": 1413120
+    },
+    {
+      "index": 98,
+      "name": "00436.m2ts",
+      "size": 1419264
+    },
+    {
+      "index": 99,
+      "name": "00437.m2ts",
+      "size": 1413120
+    },
+    {
+      "index": 100,
+      "name": "00438.m2ts",
+      "size": 1437696
+    },
+    {
+      "index": 101,
+      "name": "00439.m2ts",
+      "size": 1419264
+    },
+    {
+      "index": 102,
+      "name": "00440.m2ts",
+      "size": 1419264
+    },
+    {
+      "index": 103,
+      "name": "00441.m2ts",
+      "size": 1413120
+    },
+    {
+      "index": 104,
+      "name": "00442.m2ts",
+      "size": 1425408
+    },
+    {
+      "index": 105,
+      "name": "00443.m2ts",
+      "size": 1419264
+    },
+    {
+      "index": 106,
+      "name": "00444.m2ts",
+      "size": 1406976
+    },
+    {
+      "index": 107,
+      "name": "00445.m2ts",
+      "size": 1425408
+    },
+    {
+      "index": 108,
+      "name": "00446.m2ts",
+      "size": 1419264
+    },
+    {
+      "index": 109,
+      "name": "00447.m2ts",
+      "size": 110592
+    },
+    {
+      "index": 110,
+      "name": "00448.m2ts",
+      "size": 2493474816
+    },
+    {
+      "index": 111,
+      "name": "00449.m2ts",
+      "size": 2160986112
+    },
+    {
+      "index": 112,
+      "name": "00450.m2ts",
+      "size": 801705984
+    },
+    {
+      "index": 113,
+      "name": "00451.m2ts",
+      "size": 1452331008
+    },
+    {
+      "index": 114,
+      "name": "00452.m2ts",
+      "size": 931448832
+    },
+    {
+      "index": 115,
+      "name": "00453.m2ts",
+      "size": 84676608
+    },
+    {
+      "index": 116,
+      "name": "00454.m2ts",
+      "size": 86593536
+    },
+    {
+      "index": 117,
+      "name": "00455.m2ts",
+      "size": 418707456
+    },
+    {
+      "index": 118,
+      "name": "00456.m2ts",
+      "size": 448512
+    }
+  ]
+}

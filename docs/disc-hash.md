@@ -39,19 +39,24 @@ mixed in.
 
 ## What "files" means
 
-TheDiscDB's `ImportBuddy` enumerates the disc's main payload files in a
-deterministic order:
+Confirmed against `ImportBuddy/DiskContentHash.cs::HashMediaDisc`:
 
-- Blu-ray / UHD: every `*.m2ts` file under `BDMV/STREAM/`, sorted by
-  filename (which is numeric), then any companion files the importer
-  emits for that disc type.
-- DVD: every `VTS_##_#.VOB` and `VIDEO_TS.VOB` file under `VIDEO_TS/`,
-  sorted by filename.
+- **Blu-ray / UHD**: every file matching `*.m2ts` under `BDMV/STREAM/`,
+  sorted lexicographically by filename (`OrderBy(e => e.Name)`). The
+  enumeration is `Directory.GetFiles(path, "*.m2ts")` — no companion
+  files, no recursion.
+- **DVD**: every file under `VIDEO_TS/` with no extension filter
+  (`Directory.GetFiles(path, "*")` — so `VIDEO_TS.IFO`, `VIDEO_TS.BUP`,
+  `VIDEO_TS.VOB`, all `VTS_*.IFO/BUP/VOB`), sorted lexicographically by
+  filename.
 
-Our Rust re-implementation must match TheDiscDB's ordering exactly. The
-canonical reference is `ImportBuddy`'s file enumeration code; we will
-mirror its sort order in `src/identify/disc_hash.rs` and validate against
-captured fixtures (a small set of known-good disc → expected-hash pairs).
+`Index` in the resulting `FileHashInfo` is assigned in iteration order
+(which is already sorted-by-name), so `index` and "sort by name" are
+equivalent in fixtures.
+
+Validated against 5 fixtures under `tests/fixtures/disc_hash/` covering
+UHD, Blu-ray, and DVD across both movie and series releases. See
+`tests/disc_hash_fixtures.rs`.
 
 ## Rust shape
 
@@ -73,15 +78,19 @@ pub fn content_hash(files: &[DiscFile]) -> String {
 }
 ```
 
-## Validation plan
+## Validation
 
-1. Build a fixture corpus: pull 5–10 known disc records from
-   `github.com/TheDiscDb/data` whose `contentHash` field is published and
-   whose file size list is included in the same record. Store the
-   `(sizes[], expected_hash)` pairs as `tests/fixtures/disc_hash/*.json`.
-2. Run `content_hash(sizes)` against each and assert equality.
-3. Wire this as a Cargo test so any future refactor catches a regression
-   before it ships.
+Implemented:
+
+1. Fixture corpus under `tests/fixtures/disc_hash/` (currently 5 discs:
+   UHD, Blu-ray, DVD across movies and series). Each captures the
+   `expected_hash` (`ContentHash` from `disc##.json`) and the per-file
+   `(index, name, size)` list (from `HSH:` lines in `disc##.txt`).
+2. Cargo integration test (`tests/disc_hash_fixtures.rs`) loads every
+   fixture and asserts that `content_hash(files)` matches.
+3. Helper script `scripts/fetch_disc_hash_fixtures.py` reproduces the
+   corpus from the upstream repo and verifies each disc locally before
+   writing the fixture file.
 
 ## Risks
 

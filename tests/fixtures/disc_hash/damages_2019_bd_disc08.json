@@ -1,0 +1,59 @@
+{
+  "label": "damages_2019_bd_disc08",
+  "format": "bluray",
+  "source": "data/series/Damages (2007)/2019-blu-ray/disc08",
+  "expected_hash": "A966EAA0901E2CA24F32F0E288AE91F7",
+  "file_count": 10,
+  "files": [
+    {
+      "index": 0,
+      "name": "00000.m2ts",
+      "size": 8596869120
+    },
+    {
+      "index": 1,
+      "name": "00001.m2ts",
+      "size": 251904
+    },
+    {
+      "index": 2,
+      "name": "00002.m2ts",
+      "size": 9452027904
+    },
+    {
+      "index": 3,
+      "name": "00003.m2ts",
+      "size": 221184
+    },
+    {
+      "index": 4,
+      "name": "00004.m2ts",
+      "size": 9720410112
+    },
+    {
+      "index": 5,
+      "name": "00005.m2ts",
+      "size": 10277732352
+    },
+    {
+      "index": 6,
+      "name": "00006.m2ts",
+      "size": 10671980544
+    },
+    {
+      "index": 7,
+      "name": "00007.m2ts",
+      "size": 35241984
+    },
+    {
+      "index": 8,
+      "name": "00008.m2ts",
+      "size": 55332864
+    },
+    {
+      "index": 9,
+      "name": "00009.m2ts",
+      "size": 632832
+    }
+  ]
+}

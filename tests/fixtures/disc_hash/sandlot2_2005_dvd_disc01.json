@@ -1,0 +1,169 @@
+{
+  "label": "sandlot2_2005_dvd_disc01",
+  "format": "dvd",
+  "source": "data/movie/The Sandlot 2 (2005)/2005-multiformat-dvd/disc01",
+  "expected_hash": "9288E0AA5B20A8ADBE53D905F769E3F4",
+  "file_count": 32,
+  "files": [
+    {
+      "index": 0,
+      "name": "VIDEO_TS.BUP",
+      "size": 24576
+    },
+    {
+      "index": 1,
+      "name": "VIDEO_TS.IFO",
+      "size": 24576
+    },
+    {
+      "index": 2,
+      "name": "VIDEO_TS.VOB",
+      "size": 1718272
+    },
+    {
+      "index": 3,
+      "name": "VTS_01_0.BUP",
+      "size": 18432
+    },
+    {
+      "index": 4,
+      "name": "VTS_01_0.IFO",
+      "size": 18432
+    },
+    {
+      "index": 5,
+      "name": "VTS_01_0.VOB",
+      "size": 229376
+    },
+    {
+      "index": 6,
+      "name": "VTS_01_1.VOB",
+      "size": 10240
+    },
+    {
+      "index": 7,
+      "name": "VTS_02_0.BUP",
+      "size": 14336
+    },
+    {
+      "index": 8,
+      "name": "VTS_02_0.IFO",
+      "size": 14336
+    },
+    {
+      "index": 9,
+      "name": "VTS_02_1.VOB",
+      "size": 7931904
+    },
+    {
+      "index": 10,
+      "name": "VTS_03_0.BUP",
+      "size": 14336
+    },
+    {
+      "index": 11,
+      "name": "VTS_03_0.IFO",
+      "size": 14336
+    },
+    {
+      "index": 12,
+      "name": "VTS_03_1.VOB",
+      "size": 8257536
+    },
+    {
+      "index": 13,
+      "name": "VTS_04_0.BUP",
+      "size": 12288
+    },
+    {
+      "index": 14,
+      "name": "VTS_04_0.IFO",
+      "size": 12288
+    },
+    {
+      "index": 15,
+      "name": "VTS_04_1.VOB",
+      "size": 30824448
+    },
+    {
+      "index": 16,
+      "name": "VTS_05_0.BUP",
+      "size": 16384
+    },
+    {
+      "index": 17,
+      "name": "VTS_05_0.IFO",
+      "size": 16384
+    },
+    {
+      "index": 18,
+      "name": "VTS_05_1.VOB",
+      "size": 437796864
+    },
+    {
+      "index": 19,
+      "name": "VTS_06_0.BUP",
+      "size": 16384
+    },
+    {
+      "index": 20,
+      "name": "VTS_06_0.IFO",
+      "size": 16384
+    },
+    {
+      "index": 21,
+      "name": "VTS_06_1.VOB",
+      "size": 434294784
+    },
+    {
+      "index": 22,
+      "name": "VTS_07_0.BUP",
+      "size": 12288
+    },
+    {
+      "index": 23,
+      "name": "VTS_07_0.IFO",
+      "size": 12288
+    },
+    {
+      "index": 24,
+      "name": "VTS_07_1.VOB",
+      "size": 239616
+    },
+    {
+      "index": 25,
+      "name": "VTS_08_0.BUP",
+      "size": 69632
+    },
+    {
+      "index": 26,
+      "name": "VTS_08_0.IFO",
+      "size": 69632
+    },
+    {
+      "index": 27,
+      "name": "VTS_08_0.VOB",
+      "size": 2168832
+    },
+    {
+      "index": 28,
+      "name": "VTS_08_1.VOB",
+      "size": 1073709056
+    },
+    {
+      "index": 29,
+      "name": "VTS_08_2.VOB",
+      "size": 1073709056
+    },
+    {
+      "index": 30,
+      "name": "VTS_08_3.VOB",
+      "size": 1073709056
+    },
+    {
+      "index": 31,
+      "name": "VTS_08_4.VOB",
+      "size": 551598080
+    }
+  ]
+}
