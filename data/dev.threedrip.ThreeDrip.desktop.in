@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=3drip
+GenericName=Disc Ripper
+Comment=Rip DVDs, Blu-rays, and 4K UHD discs to your media library
+Categories=AudioVideo;Video;
+Icon=@app-id@
+Exec=threedrip %U
+Terminal=false
+Type=Application
+StartupNotify=true
+Keywords=disc;dvd;bluray;uhd;makemkv;jellyfin;plex;ripper;
+MimeType=x-content/video-dvd;x-content/video-bluray;
+X-GNOME-UsesNotifications=true

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>@app-id@</id>
+
+  <name>3drip</name>
+  <summary>Rip DVDs, Blu-rays, and 4K UHD discs with full Jellyfin/Plex naming</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <description>
+    <p>
+      3drip is a GTK4/libadwaita frontend for MakeMKV that turns a physical
+      disc into properly-named files in your media library. It identifies
+      discs via TheDiscDB, fills in TMDB/IMDB IDs, lays files out per
+      Jellyfin, Plex, Kodi, or Emby conventions, and optionally transcodes
+      with quality presets per content type.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Auto-identification via TheDiscDB content hash</li>
+      <li>Manual entry and submission flow for unknown discs</li>
+      <li>Per-title role selection (main feature, trailers, extras)</li>
+      <li>Jellyfin / Plex / Kodi / Emby naming schemes</li>
+      <li>Optional FFmpeg transcoding with content-type presets</li>
+      <li>3D MVC Blu-ray conversion to SBS / TAB / Frame-Sequential</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">@app-id@.desktop</launchable>
+
+  <url type="homepage">https://github.com/threedrip/threedrip</url>
+  <url type="bugtracker">https://github.com/threedrip/threedrip/issues</url>
+
+  <developer id="dev.threedrip">
+    <name>The 3drip authors</name>
+  </developer>
+
+  <requires>
+    <display_length compare="ge">360</display_length>
+    <internet>offline-only</internet>
+  </requires>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-05-28">
+      <description>
+        <p>Initial design sketch. No functionality yet.</p>
+      </description>
+    </release>
+  </releases>
+</component>

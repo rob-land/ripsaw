@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="threedrip">
+  <enum id="dev.threedrip.ThreeDrip.NamingScheme">
+    <value nick="jellyfin" value="0"/>
+    <value nick="plex"     value="1"/>
+    <value nick="kodi"     value="2"/>
+    <value nick="emby"     value="3"/>
+  </enum>
+
+  <schema id="dev.threedrip.ThreeDrip" path="/dev/threedrip/ThreeDrip/">
+    <key name="default-naming-scheme" enum="dev.threedrip.ThreeDrip.NamingScheme">
+      <default>"jellyfin"</default>
+      <summary>Default media-server naming scheme</summary>
+    </key>
+
+    <key name="movies-root" type="s">
+      <default>""</default>
+      <summary>Library root for ripped movies</summary>
+    </key>
+
+    <key name="shows-root" type="s">
+      <default>""</default>
+      <summary>Library root for ripped TV shows</summary>
+    </key>
+
+    <key name="default-transcode-preset" type="s">
+      <default>"passthrough"</default>
+      <summary>Default transcode preset name (or "passthrough" for no transcode)</summary>
+    </key>
+
+    <key name="tmdb-api-key-stored" type="b">
+      <default>false</default>
+      <summary>Whether a TMDB API key has been stored in the secret service</summary>
+    </key>
+
+    <key name="makemkv-minimum-version-warned" type="s">
+      <default>""</default>
+      <summary>Version below which we've already warned the user (suppress repeat banners)</summary>
+    </key>
+  </schema>
+</schemalist>

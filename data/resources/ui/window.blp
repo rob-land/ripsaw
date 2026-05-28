@@ -1,0 +1,52 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $ThreeDripWindow: Adw.ApplicationWindow {
+  default-width: 960;
+  default-height: 640;
+  title: _("3drip");
+
+  Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {
+      [end]
+      MenuButton menu_button {
+        primary: true;
+        icon-name: "open-menu-symbolic";
+        tooltip-text: _("Main Menu");
+        menu-model: primary_menu;
+      }
+    }
+
+    content: Adw.NavigationView nav {
+      Adw.NavigationPage {
+        title: _("Welcome");
+
+        Adw.StatusPage {
+          icon-name: "media-optical-symbolic";
+          title: _("Insert a disc to begin");
+          description: _("3drip will identify the disc, look up metadata, and rip the titles you choose to your media library.");
+        }
+      }
+    };
+  }
+}
+
+menu primary_menu {
+  section {
+    item {
+      label: _("Preferences");
+      action: "app.preferences";
+    }
+
+    item {
+      label: _("Keyboard Shortcuts");
+      action: "win.show-help-overlay";
+    }
+
+    item {
+      label: _("About 3drip");
+      action: "app.about";
+    }
+  }
+}

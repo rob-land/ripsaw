@@ -1,0 +1,7 @@
+option(
+  'profile',
+  type: 'combo',
+  choices: ['default', 'development'],
+  value: 'default',
+  description: 'Build profile. "development" suffixes the app ID with .Devel so it can be installed alongside a stable build.',
+)

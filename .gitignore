@@ -1,0 +1,26 @@
+# Rust / Cargo
+/target/
+Cargo.lock.bak
+**/*.rs.bk
+
+# Meson
+/build/
+/builddir/
+/_build/
+
+# Flatpak
+.flatpak-builder/
+flatpak-build/
+repo/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Generated
+/data/*.desktop
+/data/*.metainfo.xml
+/data/resources/*.gresource
