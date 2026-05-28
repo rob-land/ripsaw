@@ -3,9 +3,73 @@
 // of fields beyond what the scan layer already did.
 
 use crate::identify::{
-    MakeMkvDiscInfo, StreamFingerprint, StreamKind, TitleFingerprint,
+    DiscType, MakeMkvDiscInfo, StreamFingerprint, StreamKind, TitleFingerprint,
 };
 use crate::rip::makemkv_parse::{MakemkvScan, StreamAttributes, TitleAttributes};
+
+/// Infer the disc type from a scan's content-type CINFO field, codec
+/// strings, and codec IDs. Doesn't need filesystem access (so it works
+/// on the scan output alone, before the disc is mounted), but the more
+/// reliable signal is the filesystem layout — callers that have a mount
+/// path should prefer `detect_disc_type_with_mount`.
+pub fn detect_disc_type(scan: &MakemkvScan) -> DiscType {
+    if let Some(ct) = scan.disc.content_type.as_deref() {
+        let lower = ct.to_ascii_lowercase();
+        if lower.contains("dvd") {
+            return DiscType::Dvd;
+        }
+    }
+
+    if scan_has_mvc_stream(scan) {
+        return DiscType::BluRay3D;
+    }
+    if scan_has_hevc_stream(scan) {
+        return DiscType::UltraHdBluRay;
+    }
+    DiscType::BluRay
+}
+
+/// Like `detect_disc_type`, but also consults the on-disc directory
+/// layout. If `mount` carries any of the format-specific markers, those
+/// win over scan-side inference. Used by the identify pipeline once a
+/// disc is mounted.
+pub fn detect_disc_type_with_mount(
+    scan: &MakemkvScan,
+    mount: &std::path::Path,
+) -> DiscType {
+    // UHD-specific marker: the AACS2 subdirectory.
+    if mount.join("AACS2").is_dir() {
+        return DiscType::UltraHdBluRay;
+    }
+    // 3D-BD-specific marker: the SSIF subdirectory.
+    if mount.join("BDMV").join("STREAM").join("SSIF").is_dir() {
+        return DiscType::BluRay3D;
+    }
+    // DVD-specific marker: VIDEO_TS without BDMV.
+    if mount.join("VIDEO_TS").is_dir() && !mount.join("BDMV").is_dir() {
+        return DiscType::Dvd;
+    }
+    detect_disc_type(scan)
+}
+
+fn scan_has_mvc_stream(scan: &MakemkvScan) -> bool {
+    scan.titles.iter().any(|t| {
+        t.streams.iter().any(|s| {
+            let short = s.codec_short.as_deref().unwrap_or("");
+            let long = s.codec_long.as_deref().unwrap_or("");
+            short.contains("MVC") || long.contains("MVC")
+        })
+    })
+}
+
+fn scan_has_hevc_stream(scan: &MakemkvScan) -> bool {
+    scan.titles.iter().any(|t| {
+        t.streams.iter().any(|s| {
+            let id = s.codec_id.as_deref().unwrap_or("");
+            id.contains("HEVC") || id.contains("H265") || id.contains("MPEGH")
+        })
+    })
+}
 
 impl From<&MakemkvScan> for MakeMkvDiscInfo {
     fn from(scan: &MakemkvScan) -> Self {
@@ -95,6 +159,43 @@ mod tests {
 
         let video = t0.streams.iter().find(|s| s.kind == StreamKind::Video).expect("video stream");
         assert_eq!(video.codec, "V_MPEG4/ISO/AVC");
+    }
+
+    #[test]
+    fn jp_3d_disc_detected_as_blu_ray_3d_via_mvc_stream() {
+        assert_eq!(detect_disc_type(&jp_scan()), DiscType::BluRay3D);
+    }
+
+    #[test]
+    fn detect_disc_type_with_mount_recognises_uhd_via_aacs2() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("BDMV").join("STREAM")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("AACS2")).unwrap();
+        // Empty scan still resolves UHD on the AACS2 evidence.
+        let scan = crate::rip::makemkv_parse::MakemkvScan::default();
+        assert_eq!(detect_disc_type_with_mount(&scan, tmp.path()), DiscType::UltraHdBluRay);
+    }
+
+    #[test]
+    fn detect_disc_type_with_mount_recognises_3d_via_ssif() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("BDMV").join("STREAM").join("SSIF")).unwrap();
+        let scan = crate::rip::makemkv_parse::MakemkvScan::default();
+        assert_eq!(detect_disc_type_with_mount(&scan, tmp.path()), DiscType::BluRay3D);
+    }
+
+    #[test]
+    fn detect_disc_type_with_mount_recognises_dvd_via_video_ts_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("VIDEO_TS")).unwrap();
+        let scan = crate::rip::makemkv_parse::MakemkvScan::default();
+        assert_eq!(detect_disc_type_with_mount(&scan, tmp.path()), DiscType::Dvd);
+    }
+
+    #[test]
+    fn empty_scan_with_no_markers_defaults_to_blu_ray() {
+        let scan = crate::rip::makemkv_parse::MakemkvScan::default();
+        assert_eq!(detect_disc_type(&scan), DiscType::BluRay);
     }
 
     #[test]
