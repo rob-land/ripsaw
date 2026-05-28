@@ -33,3 +33,6 @@ repo/
 # Large local-only test material (3D BD samples, mounted ISOs, etc.)
 /samples/
 /scratch/
+
+# Reference spec PDFs (e.g. ITU-T H.264) — copyrighted, kept locally only
+/docs/*.pdf

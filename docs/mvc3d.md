@@ -22,35 +22,78 @@ the base view as a reference — they cannot be decoded independently.
 
 ## Decoding strategy
 
-Three candidate decoders, in declining order of preference:
+**We implement Annex G ourselves as a standalone library.** Earlier
+plans considered the Britz FFmpeg fork as a runtime helper or a forward-
+port target; both are dead ends (see § "Britz fork build spike" and
+§ "Britz fork sample validation" below). The decoder we ship is new
+code, written from the H.264 spec, reusing an off-the-shelf base-view
+H.264 decoder for everything that isn't MVC-specific.
 
-1. **Britz FFmpeg fork (`mvc` branch)**
-   - <https://github.com/Britz/FFmpeg/tree/mvc>
-   - Modifies `libavcodec/h264dec.c` to handle dependent views; exposes
-     them via the standard demuxer.
-   - Status: stale (last update mid-2010s) but builds against modern
-     ffmpeg with patches.
-   - Plan: bundle a pinned commit + a small patch series in
-     `third_party/ffmpeg-mvc/` and build it as a *separate binary*
-     `threedrip-mvcdec` shipped alongside the main app. The main app
-     spawns it via subprocess.
-   - This isolates the GPL-only / unmaintained code from the main
-     binary and keeps 3drip itself buildable against stock ffmpeg.
+### Why a standalone library instead of patching FFmpeg
 
-2. **JM reference decoder (ldecod)**
-   - The H.264 reference implementation supports MVC natively.
-   - Pros: actively-maintained-ish, reference-grade correctness.
-   - Cons: very slow (orders of magnitude slower than libavcodec).
-   - Used as a fallback / correctness oracle in tests.
+FFmpeg has no runtime plugin API for decoders — every supported codec
+is built into `libavcodec` at FFmpeg compile time. The only ways to
+"add a decoder to FFmpeg" are to patch FFmpeg's source tree (either
+ours, locally, or upstream via review) or to vendor a fork. Both
+couple our release cadence to FFmpeg's. Worse, the H.264 decoder in
+FFmpeg has been refactored heavily since the era when MVC patches were
+written; any forward-port is a rewrite.
 
-3. **Wine + FRIM**
-   - Last-resort fallback. Implementable behind a feature flag.
-   - User installs Wine + FRIM; we pipe via AviSynth+ for Linux
-     (`avisynth-plus` package) or fall through to native if it ever
-     ships.
-   - Not on the v1 critical path; documented for completeness.
+A standalone library sidesteps all of this:
 
-The decoder is abstracted behind a trait:
+```
+┌──────────────────────────────────────────┐
+│  3drip GTK app (Rust)                    │
+└────────────────────┬─────────────────────┘
+                     │ FFI (cxx or bindgen)
+                     ▼
+┌──────────────────────────────────────────┐
+│  libmvc                                  │
+│  ┌────────────────────────────────────┐  │
+│  │  base-view H.264 decoder           │  │  ← upstream libavcodec
+│  │  (linked unmodified)                │  │     (LGPL, system or vendored)
+│  └────────────────┬───────────────────┘  │
+│                   ▼                      │
+│  ┌────────────────────────────────────┐  │
+│  │  Annex G additions (our code):     │  │  ← implemented from spec
+│  │  - subset SPS / MVC SPS extension  │  │
+│  │  - per-view DPB                    │  │
+│  │  - inter-view reference list ctor  │  │
+│  │  - inter-view prediction wiring    │  │
+│  │  - view-id-aware picture output    │  │
+│  └────────────────────────────────────┘  │
+│                                          │
+│  API: feed_packet(au) ->                 │
+│         { left: Frame, right: Frame }    │
+└──────────────────────────────────────────┘
+```
+
+Properties:
+
+- **No FFmpeg version coupling.** Works against whatever system FFmpeg
+  ships — we use the public `libavcodec` C API for the base view.
+- **No upstream review required.** No patches to maintain.
+- **MVC-only surface.** We implement just the Annex G delta —
+  everything else (NAL parsing, slice header parsing, inverse
+  transform, deblocking, intra/inter prediction, CABAC/CAVLC) is reused
+  from a battle-tested decoder.
+- **Bit-exact testable.** ITU-T H.264 § 8 and § G.8 say "all decoders
+  shall produce numerically identical results"; we cross-check our
+  output against the JM reference decoder (ldecod) on a fixed corpus.
+- **Licence-clean.** GPL-3-or-later for our additions; linking against
+  LGPL libavcodec is fine. Could also be relicensed LGPL later if we
+  ever want to upstream the additions.
+
+### Language
+
+Either C or Rust works. C makes FFI to `libavcodec` trivial (it's a C
+API). Rust gives us safer DPB management (the bug surface is largely
+"out-of-bounds index into reference picture list") and matches the
+rest of 3drip. Bias: **Rust**, with `unsafe` FFI to `libavcodec` for
+the base-view decoder. Decision deferred to libmvc's own
+sub-architecture doc; not on the critical path for now.
+
+### The Rust-side abstraction stays simple
 
 ```rust
 // src/mvc/decoder.rs
@@ -65,9 +108,67 @@ pub struct StereoFrame {
 }
 ```
 
-Implementations: `BritzFfmpegDecoder`, `JmReferenceDecoder`,
-`WineFrimDecoder`. Selection is at runtime based on what is installed;
-the user picks in settings when more than one is available.
+The implementation is a `LibmvcDecoder` that wraps our library; for
+correctness testing we also keep a `JmReferenceDecoder` (shells to
+ldecod) gated behind a `cfg(test)`-ish opt-in feature.
+
+## Bitstream spec reference
+
+The implementation reference is the August 2024 ITU-T H.264
+recommendation (V15), specifically:
+
+| Annex / Clause | What it covers | Why we need it |
+|---|---|---|
+| Main spec § 6–9 | Base H.264 decode | Reused from libavcodec — not our code |
+| **Annex A** § A.2.5 | High profile family | Base view is High @ L4.1 on Blu-ray 3D |
+| **Annex B** | Byte stream format | Demuxer concern; reused |
+| **Annex G** | Multiview Video Coding (MVC) | **The actual delta we implement** |
+| Annex G.10.1.2 | Stereo High profile | Profile we target |
+| Annex G.13 | MVC SEI messages | Optional metadata (view scalability info, multiview scene info) |
+| Annex G.14 | MVC VUI extension | Aspect / colour signalling per view |
+
+We **do not** implement:
+
+- Annex F (SVC), G.10.1.1 (Multiview High beyond two views), G.10.1.3
+  (MFC High), Annex H (MVCD — multi-view + depth), Annex I (3D-AVC).
+- These cover scalability, multi-view (N>2), and depth-augmented 3D
+  features that are not used on commercial Blu-ray 3D.
+
+### Annex G implementation surface
+
+The clauses that map to actual code:
+
+| Clause | Process | Code lives in |
+|---|---|---|
+| G.7.3.2.1.1 | Subset SPS RBSP syntax | `libmvc/parse/subset_sps.rs` |
+| G.7.3.2.1.2 | MVC SPS extension | same |
+| G.7.4.1 | NAL unit semantics (incl. types 14, 15, 20) | `libmvc/parse/nal.rs` |
+| G.7.3.3 / G.7.4.3 | Slice header MVC extension | `libmvc/parse/slice_header.rs` |
+| G.8.1 | Picture order count per view | `libmvc/dpb/poc.rs` |
+| G.8.2 | Reference picture list construction (with inter-view refs) | `libmvc/dpb/ref_lists.rs` |
+| G.8.3 | Per-view decoded reference picture marking | `libmvc/dpb/marking.rs` |
+| G.8.4 | Inter-view prediction wiring (reuses § 8.4) | `libmvc/predict.rs` |
+| G.8.5 | Sub-bitstream extraction | `libmvc/extract.rs` |
+| G.10 | Profile / level constraints (Stereo High) | `libmvc/conformance.rs` |
+
+The "reuses § 8.4" line is the key simplification: G.8.4 says
+inter-view prediction *is* base inter-prediction with the inter-view
+reference picture appended to the regular reference list. We don't
+write a new motion-compensation engine — libavcodec already has one;
+we just feed it an extended `RefPicList`.
+
+### Conformance testing
+
+ITU H.264 § G.8 mandates: "any decoding process that produces
+identical results for the target output views to the process described
+here conforms to the decoding process requirements." This is testable:
+
+- Cross-check our YUV output against the JM reference decoder
+  (`ldecod`) on a fixed corpus.
+- Fixture inputs: extracted SSIF clips from physical 3D BDs + any
+  `mvcC`-format MKV we have demuxer support for.
+- Tolerances: bit-exact for luma; the spec mandates this, so anything
+  else is a bug.
 
 ## Output layouts
 
@@ -128,27 +229,53 @@ copying subs through without depth.
 
 | Phase | Scope |
 |---|---|
-| **0** (sketch) | This document + module stubs. No 3D code runs. |
-| **1** | `BritzFfmpegDecoder` bundled + builds; Full-SBS and Half-SBS layouts only. PGS passed through without depth. |
-| **2** | TAB / Half-TAB / Frame-Sequential layouts. Subtitle depth via BDSup2Sub++. |
-| **3** | JM reference fallback. Hardware-accelerated composition (vaapi vpp_qsv overlay). |
-| **4** | Wine+FRIM fallback. Dolby Vision Profile 7 (MEL/FEL) where it overlaps with MVC discs. |
+| **0** (sketch — current) | This document + module stubs. No 3D code runs. |
+| **1** | `libmvc` skeleton: subset SPS / MVC SPS parse, NAL types 14/15/20 routing, per-view DPB scaffolding, golden-frame test harness against `ldecod`. Single SSIF input, raw YUV output of both views, no integration into 3drip yet. |
+| **2** | `libmvc` correctness: ref-list construction (G.8.2), inter-view prediction wiring (G.8.4), bit-exact YUV match against `ldecod` on ≥3 SSIF fixtures spanning the corpus. |
+| **3** | Integration: Rust `LibmvcDecoder` impl of `MvcDecoder` trait, SBS / Half-SBS composer. End-to-end "disc → SBS MKV" on one real 3D BD. |
+| **4** | TAB / Half-TAB / Frame-Sequential / Interleaved layouts. Hardware-accelerated composition (VA-API). |
+| **5** | Subtitle depth via BDSup2Sub++. `mvcC`-format MKV input support (un-pack BlockAdditions to elementary stream). |
+| **6** | Optional: Wine+FRIM fallback (only if a user reports a sample we can't handle). Dolby Vision Profile 7 if it overlaps. |
 
-Phase 1 ships only after we have a Britz fork tree that builds against
-the current stable ffmpeg and a regression test that decodes a known
-3D BD sample to bit-identical YUV against a Windows FRIM reference.
+Each phase ends with a regression test gate. Phase 2's bit-exact match
+against ldecod is the hard correctness milestone; everything later is
+plumbing.
 
 ## Risks
 
-- **Bundled MVC decoder bit-rots.** The Britz fork is unmaintained.
-  Plan: vendor it under `third_party/`, pin the commit, and treat
-  decoder upgrades as discrete tasks per ffmpeg major bump.
-- **Quality regressions are hard to catch.** Need an SSIM/PSNR
-  regression suite against a small set of reference clips; CI will run
-  it on every push touching `src/mvc/` or `third_party/ffmpeg-mvc/`.
-- **Patent/licence.** MVC is patent-encumbered, similar to H.264. The
-  decoder bundle inherits whatever risk x264 builds already carry; the
-  project's GPL-3 licence is compatible with our use.
+- **Implementation effort.** Realistic 3–6 weeks of focused work to
+  reach phase-2 correctness for someone fluent in H.264 internals.
+  This is the project's largest single subsystem by code volume.
+  Mitigation: ldecod is the truth oracle; iteration is local, not
+  upstream-review-bound.
+- **Spec ambiguity in corner cases.** ITU specs are normative but
+  occasionally under-specified for the edges (skipped pictures across
+  IDRs, gaps in `frame_num`, exotic POC type combinations).
+  Mitigation: bit-exact diff against `ldecod` catches drift before it
+  ships.
+- **Bitstream-conformance corpus.** We need real-world MVC samples
+  with known-good decodes to drive the test suite. Source: physical
+  3D Blu-ray SSIF clips + samples from the
+  [Kodi 3D sample page](https://kodi.wiki/view/Samples#3D_Formats)
+  that contain MVC. JVT conformance bitstreams are the gold standard
+  for individual decode-process clauses.
+- **Quality regressions in the composer.** SSIM/PSNR regression suite
+  against a small set of reference SBS clips; CI runs it on every push
+  touching `libmvc/` or `src/mvc/`.
+- **Patent / licence.** MVC is patent-encumbered, similar to H.264.
+  Risk is the same as shipping any H.264 build (e.g. x264). Our GPL-3-
+  or-later application licence is compatible. libmvc itself will be
+  licensed GPL-3-or-later to match.
+
+## Vendored reference material
+
+`third_party/ffmpeg-mvc-britz/` contains the Britz fork's MVC delta as
+patches + the new `h264_mvc.{c,h}` files. After the build / sample-
+validation spikes (below), Britz is **not** the implementation target
+— we write from spec — but the algorithm in `h264_mvc.c` is one of two
+freely-available worked examples of the MVC decode process (the other
+being `ldecod`), and serves as a reference when the spec text is
+ambiguous.
 
 ## Britz fork build spike (2026-05-28)
 
@@ -285,24 +412,23 @@ in 2013 — implement view splitting, expose `view_id` on `AVFrame` (or
 as side data), and probably restructure the picture-output queue to
 emit both views per coded frame.
 
-This downgrades option 2 from the original recommendation ("use Britz as
-Phase 1 helper binary"). Britz still has value as **patch reference
-material** for the forward-port, but it is not a usable building block
-on its own.
+This downgrades option 2 from the original recommendation ("use Britz
+as Phase 1 helper binary"). Britz still has value as **reference
+material** for our own implementation — its `h264_mvc.{c,h}` files are
+one of two freely-available worked examples of the MVC decode process
+(the other being `ldecod`) — but it is not a usable building block on
+its own.
 
-Updated recommendation:
+Both Britz-as-helper-binary and Britz-as-forward-port-target are
+abandoned in favour of the standalone `libmvc` approach described
+above in § "Decoding strategy". The remaining work after this spike:
 
-1. **Forward-port the MVC patches to current FFmpeg 7.x**, with the
-   explicit scope of finishing the output path Britz left unfinished.
-   Modern FFmpeg exposes `AVFrameSideData` for stereo metadata, which
-   is the right place to land `view_id`.
+1. **Write `libmvc` from spec.** Annex G is detailed enough; see
+   § "Bitstream spec reference" for the clause-to-code mapping.
 2. **Cross-check correctness against the JM reference decoder
-   (`ldecod`)** — it actually does emit both views, slowly but
-   reference-correctly, and is a known-good oracle for any
-   forward-ported decoder's output.
-3. **Re-target our matroska handling for `mvcC` block additions**.
-   Since modern MakeMKV emits `mvcC`-format MKVs, that's the
-   container-side work we need regardless of decoder. We will need
-   either to handle `mvcC` in the demuxer ourselves or to use
-   `mkvextract` to dump the elementary stream + extension data and
-   reassemble.
+   (`ldecod`).** It emits both views, slowly but reference-correctly,
+   and is the oracle for our bit-exact tests.
+3. **Container support for `mvcC` BlockAdditions.** Modern MakeMKV
+   emits `mvcC`-format MKVs, so we need either `mvcC` support in our
+   demuxer or a `mkvextract`-based preprocessor that dumps the
+   elementary AVC + MVC NALs to a single stream `libmvc` can consume.

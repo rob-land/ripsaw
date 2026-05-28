@@ -47,36 +47,33 @@ The other files Britz touched (`h264.h`, `h264_ps.c`, `h264_refs.c`,
 substantially different structure. The patches fail at the first hunk
 in each file.
 
-## Forward-port plan
+## How this material is used
 
-1. **`h264_mvc.c` and `h264_mvc.h` can be imported almost verbatim.**
-   The algorithm — sub-SPS parsing, view-id assignment, inter-view
-   prediction reference handling — is mostly self-contained and reads
-   the H.264 bitstream via APIs that still exist (`get_ue_golomb`,
-   `get_bits1`, etc.).
-2. **Each Britz patch must be rewritten as a modern integration**:
-   - Sub-SPS / subset SPS parsing → `h264_ps.c` (still exists; add a
-     new parser for NAL type 15)
-   - View-id on `Picture` → `H264Picture` in `h264dec.h`
-   - Slice header bits for MVC → `h264_slice.c`
-   - Reference list construction for dependent view → `h264_refs.c`
-3. **The output side Britz left as TODO must be finished.**
-   - Modern FFmpeg has `AVFrameSideData` with type
-     `AV_FRAME_DATA_STEREO3D`. The dependent-view AVFrame should carry
-     `AV_STEREO3D_2D` flagged as the right-eye view, or — better —
-     both views should be packed into one AVFrame using
-     `AV_PIX_FMT_*` with a stereo layout descriptor.
-   - Alternative: emit two AVFrames per coded frame with a custom
-     side-data tag identifying which eye.
-4. **Cross-check correctness against the JM reference decoder
-   (`ldecod`).** It is slow but reference-correct; it must produce the
-   same YUV bytes as our forward-ported decoder on the same input.
-5. **Test corpus**: physical-BD SSIF streams. Modern MakeMKV `mvcC`
-   MKVs are a separate problem — see `docs/mvc3d.md` § "Modern
-   MakeMKV `mvcC` MKVs".
+After a closer reading of ITU-T H.264 Annex G (the MVC specification),
+the project's MVC strategy moved from "forward-port Britz" to "write
+`libmvc` from spec, reuse upstream libavcodec for base H.264". See
+`docs/mvc3d.md` § "Decoding strategy" and § "Bitstream spec reference"
+for the current plan.
 
-Realistic effort: 2–4 weeks for someone fluent in libavcodec internals.
-Not on the v1 critical path; tracked as a Phase 2 deliverable.
+In that plan, this directory is **reference material**, not a
+patch series we apply. The two useful ways to consult it:
+
+- **`new-files/h264_mvc.c`** is one of only two freely-available
+  worked examples of the MVC decode process (the other being `ldecod`
+  from the JM reference codebase). Where the spec is ambiguous, cross-
+  reading Britz's interpretation against `ldecod`'s is the fastest way
+  to resolve.
+- The patches show **which existing libavcodec call sites needed
+  hooks for MVC** back in the 2012 codebase. Although the file names
+  no longer match modern FFmpeg, the *conceptual* hook points are
+  stable: subset SPS parsing in the parameter-set layer, view-id on
+  the picture struct, ref-list construction in the DPB, slice-header
+  bits for MVC in the slice layer.
+
+Britz's `h264_mvc.c` itself stops short of finishing the output side
+(see `docs/mvc3d.md` § "Britz fork sample validation" for the
+`// JB for mvc generate some different output!` TODO). Our `libmvc`
+will not replicate that limitation.
 
 ## Licensing
 
