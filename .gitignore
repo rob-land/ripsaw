@@ -29,3 +29,7 @@ repo/
 .env
 .envrc
 *.local
+
+# Large local-only test material (3D BD samples, mounted ISOs, etc.)
+/samples/
+/scratch/

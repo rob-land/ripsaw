@@ -210,3 +210,99 @@ with anything else in the pipeline that expects modern libav* APIs.
 Recommendation: do option 2 to ship Phase 1, do option 1 in parallel
 as the long-term dependency. Do not attempt to maintain a pinned 2013
 ffmpeg as a production component.
+
+## Britz fork sample validation (2026-05-28)
+
+Tested the patched Britz binary against the [Kodi 3D
+samples](https://kodi.wiki/view/Samples#3D_Formats) — 2 MKVs and 6 BD
+ISOs. Two distinct format families surfaced, with different outcomes
+for each.
+
+### Modern MakeMKV `mvcC` MKVs — Britz cannot read
+
+`3D_LR_Pattern.mkv` and `3D MVC Resolution test.mkv` were both produced
+by MakeMKV v1.18.2. `mkvinfo` confirms the layout:
+
+- Single video track, `Codec ID: V_MPEG4/ISO/AVC`, High @ L4.1, 1920×1080
+- `Block addition mapping`, type `1836475203` (`mvcC` — MVC configuration record)
+- `Video stereo mode: 13` (both eyes laced in one block, left first)
+
+In this layout the dependent-view data is carried as Matroska
+`BlockAddition` extensions, not packed inline in the H.264 elementary
+stream. The Britz fork's matroska demuxer (FFmpeg 0.11, 2012) has no
+notion of `mvcC` block additions — they didn't exist yet — so the
+dependent view is invisible to it. Decode attempt fails immediately with
+"Invalid data found when processing input."
+
+This format is what *anyone* using current MakeMKV will produce, which
+makes Britz directly incompatible with the typical 3drip workflow.
+
+### Physical-BD SSIF — Britz parses, doesn't emit second view
+
+Mounted `3DLR-patterns.iso` to inspect its `BDMV/STREAM/` layout:
+
+- `00000.m2ts` (87 MB) — base view alone, decoded fine by stock ffmpeg
+- `00000.ssif` (157 MB) — Stereoscopic Interleaved File: base + dependent views interleaved
+
+`ffprobe` on the SSIF surfaces two video streams, the first with
+`profile=unknown` and `width=height=0` — the dependent-view fingerprint
+modern ffmpeg can't decode but can demux.
+
+Britz on the SSIF:
+
+- demuxes both streams
+- logs `Sub SPS (1) activated.` and `decode MVC NAL unit with view 0` /
+  `view 1` — the MVC parsing path is reached
+- still emits **only the base view** through the CLI: a 10-second
+  segment yields exactly 240 frames (24fps × 10s), not 480
+- `-map 0:v:1` is rejected because Britz exposes only one logical
+  video stream
+
+Grepping the fork's `h264.c` reveals why:
+
+```c
+// JB  for mvc generate some different output!
+// EDIT JB
+if(h->is_mvc){
+    av_log(avctx, AV_LOG_INFO, "outputting MVC view %d\n", h->view_id);
+}
+// END EDIT
+```
+
+The dependent-view output path is a TODO comment from the original
+author. The decoder runs inter-view prediction and tags pictures with
+`view_id` on the internal `Picture` struct
+(`mpegvideo.h:148: int view_id; ///< H264 MVC view identifier`), but
+`AVFrame` carries no view_id field and no muxer or filter graph in the
+fork distinguishes the two views.
+
+### Conclusion
+
+The Britz fork is an **incomplete MVC decoder**, not just a stale one.
+Even with a custom C wrapper using the internal `Picture` API, we would
+have to *finish* the output side the original author marked as a TODO
+in 2013 — implement view splitting, expose `view_id` on `AVFrame` (or
+as side data), and probably restructure the picture-output queue to
+emit both views per coded frame.
+
+This downgrades option 2 from the original recommendation ("use Britz as
+Phase 1 helper binary"). Britz still has value as **patch reference
+material** for the forward-port, but it is not a usable building block
+on its own.
+
+Updated recommendation:
+
+1. **Forward-port the MVC patches to current FFmpeg 7.x**, with the
+   explicit scope of finishing the output path Britz left unfinished.
+   Modern FFmpeg exposes `AVFrameSideData` for stereo metadata, which
+   is the right place to land `view_id`.
+2. **Cross-check correctness against the JM reference decoder
+   (`ldecod`)** — it actually does emit both views, slowly but
+   reference-correctly, and is a known-good oracle for any
+   forward-ported decoder's output.
+3. **Re-target our matroska handling for `mvcC` block additions**.
+   Since modern MakeMKV emits `mvcC`-format MKVs, that's the
+   container-side work we need regardless of decoder. We will need
+   either to handle `mvcC` in the demuxer ourselves or to use
+   `mkvextract` to dump the elementary stream + extension data and
+   reassemble.
