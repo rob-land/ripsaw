@@ -85,11 +85,25 @@ impl TitleListPage {
         page.imp().iso_path.replace(Some(iso_path));
         page.imp().disc_name.replace(result.scan.disc.name.clone());
         page.imp().titles.replace(result.scan.titles.clone());
-        // For now treat any has_mvc=true source as the mvcC-with-block-additions
-        // case (the other MVC family — inline stereo mode 13/14 — fails the
-        // same way today, since both depend on the same MVC decoder).
+        // Distinguish mvcC BlockAddition packaging (modern MakeMKV;
+        // BlockAddition extractor not yet built) from inline stereo
+        // mode 13/14 packaging (which the ldecod pipeline handles
+        // end-to-end today).
         let source_kind = if result.has_mvc {
-            Some(StereoSource::MvcWithBlockAdditions)
+            let has_mvcc_bytes = result
+                .source_file
+                .as_ref()
+                .and_then(|p| std::fs::File::open(p).ok())
+                .map(|f| {
+                    let mut r = crate::mvc::ebml::EbmlReader::new(f);
+                    matches!(crate::mvc::mvcc::find_mvcc_bytes(&mut r), Ok(Some(_)))
+                })
+                .unwrap_or(false);
+            if has_mvcc_bytes {
+                Some(StereoSource::MvcWithBlockAdditions)
+            } else {
+                Some(StereoSource::MvcInlineLaced)
+            }
         } else {
             None
         };
