@@ -1,0 +1,39 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $ThreeDripPreferencesDialog: Adw.PreferencesDialog {
+  title: _("Preferences");
+
+  Adw.PreferencesPage {
+    Adw.PreferencesGroup {
+      title: _("Library");
+      description: _("Where ripped files land and which media-server naming scheme is applied.");
+
+      Adw.ActionRow library_root_row {
+        title: _("Library root");
+        subtitle: _("not configured");
+        activatable: true;
+
+        [suffix]
+        Image {
+          icon-name: "document-edit-symbolic";
+          valign: center;
+        }
+      }
+
+      Adw.ComboRow scheme_combo {
+        title: _("Naming scheme");
+        subtitle: _("Determines folder layout and ID syntax in filenames.");
+
+        model: StringList {
+          strings [
+            "Jellyfin",
+            "Plex",
+            "Kodi",
+            "Emby",
+          ]
+        };
+      }
+    }
+  }
+}

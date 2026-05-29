@@ -14,6 +14,7 @@ const BLUEPRINTS: &[&str] = &[
     "data/resources/ui/window.blp",
     "data/resources/ui/title-list-page.blp",
     "data/resources/ui/rip-progress-page.blp",
+    "data/resources/ui/preferences-dialog.blp",
 ];
 
 fn main() {

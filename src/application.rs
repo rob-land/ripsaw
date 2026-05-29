@@ -37,14 +37,34 @@ fn register_actions(app: &adw::Application) {
         ))
         .build();
 
+    let preferences = gio::ActionEntry::builder("preferences")
+        .activate(clone!(
+            #[weak]
+            app,
+            move |_app: &adw::Application, _action, _param| {
+                show_preferences(&app);
+            }
+        ))
+        .build();
+
     let quit = gio::ActionEntry::builder("quit")
         .activate(|app: &adw::Application, _action, _param| {
             app.quit();
         })
         .build();
 
-    app.add_action_entries([about, quit]);
+    app.add_action_entries([about, preferences, quit]);
     app.set_accels_for_action("app.quit", &["<Primary>q"]);
+    app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
+}
+
+fn show_preferences(app: &adw::Application) {
+    let dialog = crate::ui::preferences_dialog::PreferencesDialog::default();
+    if let Some(window) = app.active_window() {
+        dialog.present(Some(&window));
+    } else {
+        dialog.present(None::<&gtk::Window>);
+    }
 }
 
 fn show_about(app: &adw::Application) {

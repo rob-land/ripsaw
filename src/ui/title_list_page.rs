@@ -11,7 +11,7 @@ use crate::identify::pipeline::IdentificationResult;
 use crate::identify::DiscType;
 use crate::rip::makemkv_parse::{MakemkvScan, TitleAttributes};
 use crate::rip::plan::{default_library_root, naming_opts_for_unidentified, plan_rip};
-use crate::settings::SchemeKind;
+use crate::settings::settings;
 use crate::ui::rip_progress_page::{RipProgressPage, RipQueueItem};
 
 mod imp {
@@ -201,10 +201,15 @@ impl TitleListPage {
         let titles_snapshot = self.imp().titles.borrow().clone();
         let identification_for_plan = build_pseudo_identification(&titles_snapshot, &disc_name);
 
-        let library_root = default_library_root();
+        let user_settings = settings().lock().expect("settings mutex").clone();
+        let library_root = user_settings
+            .library_root
+            .clone()
+            .unwrap_or_else(default_library_root);
+        let scheme = user_settings.scheme;
         let naming_opts = naming_opts_for_unidentified(
-            library_root,
-            SchemeKind::Jellyfin,
+            library_root.clone(),
+            scheme,
             &disc_name,
         );
         let plan = plan_rip(&identification_for_plan, &selected, Some(&naming_opts));
@@ -213,8 +218,9 @@ impl TitleListPage {
         let progress = RipProgressPage::default();
         progress.set_queue(&queue);
         progress.append_log(&format!(
-            "Library root: {} (Jellyfin scheme)",
-            naming_opts.library_root.display(),
+            "Library root: {} • Scheme: {}",
+            library_root.display(),
+            scheme.label(),
         ));
 
         if let Some(nav) = navigation_view(self) {
