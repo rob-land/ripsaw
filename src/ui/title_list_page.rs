@@ -13,11 +13,11 @@ use crate::identify::composite::{analyze_relations, TitleRelation};
 use crate::identify::pipeline::IdentificationResult;
 use crate::identify::DiscType;
 use crate::rip::makemkv_parse::{MakemkvScan, TitleAttributes};
+use crate::rip::plan::{parse_series_label, DiscContentKind};
 use std::collections::HashMap;
 
 use crate::rip::plan::{
     auto_detect_content_kind, default_library_root, naming_opts_for_unidentified, plan_rip,
-    DiscContentKind,
 };
 use crate::settings::settings;
 use crate::ui::rip_progress_page::{RipProgressPage, RipQueueItem};
@@ -32,6 +32,8 @@ mod imp {
         #[template_child] pub rip_button: TemplateChild<gtk::Button>,
         #[template_child] pub convert_button: TemplateChild<gtk::Button>,
         #[template_child] pub series_toggle: TemplateChild<adw::SwitchRow>,
+        #[template_child] pub title_override: TemplateChild<adw::EntryRow>,
+        #[template_child] pub season_override: TemplateChild<adw::SpinRow>,
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
         pub episode_entries: RefCell<Vec<gtk::Entry>>,
@@ -106,6 +108,16 @@ impl TitleListPage {
         }
         let detected = auto_detect_content_kind(&result.scan.titles);
         self.imp().series_toggle.set_active(detected == DiscContentKind::Series);
+
+        // Pre-fill the editable title and season fields from the disc label.
+        if let Some(disc_name) = &result.scan.disc.name {
+            let (guess_title, guess_season) = parse_series_label(disc_name);
+            self.imp().title_override.set_text(&guess_title);
+            if let Some(s) = guess_season {
+                self.imp().season_override.set_value(s as f64);
+            }
+        }
+
         self.populate_rows(&result.scan);
         self.imp().series_toggle.connect_active_notify(clone!(
             #[weak(rename_to = page)]
@@ -356,12 +368,23 @@ impl TitleListPage {
         } else {
             DiscContentKind::Movie
         };
-        let naming_opts = naming_opts_for_unidentified(
+        // Pick up the user's edited title and season from the override rows.
+        let user_title = self.imp().title_override.text().to_string();
+        let chosen_title = if user_title.trim().is_empty() {
+            disc_name.clone()
+        } else {
+            user_title
+        };
+        let chosen_season = self.imp().season_override.value().max(0.0) as u32;
+        let mut naming_opts = naming_opts_for_unidentified(
             library_root.clone(),
             scheme,
             content_kind,
-            &disc_name,
+            &chosen_title,
         );
+        if content_kind == DiscContentKind::Series {
+            naming_opts.season = chosen_season.max(1);
+        }
         let episode_titles = self.collect_episode_titles();
         let plan = plan_rip(
             &identification_for_plan,

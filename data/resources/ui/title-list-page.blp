@@ -41,6 +41,20 @@ template $ThreeDripTitleListPage: Adw.NavigationPage {
           title: _("TV series");
           subtitle: _("Each ripped title gets sequential S01E01, S01E02, ...");
         }
+
+        Adw.EntryRow title_override {
+          title: _("Series / Movie title");
+        }
+
+        Adw.SpinRow season_override {
+          title: _("Season number");
+          adjustment: Adjustment {
+            lower: 0;
+            upper: 99;
+            step-increment: 1;
+            value: 1;
+          };
+        }
       }
 
       Adw.PreferencesGroup title_group {
