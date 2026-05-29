@@ -1,0 +1,18 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $ThreeDripTitleListPage: Adw.NavigationPage {
+  title: _("Disc Titles");
+
+  Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {}
+
+    content: Adw.PreferencesPage {
+      Adw.PreferencesGroup title_group {
+        title: _("Titles found");
+        description: _("Each row is a title makemkvcon detected. Click one for details.");
+      }
+    };
+  }
+}

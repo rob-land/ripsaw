@@ -6,6 +6,7 @@ use gtk::glib::{self, clone};
 use gtk::{gio, CompositeTemplate};
 
 use crate::rip::makemkv::{scan, ScanSource};
+use crate::ui::title_list_page::TitleListPage;
 
 mod imp {
     use super::*;
@@ -15,6 +16,8 @@ mod imp {
     pub struct ThreeDripWindow {
         #[template_child]
         pub toasts: TemplateChild<adw::ToastOverlay>,
+        #[template_child]
+        pub nav: TemplateChild<adw::NavigationView>,
     }
 
     #[glib::object_subclass]
@@ -133,22 +136,14 @@ impl ThreeDripWindow {
                         tracing::info!(
                             "scan succeeded: {n} titles via MakeMKV {version}"
                         );
-                        for t in &scan_result.titles {
-                            tracing::info!(
-                                "  title {}: {} ({} s, {} bytes, src {})",
-                                t.index,
-                                t.name.as_deref().unwrap_or(""),
-                                t.duration_seconds.unwrap_or(0),
-                                t.size_bytes.unwrap_or(0),
-                                t.source_file.as_deref().unwrap_or(""),
-                            );
-                        }
                         let disc = scan_result
                             .disc
                             .name
                             .as_deref()
                             .unwrap_or("(unnamed disc)");
                         window.toast(&format!("Scanned {disc}: {n} titles"));
+                        let page = TitleListPage::from_scan(&scan_result);
+                        window.imp().nav.push(&page);
                     }
                     Ok(Err(e)) => {
                         tracing::error!("scan failed: {e:#}");
