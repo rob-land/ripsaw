@@ -11,20 +11,26 @@
 // Composition: this is mostly glue. The hash, scan, mount, and lookup
 // each have their own modules and tests.
 
+use std::fs::File;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
 use crate::identify::{
     disc_hash::{content_hash, enumerate_disc_files},
+    ffprobe,
     from_scan::{detect_disc_type, detect_disc_type_with_mount},
     thediscdb::TheDiscDbClient,
     DiscType, Identity,
 };
+use crate::mvc::ebml::EbmlReader;
+use crate::mvc::mvcc::find_mvcc_bytes;
 use crate::rip::{
     iso_mount::MountedIso,
     makemkv::{scan, ScanSource},
-    makemkv_parse::MakemkvScan,
+    makemkv_parse::{
+        DiscAttributes, MakemkvScan, StreamAttributes, TitleAttributes,
+    },
 };
 
 pub struct IdentificationResult {
@@ -33,6 +39,13 @@ pub struct IdentificationResult {
     pub disc_type: DiscType,
     pub content_hash: Option<String>,
     pub identities: Vec<Identity>,
+    /// For non-disc sources (MKVs already on disk), the original file
+    /// path so downstream actions (conversion, transcode) know where to
+    /// find the input bytes.
+    pub source_file: Option<PathBuf>,
+    /// True when MakeMKV-style mvcC was detected in the source — i.e.
+    /// the file or disc carries an MVC dependent view track.
+    pub has_mvc: bool,
 }
 
 impl IdentificationResult {
@@ -69,7 +82,141 @@ pub async fn identify_physical_disc(
         disc_type,
         content_hash: hash,
         identities,
+        source_file: None,
+        has_mvc: false,
     })
+}
+
+/// Open an existing MKV file (typically a MakeMKV-extracted 3D rip) and
+/// produce an `IdentificationResult` suitable for the UI: a synthetic
+/// scan with one title representing the file, `has_mvc = true` when the
+/// MKV carries an mvcC BlockAdditionMapping. No disc scan is performed
+/// because the file is already extracted.
+pub async fn identify_mkv(mkv_path: PathBuf) -> Result<IdentificationResult> {
+    let report = ffprobe::probe(&mkv_path)
+        .await
+        .with_context(|| format!("probing {}", mkv_path.display()))?;
+
+    let has_mvc = detect_mvcc(&mkv_path);
+    let scan_data = synthesise_scan(&mkv_path, &report);
+    let disc_type = if has_mvc { DiscType::BluRay3D } else { DiscType::BluRay };
+
+    Ok(IdentificationResult {
+        scan: scan_data,
+        mount: None,
+        disc_type,
+        content_hash: None,
+        identities: Vec::new(),
+        source_file: Some(mkv_path),
+        has_mvc,
+    })
+}
+
+fn detect_mvcc(mkv_path: &std::path::Path) -> bool {
+    let Ok(file) = File::open(mkv_path) else {
+        return false;
+    };
+    let mut reader = EbmlReader::new(file);
+    matches!(find_mvcc_bytes(&mut reader), Ok(Some(_)))
+}
+
+fn synthesise_scan(mkv_path: &std::path::Path, report: &ffprobe::FfprobeReport) -> MakemkvScan {
+    let name = mkv_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned());
+    let display_name = name.clone().unwrap_or_else(|| "MKV file".to_string());
+
+    let title = TitleAttributes {
+        index: 0,
+        name: Some(display_name.clone()),
+        chapter_count: Some(report.chapters.len() as u32),
+        duration_seconds: report.duration_seconds(),
+        duration_text: report
+            .duration_seconds()
+            .map(|d| format_duration(d)),
+        display_size: report.size_bytes().map(|b| format_size(b)),
+        size_bytes: report.size_bytes(),
+        source_file: mkv_path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned()),
+        segment_count: Some(1),
+        segment_map: Some("1".to_string()),
+        output_file: Some(format!("{display_name}.mkv")),
+        language_code: None,
+        streams: report
+            .streams
+            .iter()
+            .map(stream_attributes_from)
+            .collect(),
+    };
+
+    MakemkvScan {
+        disc: DiscAttributes {
+            content_type: Some("MKV file".into()),
+            name: Some(display_name),
+            language_code: None,
+            language_name: None,
+            volume_label: name,
+        },
+        titles: vec![title],
+        makemkv_version: None,
+        messages: Vec::new(),
+    }
+}
+
+fn stream_attributes_from(s: &ffprobe::FfprobeStream) -> StreamAttributes {
+    let kind = match s.codec_type.as_str() {
+        "video" => Some("Video".to_string()),
+        "audio" => Some("Audio".to_string()),
+        "subtitle" => Some("Subtitles".to_string()),
+        other => Some(other.to_string()),
+    };
+    let video_size = match (s.width, s.height) {
+        (Some(w), Some(h)) => Some(format!("{w}x{h}")),
+        _ => None,
+    };
+    let language_code = s
+        .tags
+        .as_ref()
+        .and_then(|t| t.get("language"))
+        .cloned();
+    StreamAttributes {
+        stream: s.index,
+        kind,
+        name: s.tags.as_ref().and_then(|t| t.get("title")).cloned(),
+        language_code,
+        language_name: None,
+        codec_id: s.codec_name.clone(),
+        codec_short: s.codec_name.clone(),
+        codec_long: s.codec_long_name.clone(),
+        bitrate: None,
+        channels: s.channels,
+        sample_rate: s
+            .sample_rate
+            .as_ref()
+            .and_then(|s| s.parse::<u32>().ok()),
+        sample_size: None,
+        video_size,
+        aspect_ratio: None,
+        frame_rate: s.r_frame_rate.clone(),
+    }
+}
+
+fn format_duration(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{h}:{m:02}:{s:02}")
+}
+
+fn format_size(bytes: u64) -> String {
+    const GB: u64 = 1_000_000_000;
+    const MB: u64 = 1_000_000;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else {
+        format!("{:.0} MB", bytes as f64 / MB as f64)
+    }
 }
 
 /// Drive an ISO end-to-end: scan + mount + hash + TheDiscDB lookup. The
@@ -109,5 +256,7 @@ pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
         disc_type,
         content_hash: content_hash_value,
         identities,
+        source_file: Some(iso_path),
+        has_mvc: false,
     })
 }

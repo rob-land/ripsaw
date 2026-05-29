@@ -5,7 +5,9 @@ use adw::subclass::prelude::*;
 use gtk::glib::{self, clone};
 use gtk::{gio, CompositeTemplate};
 
-use crate::identify::pipeline::{identify_iso, identify_physical_disc, IdentificationResult};
+use crate::identify::pipeline::{
+    identify_iso, identify_mkv, identify_physical_disc, IdentificationResult,
+};
 use crate::rip::drive::{detect_mounted_optical_discs, DetectedDisc};
 use crate::ui::title_list_page::TitleListPage;
 
@@ -145,13 +147,13 @@ impl ThreeDripWindow {
             move |_target, value, _x, _y| {
                 let path = path_from_drop_value(value);
                 match path {
-                    Some(p) if is_iso_like(&p) => {
-                        window.scan_iso(p);
+                    Some(p) if !matches!(input_kind(&p), InputKind::Unknown) => {
+                        window.dispatch_input(p);
                         true
                     }
                     Some(p) => {
                         window.toast(&format!(
-                            "Not an ISO file: {}",
+                            "Not an ISO or MKV file: {}",
                             p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
                         ));
                         false
@@ -165,18 +167,33 @@ impl ThreeDripWindow {
 
     fn open_iso(&self) {
         let dialog = gtk::FileDialog::builder()
-            .title("Choose disc or ISO")
+            .title("Choose a disc image or MKV file")
             .modal(true)
             .build();
 
-        let filter = gtk::FileFilter::new();
-        filter.set_name(Some("Disc images and folders"));
-        filter.add_pattern("*.iso");
-        filter.add_pattern("*.ISO");
+        let iso_filter = gtk::FileFilter::new();
+        iso_filter.set_name(Some("Disc images (.iso)"));
+        iso_filter.add_pattern("*.iso");
+        iso_filter.add_pattern("*.ISO");
+
+        let mkv_filter = gtk::FileFilter::new();
+        mkv_filter.set_name(Some("Matroska video (.mkv)"));
+        mkv_filter.add_pattern("*.mkv");
+        mkv_filter.add_pattern("*.MKV");
+
+        let both_filter = gtk::FileFilter::new();
+        both_filter.set_name(Some("All supported inputs"));
+        both_filter.add_pattern("*.iso");
+        both_filter.add_pattern("*.ISO");
+        both_filter.add_pattern("*.mkv");
+        both_filter.add_pattern("*.MKV");
+
         let filters = gio::ListStore::new::<gtk::FileFilter>();
-        filters.append(&filter);
+        filters.append(&both_filter);
+        filters.append(&iso_filter);
+        filters.append(&mkv_filter);
         dialog.set_filters(Some(&filters));
-        dialog.set_default_filter(Some(&filter));
+        dialog.set_default_filter(Some(&both_filter));
 
         dialog.open(
             Some(self),
@@ -188,7 +205,7 @@ impl ThreeDripWindow {
                     match result {
                         Ok(file) => {
                             if let Some(path) = file.path() {
-                                window.scan_iso(path);
+                                window.dispatch_input(path);
                             } else {
                                 tracing::warn!("file dialog returned a file with no path");
                             }
@@ -203,6 +220,46 @@ impl ThreeDripWindow {
                 }
             ),
         );
+    }
+
+    fn dispatch_input(&self, path: PathBuf) {
+        match input_kind(&path) {
+            InputKind::Mkv => self.scan_mkv(path),
+            InputKind::Iso => self.scan_iso(path),
+            InputKind::Unknown => self.toast(&format!(
+                "Don't know how to open {} — supported: .iso, .mkv",
+                path.display()
+            )),
+        }
+    }
+
+    fn scan_mkv(&self, path: PathBuf) {
+        tracing::info!("identifying MKV {}", path.display());
+        self.toast(&format!("Probing {}…", path.display()));
+
+        let (tx, rx) = async_channel::bounded(1);
+        let path_for_task = path.clone();
+        crate::runtime::tokio_runtime().spawn(async move {
+            let _ = tx.send(identify_mkv(path_for_task).await).await;
+        });
+
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                match rx.recv().await {
+                    Ok(Ok(result)) => window.show_identification(result),
+                    Ok(Err(e)) => {
+                        tracing::error!("MKV identify failed: {e:#}");
+                        window.toast(&format!("Probe failed: {e}"));
+                    }
+                    Err(e) => {
+                        tracing::error!("scan channel closed: {e}");
+                        window.toast("Probe worker stopped unexpectedly");
+                    }
+                }
+            }
+        ));
     }
 
     fn scan_iso(&self, path: PathBuf) {
@@ -329,11 +386,24 @@ fn percent_decode(s: &str) -> String {
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputKind {
+    Iso,
+    Mkv,
+    Unknown,
+}
+
+fn input_kind(path: &std::path::Path) -> InputKind {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("iso") => InputKind::Iso,
+        Some(ext) if ext.eq_ignore_ascii_case("mkv") => InputKind::Mkv,
+        _ => InputKind::Unknown,
+    }
+}
+
+#[cfg(test)]
 fn is_iso_like(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("iso"))
-        .unwrap_or(false)
+    matches!(input_kind(path), InputKind::Iso)
 }
 
 #[cfg(test)]

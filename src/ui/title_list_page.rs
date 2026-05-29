@@ -318,6 +318,8 @@ fn build_pseudo_identification(
         disc_type: DiscType::BluRay,
         content_hash: None,
         identities: Vec::new(),
+        source_file: None,
+        has_mvc: false,
     }
 }
 

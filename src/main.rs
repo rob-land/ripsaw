@@ -33,11 +33,26 @@ fn main() -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--identify-disc requires a MOUNT_PATH argument"))?;
         return run_identify_disc_cli(index, PathBuf::from(mount));
     }
+    if let Some(mkv_arg_pos) = args.iter().position(|a| a == "--identify-mkv") {
+        let path = args
+            .get(mkv_arg_pos + 1)
+            .ok_or_else(|| anyhow::anyhow!("--identify-mkv requires a PATH argument"))?;
+        return run_identify_mkv_cli(PathBuf::from(path));
+    }
 
     gio::resources_register_include!("threedrip.gresource")
         .expect("register threedrip resources");
 
     threedrip::application::run()
+}
+
+fn run_identify_mkv_cli(path: PathBuf) -> Result<()> {
+    use threedrip::identify::pipeline::identify_mkv;
+    let result = threedrip::runtime::tokio_runtime()
+        .block_on(identify_mkv(path.clone()))?;
+    print_identification(&format!("mkv:{}", path.display()), &path, &result);
+    println!("has_mvc          = {}", result.has_mvc);
+    Ok(())
 }
 
 fn run_identify_disc_cli(index: u32, mount: PathBuf) -> Result<()> {
