@@ -9,6 +9,17 @@ template $ThreeDripWindow: Adw.ApplicationWindow {
   Adw.ToolbarView {
     [top]
     Adw.HeaderBar {
+      [start]
+      Button {
+        action-name: "win.open-iso";
+        styles ["suggested-action"]
+
+        child: Adw.ButtonContent {
+          icon-name: "document-open-symbolic";
+          label: _("Open ISO");
+        };
+      }
+
       [end]
       MenuButton menu_button {
         primary: true;
@@ -18,16 +29,18 @@ template $ThreeDripWindow: Adw.ApplicationWindow {
       }
     }
 
-    content: Adw.NavigationView nav {
-      Adw.NavigationPage {
-        title: _("Welcome");
+    content: Adw.ToastOverlay toasts {
+      child: Adw.NavigationView nav {
+        Adw.NavigationPage {
+          title: _("Welcome");
 
-        Adw.StatusPage {
-          icon-name: "media-optical-symbolic";
-          title: _("Insert a disc to begin");
-          description: _("3drip will identify the disc, look up metadata, and rip the titles you choose to your media library.");
+          Adw.StatusPage {
+            icon-name: "media-optical-symbolic";
+            title: _("Insert a disc or open an ISO");
+            description: _("3drip will scan it, list the titles, and (eventually) rip the ones you pick to your media library.");
+          }
         }
-      }
+      };
     };
   }
 }

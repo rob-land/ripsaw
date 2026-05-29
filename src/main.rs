@@ -8,5 +8,8 @@ fn main() -> Result<()> {
         )
         .init();
 
+    gio::resources_register_include!("threedrip.gresource")
+        .expect("register threedrip resources");
+
     threedrip::application::run()
 }
