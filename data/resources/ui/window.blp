@@ -6,53 +6,53 @@ template $ThreeDripWindow: Adw.ApplicationWindow {
   default-height: 640;
   title: _("3drip");
 
-  Adw.ToolbarView {
-    [top]
-    Adw.HeaderBar {
-      [start]
-      Button {
-        action-name: "win.open-disc";
-        tooltip-text: _("Scan a disc in an optical drive");
+  Adw.ToastOverlay toasts {
+    child: Adw.NavigationView nav {
+      Adw.NavigationPage {
+        title: _("Welcome");
 
-        child: Adw.ButtonContent {
-          icon-name: "media-optical-symbolic";
-          label: _("Open Disc");
-        };
-      }
+        Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {
+            [start]
+            Button {
+              action-name: "win.open-disc";
+              tooltip-text: _("Scan a disc in an optical drive");
 
-      [start]
-      Button {
-        action-name: "win.open-iso";
-        styles ["suggested-action"]
-        tooltip-text: _("Open a disc image (.iso) file");
+              child: Adw.ButtonContent {
+                icon-name: "media-optical-symbolic";
+                label: _("Open Disc");
+              };
+            }
 
-        child: Adw.ButtonContent {
-          icon-name: "document-open-symbolic";
-          label: _("Open ISO");
-        };
-      }
+            [start]
+            Button {
+              action-name: "win.open-iso";
+              styles ["suggested-action"]
+              tooltip-text: _("Open a disc image (.iso) file");
 
-      [end]
-      MenuButton menu_button {
-        primary: true;
-        icon-name: "open-menu-symbolic";
-        tooltip-text: _("Main Menu");
-        menu-model: primary_menu;
-      }
-    }
+              child: Adw.ButtonContent {
+                icon-name: "document-open-symbolic";
+                label: _("Open ISO");
+              };
+            }
 
-    content: Adw.ToastOverlay toasts {
-      child: Adw.NavigationView nav {
-        Adw.NavigationPage {
-          title: _("Welcome");
+            [end]
+            MenuButton {
+              primary: true;
+              icon-name: "open-menu-symbolic";
+              tooltip-text: _("Main Menu");
+              menu-model: primary_menu;
+            }
+          }
 
-          Adw.StatusPage {
+          content: Adw.StatusPage {
             icon-name: "media-optical-symbolic";
             title: _("Insert a disc or open an ISO");
             description: _("3drip will scan it, list the titles, and (eventually) rip the ones you pick to your media library.");
-          }
+          };
         }
-      };
+      }
     };
   }
 }
