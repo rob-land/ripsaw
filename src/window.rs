@@ -103,10 +103,9 @@ impl ThreeDripWindow {
             disc.device.display(),
             disc.mount_path.display(),
         );
-        self.toast(&format!(
-            "Scanning {} ({})...",
-            disc.label.as_deref().unwrap_or("disc"),
-            disc.device.display(),
+        let label = disc.label.clone().unwrap_or_else(|| "disc".to_string());
+        let scanning_page = self.push_scanning_page(&format!(
+            "Scanning {label}…",
         ));
 
         let (tx, rx) = async_channel::bounded(1);
@@ -120,7 +119,9 @@ impl ThreeDripWindow {
             #[weak(rename_to = window)]
             self,
             async move {
-                match rx.recv().await {
+                let result = rx.recv().await;
+                window.dismiss_scanning_page(&scanning_page);
+                match result {
                     Ok(Ok(result)) => window.show_identification(result),
                     Ok(Err(e)) => {
                         tracing::error!("identify failed: {e:#}");
@@ -235,7 +236,11 @@ impl ThreeDripWindow {
 
     fn scan_mkv(&self, path: PathBuf) {
         tracing::info!("identifying MKV {}", path.display());
-        self.toast(&format!("Probing {}…", path.display()));
+        let display_name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let scanning_page = self.push_scanning_page(&format!("Probing {display_name}…"));
 
         let (tx, rx) = async_channel::bounded(1);
         let path_for_task = path.clone();
@@ -247,7 +252,9 @@ impl ThreeDripWindow {
             #[weak(rename_to = window)]
             self,
             async move {
-                match rx.recv().await {
+                let result = rx.recv().await;
+                window.dismiss_scanning_page(&scanning_page);
+                match result {
                     Ok(Ok(result)) => window.show_identification(result),
                     Ok(Err(e)) => {
                         tracing::error!("MKV identify failed: {e:#}");
@@ -264,7 +271,11 @@ impl ThreeDripWindow {
 
     fn scan_iso(&self, path: PathBuf) {
         tracing::info!("identifying {}", path.display());
-        self.toast(&format!("Scanning {}...", path.display()));
+        let display_name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let scanning_page = self.push_scanning_page(&format!("Scanning {display_name}…"));
 
         let (tx, rx) = async_channel::bounded(1);
         let path_for_task = path.clone();
@@ -276,7 +287,9 @@ impl ThreeDripWindow {
             #[weak(rename_to = window)]
             self,
             async move {
-                match rx.recv().await {
+                let result = rx.recv().await;
+                window.dismiss_scanning_page(&scanning_page);
+                match result {
                     Ok(Ok(result)) => window.show_identification(result),
                     Ok(Err(e)) => {
                         tracing::error!("identify failed: {e:#}");
@@ -289,6 +302,53 @@ impl ThreeDripWindow {
                 }
             }
         ));
+    }
+
+    /// Push a transient "scanning…" NavigationPage with a centered spinner
+    /// and the supplied message. Returned page should be passed to
+    /// `dismiss_scanning_page` when the work finishes so the page is removed
+    /// from the navigation stack before any next page is pushed.
+    fn push_scanning_page(&self, message: &str) -> adw::NavigationPage {
+        let spinner = adw::Spinner::new();
+        spinner.set_size_request(64, 64);
+
+        let label = gtk::Label::builder()
+            .label(message)
+            .css_classes(["title-2"])
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .build();
+
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .spacing(18)
+            .build();
+        content.append(&spinner);
+        content.append(&label);
+
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&adw::HeaderBar::new());
+        toolbar.set_content(Some(&content));
+
+        let page = adw::NavigationPage::builder()
+            .title("Scanning")
+            .child(&toolbar)
+            .can_pop(false)
+            .build();
+        self.imp().nav.push(&page);
+        page
+    }
+
+    /// Pop the scanning page if it's still the current one. No-op when
+    /// the page was already replaced/popped (e.g. the user closed the
+    /// window mid-scan).
+    fn dismiss_scanning_page(&self, page: &adw::NavigationPage) {
+        let nav = self.imp().nav.get();
+        if nav.visible_page().as_ref() == Some(page) {
+            nav.pop();
+        }
     }
 
     pub(crate) fn show_identification(&self, result: IdentificationResult) {
