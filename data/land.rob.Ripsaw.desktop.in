@@ -1,10 +1,10 @@
 [Desktop Entry]
-Name=3drip
+Name=Ripsaw
 GenericName=Disc Ripper
 Comment=Rip DVDs, Blu-rays, and 4K UHD discs to your media library
 Categories=AudioVideo;Video;
 Icon=@app-id@
-Exec=threedrip %U
+Exec=ripsaw %U
 Terminal=false
 Type=Application
 StartupNotify=true

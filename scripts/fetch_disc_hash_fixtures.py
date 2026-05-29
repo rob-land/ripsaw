@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 REPO = "TheDiscDb/data"
-OUT = Path("/home/rob/projects/3drip/tests/fixtures/disc_hash")
+OUT = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "disc_hash"
 
 def gh_fetch(repo_path):
     proc = subprocess.run(

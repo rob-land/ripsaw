@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>@app-id@</id>
 
-  <name>3drip</name>
+  <name>Ripsaw</name>
   <summary>Rip DVDs, Blu-rays, and 4K UHD discs with full Jellyfin/Plex naming</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
@@ -10,7 +10,7 @@
 
   <description>
     <p>
-      3drip is a GTK4/libadwaita frontend for MakeMKV that turns a physical
+      Ripsaw is a GTK4/libadwaita frontend for MakeMKV that turns a physical
       disc into properly-named files in your media library. It identifies
       discs via TheDiscDB, fills in TMDB/IMDB IDs, lays files out per
       Jellyfin, Plex, Kodi, or Emby conventions, and optionally transcodes
@@ -29,11 +29,11 @@
 
   <launchable type="desktop-id">@app-id@.desktop</launchable>
 
-  <url type="homepage">https://github.com/threedrip/threedrip</url>
-  <url type="bugtracker">https://github.com/threedrip/threedrip/issues</url>
+  <url type="homepage">https://git.rob.land/rob/ripsaw</url>
+  <url type="bugtracker">https://git.rob.land/rob/ripsaw/issues</url>
 
-  <developer id="dev.threedrip">
-    <name>The 3drip authors</name>
+  <developer id="land.rob">
+    <name>The Ripsaw authors</name>
   </developer>
 
   <requires>

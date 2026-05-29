@@ -16,7 +16,7 @@ endif
 
 cargo_build = custom_target(
   'cargo-build',
-  output: 'threedrip',
+  output: 'ripsaw',
   build_always_stale: true,
   command: [
     cargo, 'build',

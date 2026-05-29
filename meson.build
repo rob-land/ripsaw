@@ -1,5 +1,5 @@
 project(
-  'threedrip',
+  'ripsaw',
   'rust',
   version: '0.1.0',
   license: 'GPL-3.0-or-later',
@@ -10,14 +10,14 @@ project(
 i18n = import('i18n')
 gnome = import('gnome')
 
-app_id = get_option('profile') == 'development' ? 'dev.threedrip.ThreeDrip.Devel' : 'dev.threedrip.ThreeDrip'
+app_id = get_option('profile') == 'development' ? 'land.rob.Ripsaw.Devel' : 'land.rob.Ripsaw'
 profile = get_option('profile')
 
 prefix = get_option('prefix')
 bindir = prefix / get_option('bindir')
 datadir = prefix / get_option('datadir')
 localedir = prefix / get_option('localedir')
-pkgdatadir = datadir / 'threedrip'
+pkgdatadir = datadir / 'ripsaw'
 
 cargo = find_program('cargo', required: true)
 blueprint_compiler = find_program('blueprint-compiler', required: true)
