@@ -208,6 +208,7 @@ mod tests {
             index: 2,
             role: TitleRole::BehindTheScenes,
             display_title: "Making of Avatar".into(),
+            source_file: None,
             season: None,
             episode: None,
         };

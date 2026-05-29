@@ -164,6 +164,7 @@ mod tests {
             index: 2,
             role: TitleRole::Trailer,
             display_title: "Theatrical Trailer".into(),
+            source_file: None,
             season: None,
             episode: None,
         };
@@ -184,6 +185,7 @@ mod tests {
             index: 3,
             role: TitleRole::BehindTheScenes,
             display_title: "Making of Avatar".into(),
+            source_file: None,
             season: None,
             episode: None,
         };

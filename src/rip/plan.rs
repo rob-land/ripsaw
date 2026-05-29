@@ -159,7 +159,6 @@ pub fn plan_rip(
     episode_titles_by_index: &HashMap<u32, String>,
 ) -> Vec<PlannedTitle> {
     let main_index = main_title_index(identification);
-    let role_for = |idx: u32| role_for_title(idx, identification, main_index);
     let identity_titles: &[TitleIdentity] = identification
         .identities
         .first()
@@ -175,8 +174,14 @@ pub fn plan_rip(
                 .iter()
                 .find(|t| t.index == *idx)
                 .map(|t| {
-                    let role = role_for(t.index);
-                    let identity = identity_titles.iter().find(|i| i.index == t.index);
+                    let identity = match_identity_for(identity_titles, t);
+                    let role = identity.map(|i| i.role).unwrap_or_else(|| {
+                        if Some(t.index) == main_index {
+                            TitleRole::Main
+                        } else {
+                            TitleRole::Other
+                        }
+                    });
                     let is_series_episode = matches!(
                         naming,
                         Some(n) if n.content_kind == DiscContentKind::Series
@@ -196,6 +201,25 @@ pub fn plan_rip(
                 })
         })
         .collect()
+}
+
+/// Match a MakeMKV title to its TheDiscDB identity by `source_file`,
+/// since the two indices are independent. Falls back to comparing
+/// indices when sourceFile is missing on either side (defensive --
+/// real responses set it).
+pub fn match_identity_for<'a>(
+    identities: &'a [TitleIdentity],
+    title: &TitleAttributes,
+) -> Option<&'a TitleIdentity> {
+    if let Some(src) = title.source_file.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(found) = identities
+            .iter()
+            .find(|i| i.source_file.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(src)))
+        {
+            return Some(found);
+        }
+    }
+    identities.iter().find(|i| i.index == title.index)
 }
 
 fn plan_one_title(
@@ -300,6 +324,7 @@ fn scheme_path(
                 index: t.index,
                 role: other_role,
                 display_title,
+                source_file: t.source_file.clone(),
                 season: None,
                 episode: None,
             };
@@ -316,6 +341,17 @@ fn scheme_path(
 fn main_title_index(identification: &IdentificationResult) -> Option<u32> {
     if let Some(identity) = identification.identities.first() {
         if let Some(main) = identity.titles.iter().find(|t| t.role == TitleRole::Main) {
+            // Match TheDiscDB's main title to a MakeMKV title by
+            // sourceFile (the two indices are independent orderings).
+            if let Some(src) = main.source_file.as_deref().filter(|s| !s.is_empty()) {
+                if let Some(t) = identification.scan.titles.iter().find(|t| {
+                    t.source_file
+                        .as_deref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(src))
+                }) {
+                    return Some(t.index);
+                }
+            }
             return Some(main.index);
         }
     }

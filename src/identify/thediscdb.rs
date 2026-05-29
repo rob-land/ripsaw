@@ -155,6 +155,7 @@ fn title_identity_from(t: &TitleNode) -> TitleIdentity {
         index: t.index,
         role: parse_role(item.and_then(|i| i.item_type.as_deref())),
         display_title: item.and_then(|i| i.title.clone()).unwrap_or_default(),
+        source_file: t.source_file.clone(),
         season: item.and_then(|i| i.season),
         episode: item.and_then(|i| i.episode),
     }

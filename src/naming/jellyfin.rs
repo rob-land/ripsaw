@@ -256,6 +256,7 @@ mod tests {
             index: 2,
             role: TitleRole::Trailer,
             display_title: "Theatrical Trailer".into(),
+            source_file: None,
             season: None,
             episode: None,
         };
@@ -276,6 +277,7 @@ mod tests {
             index: 0,
             role: TitleRole::Main,
             display_title: "Avatar".into(),
+            source_file: None,
             season: None,
             episode: None,
         };

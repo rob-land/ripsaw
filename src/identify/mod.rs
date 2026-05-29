@@ -150,6 +150,13 @@ pub struct TitleIdentity {
     pub display_title: String,
     pub season: Option<u32>,
     pub episode: Option<u32>,
+    /// MakeMKV's source-file name for this title (e.g. "00342.m2ts"
+    /// or "00500.mpls"). Used as the join key against
+    /// `TitleAttributes.source_file` since TheDiscDB's per-title
+    /// `index` is its own ordering and does NOT line up with
+    /// MakeMKV's title index.
+    #[serde(default)]
+    pub source_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

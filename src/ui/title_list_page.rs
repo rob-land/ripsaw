@@ -165,7 +165,9 @@ impl TitleListPage {
         let relations = analyze_relations(&pairs);
 
         // First identity (highest-confidence TheDiscDB match) provides
-        // per-title roles + display titles.
+        // per-title roles + display titles. Match by sourceFile, not
+        // index -- TheDiscDB's index is its own ordering and does not
+        // line up with MakeMKV's title index.
         let identities = self.imp().identities.borrow();
         let identity_titles: &[TitleIdentity] = identities
             .first()
@@ -173,7 +175,7 @@ impl TitleListPage {
             .unwrap_or(&[]);
 
         for (t, relation) in scan.titles.iter().zip(relations.iter()) {
-            let identity = identity_titles.iter().find(|i| i.index == t.index);
+            let identity = crate::rip::plan::match_identity_for(identity_titles, t);
             let role = identity.map(|i| i.role);
             let display_title = identity
                 .map(|i| i.display_title.as_str())
