@@ -124,6 +124,23 @@ pub struct Identity {
     pub release_slug: String,
     pub disc_index: u32,
     pub titles: Vec<TitleIdentity>,
+    /// Display title of the matched media item (e.g. "Skyfall").
+    /// Pulled from TheDiscDB's `MediaItem.title`. May be empty when
+    /// missing upstream.
+    #[serde(default)]
+    pub item_title: String,
+    /// Release year of the media item (e.g. 2012). `None` when
+    /// TheDiscDB has no year on the matched record.
+    #[serde(default)]
+    pub year: Option<u32>,
+    /// TheDiscDB external IDs (TMDb, IMDb, TVDb) when present on
+    /// the matched MediaItem.
+    #[serde(default)]
+    pub tmdb_id: Option<u64>,
+    #[serde(default)]
+    pub imdb_id: Option<String>,
+    #[serde(default)]
+    pub tvdb_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

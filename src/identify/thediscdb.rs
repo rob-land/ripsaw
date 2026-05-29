@@ -30,6 +30,7 @@ query GetDiscDetailByContentHash($hash: String) {
   ) {
     nodes {
       id title year slug imageUrl type
+      externalids { tmdb imdb tvdb }
       releases {
         slug isbn locale regionCode year upc title imageUrl
         discs(order: { index: ASC }) {
@@ -108,11 +109,35 @@ pub fn parse_lookup_response(json: &str, expected_hash: &str) -> Result<Vec<Iden
                 if !hashes_equal(disc_hash, expected_hash) {
                     continue;
                 }
+                let tmdb_id = media_item
+                    .external_ids
+                    .as_ref()
+                    .and_then(|e| e.tmdb.as_deref())
+                    .and_then(|s| s.trim().parse::<u64>().ok());
+                let imdb_id = media_item
+                    .external_ids
+                    .as_ref()
+                    .and_then(|e| e.imdb.clone())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let tvdb_id = media_item
+                    .external_ids
+                    .as_ref()
+                    .and_then(|e| e.tvdb.clone())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
                 out.push(Identity {
                     media_item_id: media_item.id.to_string(),
                     release_slug: release.slug.clone(),
                     disc_index: disc.index,
                     titles: disc.titles.iter().map(title_identity_from).collect(),
+                    item_title: media_item.title.clone().unwrap_or_default(),
+                    year: media_item
+                        .year
+                        .and_then(|y| if y > 0 { Some(y as u32) } else { None }),
+                    tmdb_id,
+                    imdb_id,
+                    tvdb_id,
                 });
             }
         }
@@ -179,14 +204,27 @@ struct MediaItemConnection {
 #[serde(rename_all = "camelCase")]
 struct MediaItemNode {
     id: i64,
-    #[allow(dead_code)] title: Option<String>,
-    #[allow(dead_code)] year: Option<i32>,
+    title: Option<String>,
+    year: Option<i32>,
     #[allow(dead_code)] slug: Option<String>,
     #[allow(dead_code)] image_url: Option<String>,
     #[allow(dead_code)]
     #[serde(rename = "type")]
     item_type: Option<String>,
+    #[serde(default, rename = "externalids")]
+    external_ids: Option<ExternalIdsNode>,
     #[serde(default)] releases: Vec<ReleaseNode>,
+}
+
+#[derive(Deserialize, Default)]
+struct ExternalIdsNode {
+    /// TheDiscDB stores all three ID flavours as strings; we keep
+    /// TMDB as numeric since the canonical form is `tmdb:N`, but
+    /// preserve IMDb/TVDb as strings (IMDb is `ttN` and TVDb is
+    /// sometimes alphanumeric).
+    #[serde(default)] tmdb: Option<String>,
+    #[serde(default)] imdb: Option<String>,
+    #[serde(default)] tvdb: Option<String>,
 }
 
 #[derive(Deserialize)]

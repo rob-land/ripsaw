@@ -582,12 +582,19 @@ impl TitleListPage {
         } else {
             DiscContentKind::Movie
         };
-        // Pick up the user's edited title and season from the override rows.
+        // First TheDiscDB match (if any) supplies year + external IDs.
+        // For the human-facing title we prefer the user's edit, falling
+        // back to the matched item title and then the disc label.
+        let primary_identity = identification_for_plan.identities.first().cloned();
         let user_title = self.imp().title_override.text().to_string();
-        let chosen_title = if user_title.trim().is_empty() {
-            disc_name.clone()
-        } else {
+        let chosen_title = if !user_title.trim().is_empty() {
             user_title
+        } else {
+            primary_identity
+                .as_ref()
+                .map(|i| i.item_title.clone())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| disc_name.clone())
         };
         let chosen_season = self.imp().season_override.value().max(0.0) as u32;
         let mut naming_opts = naming_opts_for_unidentified(
@@ -596,6 +603,11 @@ impl TitleListPage {
             content_kind,
             &chosen_title,
         );
+        if let Some(identity) = primary_identity.as_ref() {
+            naming_opts.disc_year = identity.year;
+            naming_opts.tmdb_id = identity.tmdb_id;
+            naming_opts.imdb_id = identity.imdb_id.clone();
+        }
         if content_kind == DiscContentKind::Series {
             naming_opts.season = chosen_season.max(1);
         }
