@@ -67,6 +67,37 @@ impl ThreeDripWindow {
             })
             .build();
         self.add_action_entries([open_iso]);
+        self.setup_drop_target();
+    }
+
+    fn setup_drop_target(&self) {
+        // Accept GFile (and the URI-list fallback) anywhere on the window.
+        let target = gtk::DropTarget::new(gio::File::static_type(), gtk::gdk::DragAction::COPY);
+        target.set_types(&[gio::File::static_type(), glib::types::Type::STRING]);
+        target.connect_drop(clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[upgrade_or]
+            false,
+            move |_target, value, _x, _y| {
+                let path = path_from_drop_value(value);
+                match path {
+                    Some(p) if is_iso_like(&p) => {
+                        window.scan_iso(p);
+                        true
+                    }
+                    Some(p) => {
+                        window.toast(&format!(
+                            "Not an ISO file: {}",
+                            p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+                        ));
+                        false
+                    }
+                    None => false,
+                }
+            }
+        ));
+        self.add_controller(target);
     }
 
     fn open_iso(&self) {
@@ -187,6 +218,83 @@ impl ThreeDripWindow {
     fn toast(&self, message: &str) {
         let toast = adw::Toast::builder().title(message).timeout(4).build();
         self.imp().toasts.add_toast(toast);
+    }
+}
+
+fn path_from_drop_value(value: &gtk::glib::Value) -> Option<PathBuf> {
+    if let Ok(file) = value.get::<gio::File>() {
+        return file.path();
+    }
+    if let Ok(text) = value.get::<&str>() {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(path) = trimmed.strip_prefix("file://") {
+                return Some(PathBuf::from(percent_decode(path)));
+            }
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    None
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hi = chars.next();
+            let lo = chars.next();
+            match (hi, lo) {
+                (Some(h), Some(l)) => {
+                    if let Ok(byte) = u8::from_str_radix(&format!("{h}{l}"), 16) {
+                        out.push(byte as char);
+                        continue;
+                    }
+                    out.push('%');
+                    out.push(h);
+                    out.push(l);
+                }
+                _ => out.push('%'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn is_iso_like(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("iso"))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_handles_space() {
+        assert_eq!(percent_decode("Jurassic%20Park%20(1993).iso"), "Jurassic Park (1993).iso");
+    }
+
+    #[test]
+    fn percent_decode_passes_through_invalid_escape() {
+        assert_eq!(percent_decode("a%2Zb"), "a%2Zb");
+    }
+
+    #[test]
+    fn is_iso_like_recognises_iso_case_insensitive() {
+        use std::path::Path;
+        assert!(is_iso_like(Path::new("foo.iso")));
+        assert!(is_iso_like(Path::new("FOO.ISO")));
+        assert!(is_iso_like(Path::new("/abs/path/foo.iso")));
+        assert!(!is_iso_like(Path::new("foo.mkv")));
+        assert!(!is_iso_like(Path::new("foo")));
     }
 }
 
