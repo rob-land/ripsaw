@@ -28,7 +28,7 @@ pub struct YuvFrame {
 }
 
 pub fn detect_available() -> Vec<DecoderBackend> {
-    todo!("probe for threedrip-mvcdec, ldecod, wine+FRIM; return what's installed")
+    todo!("probe for ripsaw-mvcdec, ldecod, wine+FRIM; return what's installed")
 }
 
 pub fn open(_backend: DecoderBackend) -> anyhow::Result<Box<dyn MvcDecoder>> {

@@ -12,15 +12,16 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use threedrip::mvc::ebml::EbmlReader;
-use threedrip::mvc::mvcc::{find_mvcc_bytes, parse, MvcDecoderConfigurationRecord};
-use threedrip::mvc::nal::{parse_nal_unit_header, NAL_SUBSET_SPS};
-use threedrip::mvc::rbsp::extract_rbsp;
+use ripsaw::mvc::ebml::EbmlReader;
+use ripsaw::mvc::mvcc::{find_mvcc_bytes, parse, MvcDecoderConfigurationRecord};
+use ripsaw::mvc::nal::{parse_nal_unit_header, NAL_SUBSET_SPS};
+use ripsaw::mvc::rbsp::extract_rbsp;
 
 fn sample_mkv() -> Option<PathBuf> {
-    let path = Path::new("/home/rob/projects/3drip/samples/3D_LR_Pattern.mkv");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/3D_LR_Pattern.mkv");
     if path.is_file() {
-        Some(path.to_path_buf())
+        Some(path)
     } else {
         None
     }

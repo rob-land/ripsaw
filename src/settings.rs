@@ -1,5 +1,5 @@
-// User settings: persisted at $XDG_CONFIG_HOME/threedrip/config.json
-// (`~/.config/threedrip/config.json` typically). Plain JSON for now —
+// User settings: persisted at $XDG_CONFIG_HOME/ripsaw/config.json
+// (`~/.config/ripsaw/config.json` typically). Plain JSON for now —
 // migrating to GSettings later is mechanical once we ship a proper
 // install step that registers our gschema.
 
@@ -128,7 +128,7 @@ fn config_path() -> Result<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .ok_or_else(|| anyhow::anyhow!("neither XDG_CONFIG_HOME nor HOME is set"))?;
-    Ok(base.join("threedrip").join("config.json"))
+    Ok(base.join("ripsaw").join("config.json"))
 }
 
 #[cfg(test)]

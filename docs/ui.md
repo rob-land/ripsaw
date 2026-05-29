@@ -1,6 +1,6 @@
 # UI design
 
-3drip is a libadwaita-first GTK4 application. It targets GNOME 46 / 47
+Ripsaw is a libadwaita-first GTK4 application. It targets GNOME 46 / 47
 HIG: adaptive layouts, `AdwApplicationWindow`, `AdwNavigationView`,
 `AdwToolbarView`, `AdwPreferencesWindow`, `AdwStatusPage`, and
 `AdwBanner`.
@@ -220,7 +220,7 @@ gone) without blocking.
 
 ## Application-level UI
 
-- **Application menu**: Preferences, Keyboard Shortcuts, About 3drip
+- **Application menu**: Preferences, Keyboard Shortcuts, About Ripsaw
 - **Preferences**:
   - Default naming scheme
   - Default library roots

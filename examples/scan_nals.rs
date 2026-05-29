@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use threedrip::mvc::annexb::NalSplitter;
-use threedrip::mvc::nal::parse_nal_unit_header;
+use ripsaw::mvc::annexb::NalSplitter;
+use ripsaw::mvc::nal::parse_nal_unit_header;
 
 fn type_name(t: u8) -> &'static str {
     match t {

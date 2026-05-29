@@ -7,7 +7,7 @@ pub fn builtin() -> Vec<Preset> {
 }
 
 pub fn user_dir() -> std::path::PathBuf {
-    todo!("dirs::data_dir().join('threedrip').join('presets')")
+    todo!("dirs::data_dir().join('ripsaw').join('presets')")
 }
 
 pub fn load_user() -> anyhow::Result<Vec<Preset>> {

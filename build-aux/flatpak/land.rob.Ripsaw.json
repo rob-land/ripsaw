@@ -1,7 +1,7 @@
 {
   "_comment": "Stub Flatpak manifest. MakeMKV is not bundled — invoked on the host via flatpak-spawn --host. See docs/architecture.md § Sandboxing & Flatpak.",
 
-  "id": "dev.threedrip.ThreeDrip",
+  "id": "land.rob.Ripsaw",
   "runtime": "org.gnome.Platform",
   "runtime-version": "47",
   "sdk": "org.gnome.Sdk",
@@ -9,7 +9,7 @@
     "org.freedesktop.Sdk.Extension.rust-stable",
     "org.freedesktop.Sdk.Extension.llvm18"
   ],
-  "command": "threedrip",
+  "command": "ripsaw",
 
   "finish-args": [
     "--share=network",
@@ -30,7 +30,7 @@
   "build-options": {
     "append-path": "/usr/lib/sdk/rust-stable/bin",
     "env": {
-      "CARGO_HOME": "/run/build/threedrip/cargo"
+      "CARGO_HOME": "/run/build/ripsaw/cargo"
     }
   },
 
@@ -48,7 +48,7 @@
       ]
     },
     {
-      "name": "threedrip",
+      "name": "ripsaw",
       "buildsystem": "meson",
       "sources": [
         {

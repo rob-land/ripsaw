@@ -55,7 +55,7 @@ fingerprint" below for the full signal set.
    ┌────────────────────────────────────────────┐
    │ assemble DiscFingerprint (all signals)     │
    │ persist to                                 │
-   │ $XDG_CACHE_HOME/threedrip/scans/<hash>.json│
+   │ $XDG_CACHE_HOME/ripsaw/scans/<hash>.json│
    └────────────────────┬───────────────────────┘
                         ▼
    ┌────────────────────────────────────────────┐
@@ -127,7 +127,7 @@ is computed at zero extra I/O cost.
 ### Persistence
 
 The fingerprint is written to
-`$XDG_CACHE_HOME/threedrip/scans/<content_hash>.json` at end of scan,
+`$XDG_CACHE_HOME/ripsaw/scans/<content_hash>.json` at end of scan,
 **before** any lookup. This means:
 
 - A scan is never wasted; lookup retries are free.
@@ -312,21 +312,21 @@ If TheDiscDB returns zero matches:
    - open a pre-filled GitHub PR via the web (no API key needed), or
    - POST to a TheDiscDB contribution endpoint if/when one exists.
 
-The PR route is the safer day-one approach: no auth secrets in 3drip,
+The PR route is the safer day-one approach: no auth secrets in Ripsaw,
 and the user retains review of what gets sent. Implementation lives in
 `src/identify/submit.rs`.
 
 When a future lookup mechanism arrives (e.g. UPC-indexed search), the
 same fingerprint records already cached under
-`$XDG_CACHE_HOME/threedrip/scans/` can be re-queried without the disc
+`$XDG_CACHE_HOME/ripsaw/scans/` can be re-queried without the disc
 being inserted.
 
 ## Caching
 
 - Disc hash → identity response is cached under
-  `$XDG_CACHE_HOME/threedrip/identify/<hash>.json` for `7d`.
+  `$XDG_CACHE_HOME/ripsaw/identify/<hash>.json` for `7d`.
 - TMDB lookups cache by `(tmdb_id, language)` under
-  `$XDG_CACHE_HOME/threedrip/tmdb/`.
+  `$XDG_CACHE_HOME/ripsaw/tmdb/`.
 - A cache-busting "re-identify" action is exposed in the UI.
 
 ## Error handling

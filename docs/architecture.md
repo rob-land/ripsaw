@@ -1,6 +1,6 @@
 # Architecture
 
-3drip is a single GTK4/libadwaita application that orchestrates external
+Ripsaw is a single GTK4/libadwaita application that orchestrates external
 command-line tools (`makemkvcon`, `ffmpeg`, `mkvmerge`, and an MVC decoder)
 and queries remote HTTP/GraphQL services (TheDiscDB, TMDB) to drive a
 disc-to-media-library pipeline.
@@ -84,7 +84,7 @@ struct Job {
 }
 ```
 
-Jobs are persisted as JSON under `$XDG_DATA_HOME/threedrip/jobs/<uuid>.json`
+Jobs are persisted as JSON under `$XDG_DATA_HOME/ripsaw/jobs/<uuid>.json`
 so that the app can resume after a crash/reboot, and so the user can audit
 what was done. The Job state machine advances by running stages
 sequentially; each stage is a `tokio::task::JoinHandle`.
@@ -120,7 +120,7 @@ The app targets Flatpak. Key portal needs:
 Tool execution outside the sandbox is done via the Flatpak host-command
 spawn — `makemkvcon` cannot reasonably be bundled because of its
 licensing and beta-key lifecycle, so users install it on the host and
-3drip invokes it via `flatpak-spawn --host`.
+Ripsaw invokes it via `flatpak-spawn --host`.
 
 ## Logging
 

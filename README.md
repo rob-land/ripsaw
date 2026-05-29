@@ -1,4 +1,4 @@
-# 3drip
+# Ripsaw
 
 A Linux-native, GTK4 / libadwaita frontend around MakeMKV for ripping DVDs,
 Blu-rays, and 4K UHD discs — with disc identification via
@@ -8,8 +8,8 @@ transcoding with content-type presets, and 3D MVC Blu-ray conversion to
 SBS/OU/etc.
 
 The project name is read as "3D rip". The reverse-DNS application ID
-(`dev.threedrip.ThreeDrip`) is a placeholder and should be updated to an
-`io.github.<owner>.ThreeDrip` form once the canonical repo location is
+(`land.rob.Ripsaw`) is a placeholder and should be updated to an
+`io.github.<owner>.Ripsaw` form once the canonical repo location is
 decided.
 
 ## Status

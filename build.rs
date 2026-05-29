@@ -3,7 +3,7 @@
 //   2. Bundle the .ui files into a binary .gresource.
 //
 // The .gresource lands in $OUT_DIR and is embedded into the final binary via
-// `gio::resources_register_include!("threedrip.gresource")` in main.rs.
+// `gio::resources_register_include!("ripsaw.gresource")` in main.rs.
 
 use std::env;
 use std::fs;
@@ -78,7 +78,7 @@ fn main() {
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <gresources>
-  <gresource prefix="/dev/threedrip/ThreeDrip">
+  <gresource prefix="/land/rob/Ripsaw">
 {files}
   </gresource>
 </gresources>
@@ -89,7 +89,7 @@ fn main() {
     glib_build_tools::compile_resources(
         &[&out_dir],
         gresource_xml_path.to_str().expect("utf-8 path"),
-        "threedrip.gresource",
+        "ripsaw.gresource",
     );
 
     println!("cargo:rerun-if-changed=build.rs");

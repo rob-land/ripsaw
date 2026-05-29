@@ -80,5 +80,5 @@ will not replicate that limitation.
 The Britz fork is LGPL v2.1+ (same as upstream FFmpeg 0.11). Code
 ported from `h264_mvc.{c,h}` into a forward-ported decoder retains
 that licence and must be marked accordingly in the new file headers.
-3drip's GPL-3-or-later application licence is compatible with linking
+Ripsaw's GPL-3-or-later application licence is compatible with linking
 against LGPL libav* libraries.

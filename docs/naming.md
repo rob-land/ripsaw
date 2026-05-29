@@ -36,7 +36,7 @@ Movies:
 For 4K/2D/3D variants in the same folder, Jellyfin's
 [multiple versions](https://jellyfin.org/docs/general/server/media/movies/#multiple-versions-of-a-movie)
 convention suffixes the file: `Avatar (2009) - 4K.mkv`,
-`Avatar (2009) - 3D.mkv`. 3drip uses these suffixes when emitting more
+`Avatar (2009) - 3D.mkv`. Ripsaw uses these suffixes when emitting more
 than one main-feature variant per title.
 
 Series:
@@ -65,7 +65,7 @@ Movies:
 
 Plex's extras subfolders are case-sensitive and use the same set as
 Jellyfin (`Behind The Scenes`, `Deleted Scenes`, `Featurettes`, `Interviews`,
-`Scenes`, `Shorts`, `Trailers`, `Other`). 3drip emits both file *and*
+`Scenes`, `Shorts`, `Trailers`, `Other`). Ripsaw emits both file *and*
 folder name with the IDs in the form Plex prefers (`{imdb-…}`,
 `{tmdb-…}`, `{tvdb-…}`).
 
@@ -92,7 +92,7 @@ sidecar with the TMDB/IMDB IDs since Kodi's scrapers will consume that.
 ### Emby
 
 Effectively identical to Jellyfin's scheme today (Jellyfin forked from
-Emby). 3drip aliases Emby to the Jellyfin emitter; the option is exposed
+Emby). Ripsaw aliases Emby to the Jellyfin emitter; the option is exposed
 separately to be future-proof.
 
 ## Module layout

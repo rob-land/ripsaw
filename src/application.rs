@@ -6,7 +6,7 @@ use gtk::glib::clone;
 pub fn run() -> Result<()> {
     let app = adw::Application::builder()
         .application_id(crate::APP_ID)
-        .resource_base_path("/dev/threedrip/ThreeDrip/")
+        .resource_base_path("/land/rob/Ripsaw/")
         .build();
 
     app.connect_startup(|app| {
@@ -14,7 +14,7 @@ pub fn run() -> Result<()> {
     });
 
     app.connect_activate(|app| {
-        let window = crate::window::ThreeDripWindow::new(app);
+        let window = crate::window::RipsawWindow::new(app);
         window.present();
     });
 
@@ -72,12 +72,12 @@ fn show_preferences(app: &adw::Application) {
 
 fn show_about(app: &adw::Application) {
     let dialog = adw::AboutDialog::builder()
-        .application_name("3drip")
+        .application_name("Ripsaw")
         .application_icon(crate::APP_ID)
         .version(env!("CARGO_PKG_VERSION"))
-        .developer_name("The 3drip Contributors")
-        .website("https://github.com/threedrip/threedrip")
-        .copyright("© 2026 The 3drip Authors")
+        .developer_name("The Ripsaw Contributors")
+        .website("https://github.com/ripsaw/ripsaw")
+        .copyright("© 2026 The Ripsaw Authors")
         .license_type(gtk::License::Gpl30)
         .comments("GTK4/libadwaita disc-ripping frontend for MakeMKV.\n\nDisc identification via TheDiscDB, Jellyfin/Plex/Kodi naming, and a future 3D MVC pipeline.")
         .build();

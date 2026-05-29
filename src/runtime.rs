@@ -7,7 +7,7 @@ static TOKIO_RT: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
-        .thread_name("threedrip-tokio")
+        .thread_name("ripsaw-tokio")
         .build()
         .expect("build tokio runtime")
 });

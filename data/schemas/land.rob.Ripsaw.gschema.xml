@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<schemalist gettext-domain="threedrip">
-  <enum id="dev.threedrip.ThreeDrip.NamingScheme">
+<schemalist gettext-domain="ripsaw">
+  <enum id="land.rob.Ripsaw.NamingScheme">
     <value nick="jellyfin" value="0"/>
     <value nick="plex"     value="1"/>
     <value nick="kodi"     value="2"/>
     <value nick="emby"     value="3"/>
   </enum>
 
-  <schema id="dev.threedrip.ThreeDrip" path="/dev/threedrip/ThreeDrip/">
-    <key name="default-naming-scheme" enum="dev.threedrip.ThreeDrip.NamingScheme">
+  <schema id="land.rob.Ripsaw" path="/land/rob/Ripsaw/">
+    <key name="default-naming-scheme" enum="land.rob.Ripsaw.NamingScheme">
       <default>"jellyfin"</default>
       <summary>Default media-server naming scheme</summary>
     </key>

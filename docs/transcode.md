@@ -48,7 +48,7 @@ Shipped baseline set:
 | `archival-lossless` | x264 | 0 (lossless) | n/a | size-blind, perfect |
 | `passthrough` | n/a | n/a | n/a | remux only; no re-encode |
 
-Custom user presets live in `$XDG_DATA_HOME/threedrip/presets/` and the
+Custom user presets live in `$XDG_DATA_HOME/ripsaw/presets/` and the
 UI offers a "duplicate to edit" action.
 
 ## Pipeline

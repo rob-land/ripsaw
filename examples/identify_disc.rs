@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
-use threedrip::identify::disc_hash::{content_hash, enumerate_disc_files};
-use threedrip::identify::thediscdb::TheDiscDbClient;
+use ripsaw::identify::disc_hash::{content_hash, enumerate_disc_files};
+use ripsaw::identify::thediscdb::TheDiscDbClient;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

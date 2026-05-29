@@ -15,8 +15,8 @@ mod imp {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/dev/threedrip/ThreeDrip/ui/window.ui")]
-    pub struct ThreeDripWindow {
+    #[template(resource = "/land/rob/Ripsaw/ui/window.ui")]
+    pub struct RipsawWindow {
         #[template_child]
         pub toasts: TemplateChild<adw::ToastOverlay>,
         #[template_child]
@@ -24,9 +24,9 @@ mod imp {
     }
 
     #[glib::object_subclass]
-    impl ObjectSubclass for ThreeDripWindow {
-        const NAME: &'static str = "ThreeDripWindow";
-        type Type = super::ThreeDripWindow;
+    impl ObjectSubclass for RipsawWindow {
+        const NAME: &'static str = "RipsawWindow";
+        type Type = super::RipsawWindow;
         type ParentType = adw::ApplicationWindow;
 
         fn class_init(klass: &mut Self::Class) {
@@ -38,27 +38,27 @@ mod imp {
         }
     }
 
-    impl ObjectImpl for ThreeDripWindow {
+    impl ObjectImpl for RipsawWindow {
         fn constructed(&self) {
             self.parent_constructed();
             self.obj().setup_actions();
         }
     }
-    impl WidgetImpl for ThreeDripWindow {}
-    impl WindowImpl for ThreeDripWindow {}
-    impl ApplicationWindowImpl for ThreeDripWindow {}
-    impl AdwApplicationWindowImpl for ThreeDripWindow {}
+    impl WidgetImpl for RipsawWindow {}
+    impl WindowImpl for RipsawWindow {}
+    impl ApplicationWindowImpl for RipsawWindow {}
+    impl AdwApplicationWindowImpl for RipsawWindow {}
 }
 
 glib::wrapper! {
-    pub struct ThreeDripWindow(ObjectSubclass<imp::ThreeDripWindow>)
+    pub struct RipsawWindow(ObjectSubclass<imp::RipsawWindow>)
         @extends gtk::Widget, gtk::Window, gtk::ApplicationWindow, adw::ApplicationWindow,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Native,
                     gtk::Root, gtk::ShortcutManager,
                     gio::ActionGroup, gio::ActionMap;
 }
 
-impl ThreeDripWindow {
+impl RipsawWindow {
     pub fn new(app: &adw::Application) -> Self {
         glib::Object::builder().property("application", app).build()
     }

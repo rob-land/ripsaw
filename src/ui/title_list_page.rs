@@ -27,7 +27,7 @@ mod imp {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/dev/threedrip/ThreeDrip/ui/title-list-page.ui")]
+    #[template(resource = "/land/rob/Ripsaw/ui/title-list-page.ui")]
     pub struct TitleListPage {
         #[template_child] pub title_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child] pub rip_button: TemplateChild<gtk::Button>,
@@ -48,7 +48,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for TitleListPage {
-        const NAME: &'static str = "ThreeDripTitleListPage";
+        const NAME: &'static str = "RipsawTitleListPage";
         type Type = super::TitleListPage;
         type ParentType = adw::NavigationPage;
 

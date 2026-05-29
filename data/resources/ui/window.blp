@@ -1,10 +1,10 @@
 using Gtk 4.0;
 using Adw 1;
 
-template $ThreeDripWindow: Adw.ApplicationWindow {
+template $RipsawWindow: Adw.ApplicationWindow {
   default-width: 960;
   default-height: 640;
-  title: _("3drip");
+  title: _("Ripsaw");
 
   Adw.ToastOverlay toasts {
     child: Adw.NavigationView nav {
@@ -49,7 +49,7 @@ template $ThreeDripWindow: Adw.ApplicationWindow {
           content: Adw.StatusPage {
             icon-name: "media-optical-symbolic";
             title: _("Insert a disc or open an ISO");
-            description: _("3drip will scan it, list the titles, and (eventually) rip the ones you pick to your media library.");
+            description: _("Ripsaw will scan it, list the titles, and (eventually) rip the ones you pick to your media library.");
           };
         }
       }
@@ -70,7 +70,7 @@ menu primary_menu {
     }
 
     item {
-      label: _("About 3drip");
+      label: _("About Ripsaw");
       action: "app.about";
     }
   }

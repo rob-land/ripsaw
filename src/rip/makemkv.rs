@@ -452,7 +452,7 @@ mod tests {
 // =====================================================================
 // Live integration test against the JP ISO. Gated behind an env var so
 // CI without makemkvcon (or without the sample) doesn't fail.
-// Set THREEDRIP_TEST_ISO_PATH=/path/to/disc.iso to enable.
+// Set RIPSAW_TEST_ISO_PATH=/path/to/disc.iso to enable.
 // =====================================================================
 
 #[cfg(test)]
@@ -461,8 +461,8 @@ mod live_tests {
 
     #[tokio::test]
     async fn scan_real_iso_when_env_var_set() {
-        let Ok(iso) = std::env::var("THREEDRIP_TEST_ISO_PATH") else {
-            eprintln!("THREEDRIP_TEST_ISO_PATH not set; skipping live scan test");
+        let Ok(iso) = std::env::var("RIPSAW_TEST_ISO_PATH") else {
+            eprintln!("RIPSAW_TEST_ISO_PATH not set; skipping live scan test");
             return;
         };
         let scan_result = match scan(&ScanSource::Iso(PathBuf::from(iso))).await {
@@ -478,8 +478,8 @@ mod live_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn extract_smallest_title_when_env_var_set() {
-        let Ok(iso) = std::env::var("THREEDRIP_TEST_ISO_PATH") else {
-            eprintln!("THREEDRIP_TEST_ISO_PATH not set; skipping live extract test");
+        let Ok(iso) = std::env::var("RIPSAW_TEST_ISO_PATH") else {
+            eprintln!("RIPSAW_TEST_ISO_PATH not set; skipping live extract test");
             return;
         };
         let iso_path = PathBuf::from(iso);

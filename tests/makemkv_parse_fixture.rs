@@ -5,14 +5,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use threedrip::rip::makemkv_parse::{aggregate, to_makemkv_scan};
+use ripsaw::rip::makemkv_parse::{aggregate, to_makemkv_scan};
 
 fn fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/makemkv_scan/jurassic_park_2013_3d.raw.txt")
 }
 
-fn load_scan() -> threedrip::rip::makemkv_parse::MakemkvScan {
+fn load_scan() -> ripsaw::rip::makemkv_parse::MakemkvScan {
     let raw = fs::read_to_string(fixture_path()).expect("fixture present");
     let records = aggregate(&raw);
     to_makemkv_scan(&records)

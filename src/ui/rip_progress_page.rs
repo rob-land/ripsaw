@@ -39,7 +39,7 @@ mod imp {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/dev/threedrip/ThreeDrip/ui/rip-progress-page.ui")]
+    #[template(resource = "/land/rob/Ripsaw/ui/rip-progress-page.ui")]
     pub struct RipProgressPage {
         #[template_child] pub current_label: TemplateChild<adw::ActionRow>,
         #[template_child] pub current_progress: TemplateChild<gtk::ProgressBar>,
@@ -54,7 +54,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for RipProgressPage {
-        const NAME: &'static str = "ThreeDripRipProgressPage";
+        const NAME: &'static str = "RipsawRipProgressPage";
         type Type = super::RipProgressPage;
         type ParentType = adw::NavigationPage;
 

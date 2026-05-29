@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use threedrip::identify::composite::{analyze_relations, TitleRelation};
+use ripsaw::identify::composite::{analyze_relations, TitleRelation};
 
 #[derive(Deserialize)]
 struct Fixture {

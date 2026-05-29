@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use threedrip::identify::disc_hash::{content_hash, enumerate_disc_files, DiscFile};
+use ripsaw::identify::disc_hash::{content_hash, enumerate_disc_files, DiscFile};
 
 #[derive(Deserialize)]
 struct Fixture {

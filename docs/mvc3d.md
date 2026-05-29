@@ -43,7 +43,7 @@ A standalone library sidesteps all of this:
 
 ```
 ┌──────────────────────────────────────────┐
-│  3drip GTK app (Rust)                    │
+│  Ripsaw GTK app (Rust)                    │
 └────────────────────┬─────────────────────┘
                      │ FFI (cxx or bindgen)
                      ▼
@@ -89,7 +89,7 @@ Properties:
 Either C or Rust works. C makes FFI to `libavcodec` trivial (it's a C
 API). Rust gives us safer DPB management (the bug surface is largely
 "out-of-bounds index into reference picture list") and matches the
-rest of 3drip. Bias: **Rust**, with `unsafe` FFI to `libavcodec` for
+rest of Ripsaw. Bias: **Rust**, with `unsafe` FFI to `libavcodec` for
 the base-view decoder. Decision deferred to libmvc's own
 sub-architecture doc; not on the critical path for now.
 
@@ -230,7 +230,7 @@ copying subs through without depth.
 | Phase | Scope |
 |---|---|
 | ~~**0** (sketch)~~ | ✅ Done. Design doc + module stubs. |
-| **1** (in progress) | `libmvc` skeleton: subset SPS / MVC SPS parse, NAL types 14/15/20 routing, per-view DPB scaffolding, golden-frame test harness against `ldecod`. Single SSIF input, raw YUV output of both views, no integration into 3drip yet. **Sub-progress:** bit reader + Exp-Golomb + RBSP extraction + NAL header parsing + Subset SPS MVC extension + minimal Matroska EBML walker + mvcC (MVCDecoderConfigurationRecord) reader + ref_pic_list_modification with MVC inter-view IDCs 4 & 5 + frame_packing_arrangement SEI parser + Annex B NAL stream splitter (50 unit + 2 real-world integration tests). The real-world test extracts the mvcC BlockAddIDExtraData from `samples/3D_LR_Pattern.mkv` and confirms profile_idc 128 (Stereo High), level 41, and a type-15 Subset SPS NAL whose RBSP starts as expected. Remaining for phase 1: full slice-header parser (base spec + MVC SEI hooks), per-view DPB, inter-view prediction wiring against an upstream H.264 base-view decoder. |
+| **1** (in progress) | `libmvc` skeleton: subset SPS / MVC SPS parse, NAL types 14/15/20 routing, per-view DPB scaffolding, golden-frame test harness against `ldecod`. Single SSIF input, raw YUV output of both views, no integration into Ripsaw yet. **Sub-progress:** bit reader + Exp-Golomb + RBSP extraction + NAL header parsing + Subset SPS MVC extension + minimal Matroska EBML walker + mvcC (MVCDecoderConfigurationRecord) reader + ref_pic_list_modification with MVC inter-view IDCs 4 & 5 + frame_packing_arrangement SEI parser + Annex B NAL stream splitter (50 unit + 2 real-world integration tests). The real-world test extracts the mvcC BlockAddIDExtraData from `samples/3D_LR_Pattern.mkv` and confirms profile_idc 128 (Stereo High), level 41, and a type-15 Subset SPS NAL whose RBSP starts as expected. Remaining for phase 1: full slice-header parser (base spec + MVC SEI hooks), per-view DPB, inter-view prediction wiring against an upstream H.264 base-view decoder. |
 
 ### Inline-MVC conversion path lands (2026-05-29)
 
@@ -406,7 +406,7 @@ with anything else in the pipeline that expects modern libav* APIs.
    conceptual changes (parse subset SPS, manage a second DPB, output
    paired frames) remain implementable. Realistic effort: 2–4 weeks of
    focused work by someone fluent in the h264 codec.
-2. **Use the 2013 fork as an out-of-process binary (`threedrip-mvcdec`)
+2. **Use the 2013 fork as an out-of-process binary (`ripsaw-mvcdec`)
    for Phase 1.** Build it once with the spike patches, vendor under
    `third_party/ffmpeg-mvc-britz/` with the patch series, ship it as a
    private helper binary, validate against one real 3D BD, ship Phase 1
@@ -444,7 +444,7 @@ dependent view is invisible to it. Decode attempt fails immediately with
 "Invalid data found when processing input."
 
 This format is what *anyone* using current MakeMKV will produce, which
-makes Britz directly incompatible with the typical 3drip workflow.
+makes Britz directly incompatible with the typical Ripsaw workflow.
 
 ### Physical-BD SSIF — Britz parses, doesn't emit second view
 

@@ -1,8 +1,8 @@
 # Ripping: the `makemkvcon` driver
 
-3drip does not contain any decryption code. The MakeMKV engine (via the
+Ripsaw does not contain any decryption code. The MakeMKV engine (via the
 `makemkvcon` CLI binary) handles AACS/BD+/CSS/AACS2 and stream
-extraction. 3drip is purely an orchestrator.
+extraction. Ripsaw is purely an orchestrator.
 
 ## Startup health check
 
@@ -20,7 +20,7 @@ and parses the output. Three outcomes:
 | Binary present, version OK | Continue to main window. |
 | Binary present, version outdated | Show **MakeMKV out of date** page. MakeMKV's beta key expires periodically and old binaries can fail on newer discs. |
 
-"Outdated" means: older than a cutoff version baked into 3drip (we will
+"Outdated" means: older than a cutoff version baked into Ripsaw (we will
 bump it with releases) **or** the binary returns an error containing a
 version-related signature when scanning a current disc.
 
@@ -48,7 +48,7 @@ is proprietary — but we automate the install paths:
    - Distro packages lag the upstream beta; warn the user.
 3. **Install from Flatpak**
    - `flatpak install flathub com.makemkv.MakeMKV` (when available).
-   - Cross-sandbox invocation has additional complexity if 3drip is
+   - Cross-sandbox invocation has additional complexity if Ripsaw is
      itself Flatpak — see [architecture](architecture.md#sandboxing--flatpak).
 
 All three buttons run unprivileged commands and prompt for elevation via
@@ -58,7 +58,7 @@ user to run them in a terminal.
 
 The Setup Required page also exposes a **Beta key** field. MakeMKV is
 free during beta only with a beta key the user enters at
-`~/.MakeMKV/settings.conf` (`app_Key = "T-…"`). 3drip writes this for
+`~/.MakeMKV/settings.conf` (`app_Key = "T-…"`). Ripsaw writes this for
 the user when they paste a key.
 
 ## Driving makemkvcon
@@ -117,7 +117,7 @@ unless the user opts to keep them via a "keep partial output" toggle.
 
 ## Beta key lifecycle
 
-The free beta key MakeMKV publishes rotates every ~30 days. 3drip will
+The free beta key MakeMKV publishes rotates every ~30 days. Ripsaw will
 *not* embed any key (legal and stability concerns). Behaviour:
 
 - Detect "key expired" by parsing `MSG` codes from `makemkvcon`.

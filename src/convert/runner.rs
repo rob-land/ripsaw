@@ -217,8 +217,8 @@ fn compose_filter(format: OutputFormat) -> String {
 }
 
 fn resolve_ldecod_path() -> Result<PathBuf> {
-    // 1. THREEDRIP_LDECOD env var beats everything.
-    if let Some(raw) = std::env::var_os("THREEDRIP_LDECOD") {
+    // 1. RIPSAW_LDECOD env var beats everything.
+    if let Some(raw) = std::env::var_os("RIPSAW_LDECOD") {
         let p = PathBuf::from(raw);
         if p.is_file() {
             return Ok(p);
@@ -234,7 +234,7 @@ fn resolve_ldecod_path() -> Result<PathBuf> {
         return Ok(path);
     }
     Err(anyhow!(
-        "ldecod not found. Set THREEDRIP_LDECOD=/path/to/ldecod, install the \
+        "ldecod not found. Set RIPSAW_LDECOD=/path/to/ldecod, install the \
          scripts/ldecod wrapper, or put ldecod on PATH. \
          Build instructions are in docs/mvc3d.md § 'Build / tooling state'."
     ))

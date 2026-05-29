@@ -8,10 +8,10 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
 
-use threedrip::mvc::annexb::NalSplitter;
-use threedrip::mvc::ebml::EbmlReader;
-use threedrip::mvc::mkv_extract::extract_to_annex_b;
-use threedrip::mvc::nal::parse_nal_unit_header;
+use ripsaw::mvc::annexb::NalSplitter;
+use ripsaw::mvc::ebml::EbmlReader;
+use ripsaw::mvc::mkv_extract::extract_to_annex_b;
+use ripsaw::mvc::nal::parse_nal_unit_header;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);

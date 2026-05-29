@@ -1,19 +1,19 @@
 [package]
-name = "threedrip"
+name = "ripsaw"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "GPL-3.0-or-later"
 description = "GTK4/libadwaita disc-ripping frontend for MakeMKV with TheDiscDB integration and 3D MVC support"
-repository = "https://github.com/threedrip/threedrip"
+repository = "https://git.rob.land/rob/ripsaw"
 readme = "README.md"
 
 [[bin]]
-name = "threedrip"
+name = "ripsaw"
 path = "src/main.rs"
 
 [lib]
-name = "threedrip"
+name = "ripsaw"
 path = "src/lib.rs"
 
 [dependencies]

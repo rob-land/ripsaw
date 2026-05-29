@@ -6,7 +6,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "threedrip=debug,info".into()),
+                .unwrap_or_else(|_| "ripsaw=debug,info".into()),
         )
         .init();
 
@@ -40,15 +40,15 @@ fn main() -> Result<()> {
         return run_identify_mkv_cli(PathBuf::from(path));
     }
 
-    gio::resources_register_include!("threedrip.gresource")
-        .expect("register threedrip resources");
+    gio::resources_register_include!("ripsaw.gresource")
+        .expect("register ripsaw resources");
 
-    threedrip::application::run()
+    ripsaw::application::run()
 }
 
 fn run_identify_mkv_cli(path: PathBuf) -> Result<()> {
-    use threedrip::identify::pipeline::identify_mkv;
-    let result = threedrip::runtime::tokio_runtime()
+    use ripsaw::identify::pipeline::identify_mkv;
+    let result = ripsaw::runtime::tokio_runtime()
         .block_on(identify_mkv(path.clone()))?;
     print_identification(&format!("mkv:{}", path.display()), &path, &result);
     println!("has_mvc          = {}", result.has_mvc);
@@ -56,20 +56,20 @@ fn run_identify_mkv_cli(path: PathBuf) -> Result<()> {
 }
 
 fn run_identify_disc_cli(index: u32, mount: PathBuf) -> Result<()> {
-    use threedrip::identify::pipeline::identify_physical_disc;
-    let result = threedrip::runtime::tokio_runtime()
+    use ripsaw::identify::pipeline::identify_physical_disc;
+    let result = ripsaw::runtime::tokio_runtime()
         .block_on(identify_physical_disc(index, mount.clone()))?;
     print_identification(&format!("disc:{index}"), &mount, &result);
     Ok(())
 }
 
 fn run_identify_cli(path: PathBuf) -> Result<()> {
-    use threedrip::identify::pipeline::identify_iso;
-    let result = threedrip::runtime::tokio_runtime()
+    use ripsaw::identify::pipeline::identify_iso;
+    let result = ripsaw::runtime::tokio_runtime()
         .block_on(identify_iso(path.clone()))?;
     print_identification(&path.display().to_string(), &path, &result);
     if let Some(m) = result.mount {
-        threedrip::runtime::tokio_runtime().block_on(async { m.unmount().await.ok() });
+        ripsaw::runtime::tokio_runtime().block_on(async { m.unmount().await.ok() });
     }
     Ok(())
 }
@@ -77,7 +77,7 @@ fn run_identify_cli(path: PathBuf) -> Result<()> {
 fn print_identification(
     source: &str,
     _path: &std::path::Path,
-    result: &threedrip::identify::pipeline::IdentificationResult,
+    result: &ripsaw::identify::pipeline::IdentificationResult,
 ) {
     println!("disc.source      = {source}");
     println!(
