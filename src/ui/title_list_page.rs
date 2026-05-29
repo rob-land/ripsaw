@@ -10,7 +10,10 @@ use crate::identify::composite::{analyze_relations, TitleRelation};
 use crate::identify::pipeline::IdentificationResult;
 use crate::identify::DiscType;
 use crate::rip::makemkv_parse::{MakemkvScan, TitleAttributes};
-use crate::rip::plan::{default_library_root, naming_opts_for_unidentified, plan_rip};
+use crate::rip::plan::{
+    auto_detect_content_kind, default_library_root, naming_opts_for_unidentified, plan_rip,
+    DiscContentKind,
+};
 use crate::settings::settings;
 use crate::ui::rip_progress_page::{RipProgressPage, RipQueueItem};
 
@@ -22,6 +25,7 @@ mod imp {
     pub struct TitleListPage {
         #[template_child] pub title_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child] pub rip_button: TemplateChild<gtk::Button>,
+        #[template_child] pub series_toggle: TemplateChild<adw::SwitchRow>,
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
         pub titles: RefCell<Vec<TitleAttributes>>,
@@ -81,6 +85,8 @@ impl TitleListPage {
         if let Some(name) = &result.scan.disc.name {
             self.set_title(name);
         }
+        let detected = auto_detect_content_kind(&result.scan.titles);
+        self.imp().series_toggle.set_active(detected == DiscContentKind::Series);
         self.populate_rows(&result.scan);
     }
 
@@ -207,9 +213,15 @@ impl TitleListPage {
             .clone()
             .unwrap_or_else(default_library_root);
         let scheme = user_settings.scheme;
+        let content_kind = if self.imp().series_toggle.is_active() {
+            DiscContentKind::Series
+        } else {
+            DiscContentKind::Movie
+        };
         let naming_opts = naming_opts_for_unidentified(
             library_root.clone(),
             scheme,
+            content_kind,
             &disc_name,
         );
         let plan = plan_rip(&identification_for_plan, &selected, Some(&naming_opts));
@@ -218,9 +230,13 @@ impl TitleListPage {
         let progress = RipProgressPage::default();
         progress.set_queue(&queue);
         progress.append_log(&format!(
-            "Library root: {} • Scheme: {}",
+            "Library root: {} • Scheme: {} • {}",
             library_root.display(),
             scheme.label(),
+            match content_kind {
+                DiscContentKind::Movie => "Treating as movie",
+                DiscContentKind::Series => "Treating as series",
+            },
         ));
 
         if let Some(nav) = navigation_view(self) {

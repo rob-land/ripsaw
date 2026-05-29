@@ -21,6 +21,16 @@ template $ThreeDripTitleListPage: Adw.NavigationPage {
     }
 
     content: Adw.PreferencesPage {
+      Adw.PreferencesGroup classification_group {
+        title: _("Disc type");
+        description: _("Auto-detected from title durations. Toggle if it's wrong.");
+
+        Adw.SwitchRow series_toggle {
+          title: _("TV series");
+          subtitle: _("Each ripped title gets sequential S01E01, S01E02, ...");
+        }
+      }
+
       Adw.PreferencesGroup title_group {
         title: _("Titles found");
         description: _("Tick the titles you want to rip, then press the Rip button.");
