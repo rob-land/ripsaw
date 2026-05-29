@@ -12,6 +12,7 @@ use crate::convert::runner::run_conversion;
 use crate::identify::composite::{analyze_relations, TitleRelation};
 use crate::identify::pipeline::IdentificationResult;
 use crate::identify::DiscType;
+use crate::integrations::{radarr::RadarrClient, sonarr::SonarrClient};
 use crate::rip::makemkv_parse::{MakemkvScan, TitleAttributes};
 use crate::rip::plan::{parse_series_label, DiscContentKind};
 use std::collections::HashMap;
@@ -223,11 +224,178 @@ impl TitleListPage {
             self,
             move |_, _| page.start_conversion(OutputFormat::FullSbs)
         ));
+        let sonarr_action = gio::SimpleAction::new("sonarr-lookup", None);
+        sonarr_action.connect_activate(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_, _| page.start_sonarr_lookup()
+        ));
 
         let group = gio::SimpleActionGroup::new();
         group.add_action(&rip_action);
         group.add_action(&convert_action);
+        group.add_action(&sonarr_action);
         self.insert_action_group("page", Some(&group));
+    }
+
+    fn start_sonarr_lookup(&self) {
+        // Dispatch by series-toggle state: Sonarr for series, Radarr for
+        // movies. Both look up using the current title_override text.
+        if self.imp().series_toggle.is_active() {
+            self.start_sonarr_lookup_inner();
+        } else {
+            self.start_radarr_lookup_inner();
+        }
+    }
+
+    fn start_sonarr_lookup_inner(&self) {
+        let cfg = crate::settings::settings()
+            .lock()
+            .expect("settings mutex")
+            .sonarr
+            .clone();
+        if !cfg.is_configured() {
+            self.toast_in_window("Sonarr URL and API key not set — see Preferences.");
+            return;
+        }
+        let url = cfg.url.expect("checked is_configured");
+        let api_key = cfg.api_key.expect("checked is_configured");
+
+        let term = self.imp().title_override.text().to_string();
+        if term.trim().is_empty() {
+            self.toast_in_window("Enter a series title first.");
+            return;
+        }
+        let season = self.imp().season_override.value().max(0.0) as u32;
+
+        let (tx, rx) =
+            async_channel::bounded::<anyhow::Result<(String, Vec<(u32, String)>)>>(1);
+        let term_for_task = term.clone();
+        crate::runtime::tokio_runtime().spawn(async move {
+            let result = async {
+                let client = SonarrClient::from_config(&url, &api_key)?;
+                let candidates = client.lookup(&term_for_task).await?;
+                let chosen = candidates
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("no Sonarr match for \"{term_for_task}\""))?;
+                let canonical_title = chosen.title.clone();
+                let mut episodes = client.episodes(chosen.id, Some(season)).await?;
+                episodes.sort_by_key(|e| e.episode_number);
+                let pairs: Vec<(u32, String)> = episodes
+                    .into_iter()
+                    .filter_map(|e| e.title.map(|t| (e.episode_number, t)))
+                    .collect();
+                anyhow::Ok((canonical_title, pairs))
+            }
+            .await;
+            let _ = tx.send(result).await;
+        });
+
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak(rename_to = page)]
+            self,
+            async move {
+                let result = rx.recv().await;
+                match result {
+                    Ok(Ok((canonical, pairs))) => {
+                        page.imp().title_override.set_text(&canonical);
+                        let count = pairs.len();
+                        page.apply_episode_titles(pairs);
+                        page.toast_in_window(&format!(
+                            "Sonarr: matched \"{canonical}\", filled {count} episode title(s)"
+                        ));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("Sonarr lookup failed: {e:#}");
+                        page.toast_in_window(&format!("Sonarr lookup failed: {e}"));
+                    }
+                    Err(e) => {
+                        tracing::error!("Sonarr channel closed: {e}");
+                    }
+                }
+            }
+        ));
+    }
+
+    fn start_radarr_lookup_inner(&self) {
+        let cfg = crate::settings::settings()
+            .lock()
+            .expect("settings mutex")
+            .radarr
+            .clone();
+        if !cfg.is_configured() {
+            self.toast_in_window("Radarr URL and API key not set — see Preferences.");
+            return;
+        }
+        let url = cfg.url.expect("checked is_configured");
+        let api_key = cfg.api_key.expect("checked is_configured");
+
+        let term = self.imp().title_override.text().to_string();
+        if term.trim().is_empty() {
+            self.toast_in_window("Enter a movie title first.");
+            return;
+        }
+
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<String>>(1);
+        let term_for_task = term.clone();
+        crate::runtime::tokio_runtime().spawn(async move {
+            let result = async {
+                let client = RadarrClient::from_config(&url, &api_key)?;
+                let candidates = client.lookup(&term_for_task).await?;
+                let chosen = candidates
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("no Radarr match for \"{term_for_task}\""))?;
+                let with_year = match chosen.year {
+                    Some(y) => format!("{} ({y})", chosen.title),
+                    None => chosen.title,
+                };
+                anyhow::Ok(with_year)
+            }
+            .await;
+            let _ = tx.send(result).await;
+        });
+
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak(rename_to = page)]
+            self,
+            async move {
+                let result = rx.recv().await;
+                match result {
+                    Ok(Ok(canonical)) => {
+                        page.imp().title_override.set_text(&canonical);
+                        page.toast_in_window(&format!("Radarr: matched \"{canonical}\""));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("Radarr lookup failed: {e:#}");
+                        page.toast_in_window(&format!("Radarr lookup failed: {e}"));
+                    }
+                    Err(e) => {
+                        tracing::error!("Radarr channel closed: {e}");
+                    }
+                }
+            }
+        ));
+    }
+
+    fn apply_episode_titles(&self, pairs: Vec<(u32, String)>) {
+        // Fill in our episode_entries in order. Episode numbers in
+        // `pairs` are absolute (per-season); we assume the selected
+        // titles map sequentially to episode numbers starting at the
+        // first pair's episode_number. For now we just iterate entries
+        // in order and pull off pairs as we go.
+        let entries = self.imp().episode_entries.borrow();
+        for (entry, (_, title)) in entries.iter().zip(pairs.into_iter()) {
+            entry.set_text(&title);
+        }
+    }
+
+    fn toast_in_window(&self, message: &str) {
+        if let Some(window) = self.parent_window() {
+            let toast = adw::Toast::builder().title(message).timeout(4).build();
+            window.add_toast(toast);
+        }
     }
 
     fn start_conversion(&self, format: OutputFormat) {
