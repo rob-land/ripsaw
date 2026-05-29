@@ -169,7 +169,12 @@ impl ThreeDripWindow {
             ));
         }
 
-        let page = TitleListPage::from_identification(&result);
+        let iso_path = result
+            .mount
+            .as_ref()
+            .map(|m| m.iso_path.clone())
+            .unwrap_or_else(|| PathBuf::from(""));
+        let page = TitleListPage::from_identification(&result, iso_path);
         self.imp().nav.push(&page);
     }
 

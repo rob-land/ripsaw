@@ -1,12 +1,17 @@
+use std::cell::RefCell;
+use std::path::PathBuf;
+
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::glib;
-use gtk::CompositeTemplate;
+use gtk::glib::{self, clone};
+use gtk::{gio, CompositeTemplate};
 
 use crate::identify::composite::{analyze_relations, TitleRelation};
 use crate::identify::pipeline::IdentificationResult;
 use crate::identify::DiscType;
-use crate::rip::makemkv_parse::MakemkvScan;
+use crate::naming;
+use crate::rip::makemkv_parse::{MakemkvScan, TitleAttributes};
+use crate::ui::rip_progress_page::{queue_from_selection, RipProgressPage};
 
 mod imp {
     use super::*;
@@ -14,8 +19,13 @@ mod imp {
     #[derive(Default, CompositeTemplate)]
     #[template(resource = "/dev/threedrip/ThreeDrip/ui/title-list-page.ui")]
     pub struct TitleListPage {
-        #[template_child]
-        pub title_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child] pub title_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child] pub rip_button: TemplateChild<gtk::Button>,
+
+        pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
+        pub titles: RefCell<Vec<TitleAttributes>>,
+        pub iso_path: RefCell<Option<PathBuf>>,
+        pub disc_name: RefCell<Option<String>>,
     }
 
     #[glib::object_subclass]
@@ -33,7 +43,12 @@ mod imp {
         }
     }
 
-    impl ObjectImpl for TitleListPage {}
+    impl ObjectImpl for TitleListPage {
+        fn constructed(&self) {
+            self.parent_constructed();
+            self.obj().setup_actions();
+        }
+    }
     impl WidgetImpl for TitleListPage {}
     impl NavigationPageImpl for TitleListPage {}
 }
@@ -45,20 +60,15 @@ glib::wrapper! {
 }
 
 impl Default for TitleListPage {
-    fn default() -> Self {
-        glib::Object::new()
-    }
+    fn default() -> Self { glib::Object::new() }
 }
 
 impl TitleListPage {
-    pub fn from_scan(scan: &MakemkvScan) -> Self {
+    pub fn from_identification(result: &IdentificationResult, iso_path: PathBuf) -> Self {
         let page: Self = glib::Object::new();
-        page.populate(scan);
-        page
-    }
-
-    pub fn from_identification(result: &IdentificationResult) -> Self {
-        let page: Self = glib::Object::new();
+        page.imp().iso_path.replace(Some(iso_path));
+        page.imp().disc_name.replace(result.scan.disc.name.clone());
+        page.imp().titles.replace(result.scan.titles.clone());
         page.populate_with_identity(result);
         page
     }
@@ -73,19 +83,10 @@ impl TitleListPage {
         self.populate_rows(&result.scan);
     }
 
-    pub fn populate(&self, scan: &MakemkvScan) {
-        let group = self.imp().title_group.get();
-
-        if let Some(name) = &scan.disc.name {
-            self.set_title(name);
-        }
-        let _ = group;
-
-        self.populate_rows(scan);
-    }
-
     fn populate_rows(&self, scan: &MakemkvScan) {
         let group = self.imp().title_group.get();
+        let mut checkboxes = Vec::with_capacity(scan.titles.len());
+
         let pairs: Vec<(u32, &str)> = scan
             .titles
             .iter()
@@ -114,13 +115,146 @@ impl TitleListPage {
                 TitleRelation::Atomic => {}
             }
 
+            let check = gtk::CheckButton::new();
+            check.set_valign(gtk::Align::Center);
+            check.connect_toggled(clone!(
+                #[weak(rename_to = page)]
+                self,
+                move |_| page.refresh_rip_sensitivity()
+            ));
+
             let row = adw::ActionRow::builder()
                 .title(title_label)
                 .subtitle(subtitle_parts.join("  •  "))
+                .activatable(true)
                 .build();
+            row.add_prefix(&check);
+            row.set_activatable_widget(Some(&check));
             group.add(&row);
+            checkboxes.push(check);
         }
+
+        self.imp().checkboxes.replace(checkboxes);
+        self.refresh_rip_sensitivity();
     }
+
+    fn refresh_rip_sensitivity(&self) {
+        let any_checked = self
+            .imp()
+            .checkboxes
+            .borrow()
+            .iter()
+            .any(|c| c.is_active());
+        self.imp().rip_button.set_sensitive(any_checked);
+    }
+
+    fn setup_actions(&self) {
+        let rip_action = gio::SimpleAction::new("rip-selected", None);
+        rip_action.connect_activate(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_, _| page.start_rip()
+        ));
+
+        let group = gio::SimpleActionGroup::new();
+        group.add_action(&rip_action);
+        self.insert_action_group("page", Some(&group));
+    }
+
+    fn selected_indexes(&self) -> Vec<u32> {
+        let titles = self.imp().titles.borrow();
+        self.imp()
+            .checkboxes
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                if c.is_active() {
+                    titles.get(i).map(|t| t.index)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn start_rip(&self) {
+        let selected = self.selected_indexes();
+        if selected.is_empty() {
+            return;
+        }
+        let iso_path = match self.imp().iso_path.borrow().clone() {
+            Some(p) => p,
+            None => {
+                tracing::error!("rip requested but iso_path not set on TitleListPage");
+                return;
+            }
+        };
+        let disc_name = self
+            .imp()
+            .disc_name
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| "Unknown Disc".to_string());
+
+        let titles_snapshot = self.imp().titles.borrow().clone();
+        let identification_for_queue = build_pseudo_identification(&titles_snapshot);
+        let queue = queue_from_selection(&identification_for_queue, &selected);
+
+        let progress = RipProgressPage::default();
+        progress.set_queue(&queue);
+
+        let output_root = output_root_for(&disc_name);
+        progress.append_log(&format!(
+            "Output directory: {}",
+            output_root.display()
+        ));
+
+        if let Some(nav) = navigation_view(self) {
+            nav.push(&progress);
+        } else {
+            tracing::warn!("TitleListPage has no NavigationView ancestor; cannot push RipProgressPage");
+        }
+
+        crate::rip::orchestrator::run_rip_queue(
+            iso_path,
+            output_root,
+            queue,
+            progress.downgrade(),
+        );
+    }
+}
+
+fn build_pseudo_identification(titles: &[TitleAttributes]) -> IdentificationResult {
+    IdentificationResult {
+        scan: MakemkvScan {
+            titles: titles.to_vec(),
+            ..Default::default()
+        },
+        mount: None,
+        disc_type: DiscType::BluRay,
+        content_hash: None,
+        identities: Vec::new(),
+    }
+}
+
+fn output_root_for(disc_name: &str) -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let safe = naming::sanitise(disc_name);
+    home.join("Videos").join("threedrip").join(safe)
+}
+
+fn navigation_view(page: &TitleListPage) -> Option<adw::NavigationView> {
+    let mut next: Option<gtk::Widget> = page.parent();
+    while let Some(widget) = next {
+        if let Ok(nav) = widget.clone().downcast::<adw::NavigationView>() {
+            return Some(nav);
+        }
+        next = widget.parent();
+    }
+    None
 }
 
 fn format_group_title(result: &IdentificationResult) -> String {

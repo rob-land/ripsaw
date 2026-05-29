@@ -6,12 +6,24 @@ template $ThreeDripTitleListPage: Adw.NavigationPage {
 
   Adw.ToolbarView {
     [top]
-    Adw.HeaderBar {}
+    Adw.HeaderBar {
+      [end]
+      Button rip_button {
+        action-name: "page.rip-selected";
+        sensitive: false;
+        styles ["suggested-action"]
+
+        child: Adw.ButtonContent {
+          icon-name: "document-save-symbolic";
+          label: _("Rip Selected");
+        };
+      }
+    }
 
     content: Adw.PreferencesPage {
       Adw.PreferencesGroup title_group {
         title: _("Titles found");
-        description: _("Each row is a title makemkvcon detected. Click one for details.");
+        description: _("Tick the titles you want to rip, then press the Rip button.");
       }
     };
   }

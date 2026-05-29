@@ -13,6 +13,7 @@ use std::process::Command;
 const BLUEPRINTS: &[&str] = &[
     "data/resources/ui/window.blp",
     "data/resources/ui/title-list-page.blp",
+    "data/resources/ui/rip-progress-page.blp",
 ];
 
 fn main() {

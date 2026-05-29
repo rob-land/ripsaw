@@ -1,0 +1,82 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $ThreeDripRipProgressPage: Adw.NavigationPage {
+  title: _("Ripping");
+
+  Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {}
+
+    content: ScrolledWindow {
+      hexpand: true;
+      vexpand: true;
+      child: Adw.Clamp {
+        Box {
+          orientation: vertical;
+          margin-top: 24;
+          margin-bottom: 24;
+          margin-start: 24;
+          margin-end: 24;
+          spacing: 24;
+
+          Adw.PreferencesGroup overall_group {
+            title: _("Current title");
+
+            Adw.ActionRow current_label {
+              title: _("Idle");
+              subtitle: "";
+            }
+
+            Adw.PreferencesRow {
+              activatable: false;
+              focusable: false;
+              child: Box {
+                orientation: vertical;
+                margin-top: 12;
+                margin-bottom: 12;
+                margin-start: 12;
+                margin-end: 12;
+                spacing: 6;
+
+                ProgressBar current_progress {
+                  show-text: true;
+                }
+
+                ProgressBar total_progress {
+                  show-text: true;
+                }
+              };
+            }
+          }
+
+          Adw.PreferencesGroup queue_group {
+            title: _("Queue");
+            description: _("Titles to rip");
+          }
+
+          Adw.PreferencesGroup log_group {
+            title: _("Log");
+
+            Adw.PreferencesRow {
+              activatable: false;
+              focusable: false;
+              child: ScrolledWindow {
+                min-content-height: 160;
+                child: TextView log_view {
+                  editable: false;
+                  monospace: true;
+                  cursor-visible: false;
+                  top-margin: 8;
+                  bottom-margin: 8;
+                  left-margin: 8;
+                  right-margin: 8;
+                };
+              };
+            }
+          }
+        }
+      };
+    };
+  }
+}
