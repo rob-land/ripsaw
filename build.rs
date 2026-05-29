@@ -15,6 +15,7 @@ const BLUEPRINTS: &[&str] = &[
     "data/resources/ui/title-list-page.blp",
     "data/resources/ui/rip-progress-page.blp",
     "data/resources/ui/preferences-dialog.blp",
+    "data/resources/ui/help-overlay.blp",
 ];
 
 fn main() {
@@ -58,7 +59,19 @@ fn main() {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            format!(r#"    <file compressed="true" preprocess="xml-stripblanks">ui/{stem}.ui</file>"#)
+            // GtkApplicationWindow looks for help-overlay.ui under
+            // <resource_base_path>/gtk/, so the help overlay must land at
+            // a gtk/-prefixed alias inside the bundle while still being
+            // sourced from the same ui/ tree.
+            if stem == "help-overlay" {
+                format!(
+                    r#"    <file alias="gtk/help-overlay.ui" compressed="true" preprocess="xml-stripblanks">ui/{stem}.ui</file>"#
+                )
+            } else {
+                format!(
+                    r#"    <file compressed="true" preprocess="xml-stripblanks">ui/{stem}.ui</file>"#
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join("\n");

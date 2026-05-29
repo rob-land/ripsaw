@@ -1,0 +1,35 @@
+using Gtk 4.0;
+
+ShortcutsWindow help_overlay {
+  modal: true;
+
+  ShortcutsSection {
+    section-name: "shortcuts";
+    max-height: 12;
+
+    ShortcutsGroup {
+      title: C_("shortcut window", "General");
+
+      ShortcutsShortcut {
+        title: C_("shortcut window", "Open file");
+        action-name: "win.open-iso";
+      }
+      ShortcutsShortcut {
+        title: C_("shortcut window", "Open disc");
+        action-name: "win.open-disc";
+      }
+      ShortcutsShortcut {
+        title: C_("shortcut window", "Preferences");
+        action-name: "app.preferences";
+      }
+      ShortcutsShortcut {
+        title: C_("shortcut window", "Keyboard shortcuts");
+        accelerator: "<ctrl>question";
+      }
+      ShortcutsShortcut {
+        title: C_("shortcut window", "Quit");
+        action-name: "app.quit";
+      }
+    }
+  }
+}

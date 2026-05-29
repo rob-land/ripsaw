@@ -56,6 +56,9 @@ fn register_actions(app: &adw::Application) {
     app.add_action_entries([about, preferences, quit]);
     app.set_accels_for_action("app.quit", &["<Primary>q"]);
     app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
+    app.set_accels_for_action("win.open-iso", &["<Primary>o"]);
+    app.set_accels_for_action("win.open-disc", &["<Primary>d"]);
+    app.set_accels_for_action("win.show-help-overlay", &["<Primary>question"]);
 }
 
 fn show_preferences(app: &adw::Application) {
