@@ -6,6 +6,7 @@
 // decoder (slice header parsing, reference-picture-list construction,
 // inter-view prediction wiring) lives ahead in the libmvc skeleton.
 
+pub mod annexb;
 pub mod bitstream;
 pub mod decoder;
 pub mod ebml;
