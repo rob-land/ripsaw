@@ -463,4 +463,82 @@ mod live_tests {
         assert!(scan_result.titles.len() > 0, "expected at least one title");
         assert!(scan_result.makemkv_version.is_some(), "expected version parsed");
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn extract_smallest_title_when_env_var_set() {
+        let Ok(iso) = std::env::var("THREEDRIP_TEST_ISO_PATH") else {
+            eprintln!("THREEDRIP_TEST_ISO_PATH not set; skipping live extract test");
+            return;
+        };
+        let iso_path = PathBuf::from(iso);
+        let scan_result = match scan(&ScanSource::Iso(iso_path.clone())).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("preliminary scan failed: {e}");
+                return;
+            }
+        };
+        let smallest = scan_result
+            .titles
+            .iter()
+            .filter(|t| t.size_bytes.is_some())
+            .min_by_key(|t| t.size_bytes.unwrap())
+            .expect("at least one title with a size");
+        let expected_filename = smallest
+            .output_file
+            .clone()
+            .unwrap_or_else(|| format!("title_t{:02}.mkv", smallest.index));
+
+        eprintln!(
+            "extracting title {} (dur={}s, size={} bytes) -> {}",
+            smallest.index,
+            smallest.duration_seconds.unwrap_or(0),
+            smallest.size_bytes.unwrap_or(0),
+            expected_filename,
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExtractEvent>(64);
+
+        let extract_task = {
+            let iso_path = iso_path.clone();
+            let out_path = dir.path().to_path_buf();
+            let title_index = smallest.index;
+            let filename = expected_filename.clone();
+            tokio::spawn(async move {
+                extract_title(
+                    &ScanSource::Iso(iso_path),
+                    title_index,
+                    &out_path,
+                    &filename,
+                    Some(tx),
+                )
+                .await
+            })
+        };
+
+        let mut last_logged = 0.0f32;
+        while let Some(event) = rx.recv().await {
+            if let ExtractEvent::Progress(p) = &event {
+                let frac = p.total_fraction();
+                if frac - last_logged > 0.10 {
+                    eprintln!(
+                        "  total {:.0}%  current {:.0}%  ({})",
+                        frac * 100.0,
+                        p.current_fraction() * 100.0,
+                        p.current_label.as_deref().unwrap_or(""),
+                    );
+                    last_logged = frac;
+                }
+            }
+        }
+
+        let produced = extract_task
+            .await
+            .expect("extract task join")
+            .expect("extract result");
+        let meta = tokio::fs::metadata(&produced).await.expect("metadata");
+        eprintln!("extracted -> {} ({} bytes)", produced.display(), meta.len());
+        assert!(meta.len() > 1_000_000, "MKV must be larger than 1 MB, got {}", meta.len());
+    }
 }
