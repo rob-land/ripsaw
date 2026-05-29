@@ -76,7 +76,7 @@ fn show_about(app: &adw::Application) {
         .application_icon(crate::APP_ID)
         .version(env!("CARGO_PKG_VERSION"))
         .developer_name("The Ripsaw Contributors")
-        .website("https://github.com/ripsaw/ripsaw")
+        .website("https://git.rob.land/rob/ripsaw")
         .copyright("© 2026 The Ripsaw Authors")
         .license_type(gtk::License::Gpl30)
         .comments("GTK4/libadwaita disc-ripping frontend for MakeMKV.\n\nDisc identification via TheDiscDB, Jellyfin/Plex/Kodi naming, and a future 3D MVC pipeline.")
