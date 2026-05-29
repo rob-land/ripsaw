@@ -35,5 +35,31 @@ template $ThreeDripPreferencesDialog: Adw.PreferencesDialog {
         };
       }
     }
+
+    Adw.PreferencesGroup {
+      title: _("Sonarr");
+      description: _("Look up canonical series names and episode titles for TV rips.");
+
+      Adw.EntryRow sonarr_url_row {
+        title: _("URL");
+      }
+
+      Adw.PasswordEntryRow sonarr_key_row {
+        title: _("API key");
+      }
+    }
+
+    Adw.PreferencesGroup {
+      title: _("Radarr");
+      description: _("Look up canonical movie titles and IDs for movie rips.");
+
+      Adw.EntryRow radarr_url_row {
+        title: _("URL");
+      }
+
+      Adw.PasswordEntryRow radarr_key_row {
+        title: _("API key");
+      }
+    }
   }
 }

@@ -15,6 +15,10 @@ mod imp {
     pub struct PreferencesDialog {
         #[template_child] pub library_root_row: TemplateChild<adw::ActionRow>,
         #[template_child] pub scheme_combo: TemplateChild<adw::ComboRow>,
+        #[template_child] pub sonarr_url_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub sonarr_key_row: TemplateChild<adw::PasswordEntryRow>,
+        #[template_child] pub radarr_url_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub radarr_key_row: TemplateChild<adw::PasswordEntryRow>,
     }
 
     #[glib::object_subclass]
@@ -61,6 +65,10 @@ impl PreferencesDialog {
         let current = settings().lock().expect("settings mutex").clone();
         self.imp().library_root_row.set_subtitle(&format_root(&current.library_root));
         self.imp().scheme_combo.set_selected(current.scheme.to_index());
+        self.imp().sonarr_url_row.set_text(current.sonarr.url.as_deref().unwrap_or(""));
+        self.imp().sonarr_key_row.set_text(current.sonarr.api_key.as_deref().unwrap_or(""));
+        self.imp().radarr_url_row.set_text(current.radarr.url.as_deref().unwrap_or(""));
+        self.imp().radarr_key_row.set_text(current.radarr.api_key.as_deref().unwrap_or(""));
     }
 
     fn connect_signals(&self) {
@@ -87,6 +95,14 @@ impl PreferencesDialog {
                 let _ = dialog; // keep weak alive for the closure
             }
         ));
+
+        // Sonarr / Radarr fields: persist on focus-out / apply via the
+        // EntryRow's `apply` signal.
+        let imp = self.imp();
+        connect_entry_apply(&imp.sonarr_url_row, |s, t| s.sonarr.url = nonempty(t));
+        connect_password_apply(&imp.sonarr_key_row, |s, t| s.sonarr.api_key = nonempty(t));
+        connect_entry_apply(&imp.radarr_url_row, |s, t| s.radarr.url = nonempty(t));
+        connect_password_apply(&imp.radarr_key_row, |s, t| s.radarr.api_key = nonempty(t));
     }
 
     fn pick_library_root(&self) {
@@ -135,4 +151,41 @@ fn format_root(p: &Option<PathBuf>) -> String {
         Some(path) => path.display().to_string(),
         None => "not configured (rips will use ~/Videos)".into(),
     }
+}
+
+fn nonempty(text: &str) -> Option<String> {
+    let t = text.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+fn connect_entry_apply(
+    row: &adw::EntryRow,
+    update: impl Fn(&mut crate::settings::UserSettings, &str) + 'static,
+) {
+    row.connect_apply(move |row| {
+        let text = row.text().to_string();
+        let mut guard = settings().lock().expect("settings mutex");
+        update(&mut guard, &text);
+        if let Err(e) = guard.save() {
+            tracing::warn!("failed to save settings: {e}");
+        }
+    });
+}
+
+fn connect_password_apply(
+    row: &adw::PasswordEntryRow,
+    update: impl Fn(&mut crate::settings::UserSettings, &str) + 'static,
+) {
+    row.connect_apply(move |row| {
+        let text = row.text().to_string();
+        let mut guard = settings().lock().expect("settings mutex");
+        update(&mut guard, &text);
+        if let Err(e) = guard.save() {
+            tracing::warn!("failed to save settings: {e}");
+        }
+    });
 }

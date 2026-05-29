@@ -12,19 +12,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::naming::Scheme;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserSettings {
     pub library_root: Option<PathBuf>,
     #[serde(default)]
     pub scheme: SchemeKind,
+    #[serde(default)]
+    pub sonarr: ServarrConfig,
+    #[serde(default)]
+    pub radarr: ServarrConfig,
 }
 
-impl Default for UserSettings {
-    fn default() -> Self {
-        UserSettings {
-            library_root: None,
-            scheme: SchemeKind::default(),
-        }
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServarrConfig {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+impl ServarrConfig {
+    /// `true` when both fields are non-empty.
+    pub fn is_configured(&self) -> bool {
+        self.url
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+            && self
+                .api_key
+                .as_ref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
     }
 }
 
