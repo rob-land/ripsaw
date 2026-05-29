@@ -380,6 +380,7 @@ mod tests {
             disc_type: DiscType::BluRay,
             content_hash: None,
             identities: Vec::new(),
+            source: crate::rip::makemkv::ScanSource::Iso(std::path::PathBuf::new()),
             source_file: None,
             has_mvc: false,
         }

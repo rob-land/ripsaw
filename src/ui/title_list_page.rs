@@ -40,6 +40,7 @@ mod imp {
         pub episode_entries: RefCell<Vec<gtk::Entry>>,
         pub titles: RefCell<Vec<TitleAttributes>>,
         pub iso_path: RefCell<Option<PathBuf>>,
+        pub source: RefCell<Option<crate::rip::makemkv::ScanSource>>,
         pub disc_name: RefCell<Option<String>>,
         pub source_kind: RefCell<Option<StereoSource>>,
     }
@@ -83,6 +84,7 @@ impl TitleListPage {
     pub fn from_identification(result: &IdentificationResult, iso_path: PathBuf) -> Self {
         let page: Self = glib::Object::new();
         page.imp().iso_path.replace(Some(iso_path));
+        page.imp().source.replace(Some(result.source.clone()));
         page.imp().disc_name.replace(result.scan.disc.name.clone());
         page.imp().titles.replace(result.scan.titles.clone());
         // Distinguish mvcC BlockAddition packaging (modern MakeMKV;
@@ -522,10 +524,10 @@ impl TitleListPage {
         if selected.is_empty() {
             return;
         }
-        let iso_path = match self.imp().iso_path.borrow().clone() {
-            Some(p) => p,
+        let source = match self.imp().source.borrow().clone() {
+            Some(s) => s,
             None => {
-                tracing::error!("rip requested but iso_path not set on TitleListPage");
+                tracing::error!("rip requested but source not set on TitleListPage");
                 return;
             }
         };
@@ -594,7 +596,7 @@ impl TitleListPage {
             tracing::warn!("TitleListPage has no NavigationView ancestor; cannot push RipProgressPage");
         }
 
-        crate::rip::orchestrator::run_rip_queue(iso_path, queue, progress.downgrade());
+        crate::rip::orchestrator::run_rip_queue(source, queue, progress.downgrade());
     }
 }
 
@@ -615,6 +617,7 @@ fn build_pseudo_identification(
         disc_type: DiscType::BluRay,
         content_hash: None,
         identities: Vec::new(),
+        source: crate::rip::makemkv::ScanSource::Iso(std::path::PathBuf::new()),
         source_file: None,
         has_mvc: false,
     }

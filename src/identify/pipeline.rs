@@ -39,6 +39,11 @@ pub struct IdentificationResult {
     pub disc_type: DiscType,
     pub content_hash: Option<String>,
     pub identities: Vec<Identity>,
+    /// What `makemkvcon` should be pointed at to extract titles from
+    /// this source. `Disc(N)` for physical drives, `Iso(path)` for ISO
+    /// images and (vacuously) for already-extracted MKVs where the
+    /// rip-button path is never taken.
+    pub source: ScanSource,
     /// For non-disc sources (MKVs already on disk), the original file
     /// path so downstream actions (conversion, transcode) know where to
     /// find the input bytes.
@@ -82,6 +87,7 @@ pub async fn identify_physical_disc(
         disc_type,
         content_hash: hash,
         identities,
+        source,
         source_file: None,
         has_mvc: false,
     })
@@ -109,6 +115,7 @@ pub async fn identify_mkv(mkv_path: PathBuf) -> Result<IdentificationResult> {
         disc_type,
         content_hash: None,
         identities: Vec::new(),
+        source: ScanSource::Iso(mkv_path.clone()),
         source_file: Some(mkv_path),
         has_mvc,
     })
@@ -264,6 +271,7 @@ pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
         disc_type,
         content_hash: content_hash_value,
         identities,
+        source,
         source_file: Some(iso_path),
         has_mvc: false,
     })

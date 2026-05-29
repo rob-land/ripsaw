@@ -247,9 +247,17 @@ pub async fn extract_title(
 
     let mut agg = Aggregator::new();
     let mut state = ExtractProgress::default();
+    // makemkvcon writes its real error reason as MSG records on stdout
+    // (we asked for `--messages=-stdout`), so stderr is almost always
+    // empty on failure. Collect MSG text here so we can surface it in
+    // the error path.
+    let mut messages: Vec<String> = Vec::new();
 
     while let Some(line) = reader.next_line().await.context("reading makemkvcon stdout")? {
         for rec in agg.push_line(&line) {
+            if let Record::Msg { text, .. } = &rec {
+                messages.push(text.clone());
+            }
             if let Some(event) = apply_record(&mut state, &rec) {
                 if let Some(tx) = &event_tx {
                     // Drop events when the consumer is full rather than
@@ -260,6 +268,9 @@ pub async fn extract_title(
         }
     }
     for rec in agg.finish() {
+        if let Record::Msg { text, .. } = &rec {
+            messages.push(text.clone());
+        }
         if let Some(event) = apply_record(&mut state, &rec) {
             if let Some(tx) = &event_tx {
                 let _ = tx.try_send(event);
@@ -275,9 +286,10 @@ pub async fn extract_title(
             let _ = e.read_to_string(&mut stderr_buf).await;
         }
         return Err(anyhow!(
-            "makemkvcon mkv exited with status {}; stderr: {}",
+            "makemkvcon mkv exited with status {}; stderr: {}; messages: {}",
             status,
-            stderr_buf.trim()
+            stderr_buf.trim(),
+            if messages.is_empty() { "(none)".into() } else { messages.join(" | ") },
         ));
     }
 

@@ -28,7 +28,7 @@ enum RipMessage {
 /// and continue to the next item. `progress_weak` is a weak reference so
 /// the task tears itself down cleanly if the page disappears.
 pub fn run_rip_queue(
-    iso_path: PathBuf,
+    source: ScanSource,
     queue: Vec<RipQueueItem>,
     progress_weak: glib::WeakRef<RipProgressPage>,
 ) {
@@ -58,13 +58,13 @@ pub fn run_rip_queue(
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ExtractEvent>(64);
 
             let extract_handle = {
-                let iso_path = iso_path.clone();
+                let source = source.clone();
                 let output_dir = item.output_dir.clone();
                 let filename = item.expected_output_filename.clone();
                 let title_index = item.title_index;
                 tokio::spawn(async move {
                     extract_title(
-                        &ScanSource::Iso(iso_path),
+                        &source,
                         title_index,
                         &output_dir,
                         &filename,
