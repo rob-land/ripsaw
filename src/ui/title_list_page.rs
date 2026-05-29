@@ -6,6 +6,9 @@ use adw::subclass::prelude::*;
 use gtk::glib::{self, clone};
 use gtk::{gio, CompositeTemplate};
 
+use crate::convert::format::OutputFormat;
+use crate::convert::plan::{ConversionPlan, StereoSource};
+use crate::convert::runner::run_conversion;
 use crate::identify::composite::{analyze_relations, TitleRelation};
 use crate::identify::pipeline::IdentificationResult;
 use crate::identify::DiscType;
@@ -27,6 +30,7 @@ mod imp {
     pub struct TitleListPage {
         #[template_child] pub title_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child] pub rip_button: TemplateChild<gtk::Button>,
+        #[template_child] pub convert_button: TemplateChild<gtk::Button>,
         #[template_child] pub series_toggle: TemplateChild<adw::SwitchRow>,
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
@@ -34,6 +38,7 @@ mod imp {
         pub titles: RefCell<Vec<TitleAttributes>>,
         pub iso_path: RefCell<Option<PathBuf>>,
         pub disc_name: RefCell<Option<String>>,
+        pub source_kind: RefCell<Option<StereoSource>>,
     }
 
     #[glib::object_subclass]
@@ -77,7 +82,18 @@ impl TitleListPage {
         page.imp().iso_path.replace(Some(iso_path));
         page.imp().disc_name.replace(result.scan.disc.name.clone());
         page.imp().titles.replace(result.scan.titles.clone());
+        // For now treat any has_mvc=true source as the mvcC-with-block-additions
+        // case (the other MVC family — inline stereo mode 13/14 — fails the
+        // same way today, since both depend on the same MVC decoder).
+        let source_kind = if result.has_mvc {
+            Some(StereoSource::MvcWithBlockAdditions)
+        } else {
+            None
+        };
+        page.imp().source_kind.replace(source_kind);
         page.populate_with_identity(result);
+        page.imp().convert_button.set_visible(result.has_mvc);
+        page.imp().rip_button.set_visible(result.source_file.is_none());
         page
     }
 
@@ -189,10 +205,86 @@ impl TitleListPage {
             self,
             move |_, _| page.start_rip()
         ));
+        let convert_action = gio::SimpleAction::new("convert-to-fsbs", None);
+        convert_action.connect_activate(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_, _| page.start_conversion(OutputFormat::FullSbs)
+        ));
 
         let group = gio::SimpleActionGroup::new();
         group.add_action(&rip_action);
+        group.add_action(&convert_action);
         self.insert_action_group("page", Some(&group));
+    }
+
+    fn start_conversion(&self, format: OutputFormat) {
+        let Some(input) = self.imp().iso_path.borrow().clone() else {
+            tracing::error!("convert requested but no input path on TitleListPage");
+            return;
+        };
+        let Some(source) = *self.imp().source_kind.borrow() else {
+            self.parent_window().map(|w| w.add_toast(
+                adw::Toast::builder()
+                    .title("No 3D content detected — nothing to convert.")
+                    .timeout(4)
+                    .build(),
+            ));
+            return;
+        };
+
+        let output = ConversionPlan::default_output_path(&input, format);
+        let plan = ConversionPlan { input, output, format, source };
+
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<PathBuf>>(1);
+        let plan_for_task = plan.clone();
+        crate::runtime::tokio_runtime().spawn(async move {
+            let _ = tx.send(run_conversion(plan_for_task, None).await).await;
+        });
+
+        let label = format.label().to_string();
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak(rename_to = page)]
+            self,
+            async move {
+                let result = rx.recv().await;
+                let Some(window) = page.parent_window() else { return; };
+                match result {
+                    Ok(Ok(output_path)) => {
+                        let toast = adw::Toast::builder()
+                            .title(&format!(
+                                "Converted to {label} → {}",
+                                output_path.display()
+                            ))
+                            .timeout(6)
+                            .build();
+                        window.add_toast(toast);
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("conversion failed: {e:#}");
+                        let toast = adw::Toast::builder()
+                            .title(&format!("Conversion failed: {e}"))
+                            .timeout(8)
+                            .build();
+                        window.add_toast(toast);
+                    }
+                    Err(e) => {
+                        tracing::error!("conversion channel closed: {e}");
+                    }
+                }
+            }
+        ));
+    }
+
+    fn parent_window(&self) -> Option<adw::ToastOverlay> {
+        let mut next: Option<gtk::Widget> = self.parent();
+        while let Some(widget) = next {
+            if let Ok(overlay) = widget.clone().downcast::<adw::ToastOverlay>() {
+                return Some(overlay);
+            }
+            next = widget.parent();
+        }
+        None
     }
 
     fn collect_episode_titles(&self) -> HashMap<u32, String> {

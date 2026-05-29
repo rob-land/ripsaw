@@ -18,6 +18,18 @@ template $ThreeDripTitleListPage: Adw.NavigationPage {
           label: _("Rip Selected");
         };
       }
+
+      Button convert_button {
+        action-name: "page.convert-to-fsbs";
+        visible: false;
+        styles ["suggested-action"]
+        tooltip-text: _("Convert this 3D source to full side-by-side");
+
+        child: Adw.ButtonContent {
+          icon-name: "view-paged-symbolic";
+          label: _("Convert to FSBS");
+        };
+      }
     }
 
     content: Adw.PreferencesPage {
