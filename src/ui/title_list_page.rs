@@ -11,7 +11,7 @@ use crate::convert::plan::{ConversionPlan, StereoSource};
 use crate::convert::runner::run_conversion;
 use crate::identify::composite::{analyze_relations, TitleRelation};
 use crate::identify::pipeline::IdentificationResult;
-use crate::identify::DiscType;
+use crate::identify::{DiscType, Identity, TitleIdentity, TitleRole};
 use crate::integrations::{radarr::RadarrClient, sonarr::SonarrClient};
 use crate::rip::makemkv_parse::{MakemkvScan, TitleAttributes};
 use crate::rip::plan::{parse_series_label, DiscContentKind};
@@ -43,6 +43,7 @@ mod imp {
         pub source: RefCell<Option<crate::rip::makemkv::ScanSource>>,
         pub disc_name: RefCell<Option<String>>,
         pub source_kind: RefCell<Option<StereoSource>>,
+        pub identities: RefCell<Vec<Identity>>,
     }
 
     #[glib::object_subclass]
@@ -120,6 +121,7 @@ impl TitleListPage {
         let group = self.imp().title_group.get();
         group.set_title(&format_group_title(result));
         group.set_description(Some(&format_group_description(result)));
+        self.imp().identities.replace(result.identities.clone());
         if let Some(name) = &result.scan.disc.name {
             self.set_title(name);
         }
@@ -162,16 +164,39 @@ impl TitleListPage {
             .collect();
         let relations = analyze_relations(&pairs);
 
+        // First identity (highest-confidence TheDiscDB match) provides
+        // per-title roles + display titles.
+        let identities = self.imp().identities.borrow();
+        let identity_titles: &[TitleIdentity] = identities
+            .first()
+            .map(|i| i.titles.as_slice())
+            .unwrap_or(&[]);
+
         for (t, relation) in scan.titles.iter().zip(relations.iter()) {
-            let title_label = match (t.index, t.name.as_deref()) {
-                (idx, Some(n)) if !n.is_empty() => format!("Title {idx} — {n}"),
-                (idx, _) => format!("Title {idx}"),
+            let identity = identity_titles.iter().find(|i| i.index == t.index);
+            let role = identity.map(|i| i.role);
+            let display_title = identity
+                .map(|i| i.display_title.as_str())
+                .filter(|s| !s.is_empty());
+
+            // Row title: TheDiscDB display title if we have one, otherwise
+            // the MakeMKV name, otherwise just "Title N".
+            let title_label = match (display_title, t.name.as_deref()) {
+                (Some(dt), _) => format!("Title {} — {}", t.index, dt),
+                (None, Some(n)) if !n.is_empty() => format!("Title {} — {}", t.index, n),
+                (None, _) => format!("Title {}", t.index),
             };
             let duration = format_duration(t.duration_seconds.unwrap_or(0));
             let size = format_bytes(t.size_bytes.unwrap_or(0));
             let source = t.source_file.as_deref().unwrap_or("?");
 
-            let mut subtitle_parts = vec![duration, size, source.to_string()];
+            let mut subtitle_parts: Vec<String> = Vec::with_capacity(5);
+            if let Some(r) = role {
+                subtitle_parts.push(role_badge(r).to_string());
+            }
+            subtitle_parts.push(duration);
+            subtitle_parts.push(size);
+            subtitle_parts.push(source.to_string());
             match relation {
                 TitleRelation::Composite { constituents } => {
                     subtitle_parts.push(format!("contains {} other title(s)", constituents.len()));
@@ -539,7 +564,12 @@ impl TitleListPage {
             .unwrap_or_else(|| "Unknown Disc".to_string());
 
         let titles_snapshot = self.imp().titles.borrow().clone();
-        let identification_for_plan = build_pseudo_identification(&titles_snapshot, &disc_name);
+        let identities_snapshot = self.imp().identities.borrow().clone();
+        let identification_for_plan = build_pseudo_identification(
+            &titles_snapshot,
+            &disc_name,
+            identities_snapshot,
+        );
 
         let user_settings = settings().lock().expect("settings mutex").clone();
         let library_root = user_settings
@@ -603,6 +633,7 @@ impl TitleListPage {
 fn build_pseudo_identification(
     titles: &[TitleAttributes],
     disc_name: &str,
+    identities: Vec<Identity>,
 ) -> IdentificationResult {
     IdentificationResult {
         scan: MakemkvScan {
@@ -616,7 +647,7 @@ fn build_pseudo_identification(
         mount: None,
         disc_type: DiscType::BluRay,
         content_hash: None,
-        identities: Vec::new(),
+        identities,
         source: crate::rip::makemkv::ScanSource::Iso(std::path::PathBuf::new()),
         source_file: None,
         has_mvc: false,
@@ -668,6 +699,20 @@ fn format_disc_type(t: DiscType) -> &'static str {
         DiscType::BluRay => "Blu-ray",
         DiscType::UltraHdBluRay => "4K UHD Blu-ray",
         DiscType::BluRay3D => "3D Blu-ray",
+    }
+}
+
+fn role_badge(role: TitleRole) -> &'static str {
+    match role {
+        TitleRole::Main => "Main feature",
+        TitleRole::Trailer => "Trailer",
+        TitleRole::BehindTheScenes => "Behind the scenes",
+        TitleRole::DeletedScene => "Deleted scene",
+        TitleRole::Featurette => "Featurette",
+        TitleRole::Interview => "Interview",
+        TitleRole::Scene => "Scene",
+        TitleRole::Short => "Short",
+        TitleRole::Other => "Extra",
     }
 }
 

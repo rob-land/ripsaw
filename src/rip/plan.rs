@@ -9,7 +9,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::identify::pipeline::IdentificationResult;
-use crate::identify::TitleRole;
+use crate::identify::{TitleIdentity, TitleRole};
 use crate::naming::{
     self, jellyfin::Jellyfin, kodi::Kodi, plex::Plex, EpisodeContext, ExtraContext, MovieContext,
     Scheme,
@@ -160,6 +160,11 @@ pub fn plan_rip(
 ) -> Vec<PlannedTitle> {
     let main_index = main_title_index(identification);
     let role_for = |idx: u32| role_for_title(idx, identification, main_index);
+    let identity_titles: &[TitleIdentity] = identification
+        .identities
+        .first()
+        .map(|i| i.titles.as_slice())
+        .unwrap_or(&[]);
     let mut episode_counter: u32 = naming.map(|n| n.episode_start).unwrap_or(1);
     selected_indexes
         .iter()
@@ -171,6 +176,7 @@ pub fn plan_rip(
                 .find(|t| t.index == *idx)
                 .map(|t| {
                     let role = role_for(t.index);
+                    let identity = identity_titles.iter().find(|i| i.index == t.index);
                     let is_series_episode = matches!(
                         naming,
                         Some(n) if n.content_kind == DiscContentKind::Series
@@ -186,7 +192,7 @@ pub fn plan_rip(
                         .get(&t.index)
                         .map(|s| s.as_str())
                         .filter(|s| !s.trim().is_empty());
-                    plan_one_title(t, role, naming, episode_number, episode_title)
+                    plan_one_title(t, role, identity, naming, episode_number, episode_title)
                 })
         })
         .collect()
@@ -195,13 +201,18 @@ pub fn plan_rip(
 fn plan_one_title(
     t: &TitleAttributes,
     role: TitleRole,
+    identity: Option<&TitleIdentity>,
     naming: Option<&NamingOpts>,
     episode_number: Option<u32>,
     episode_title: Option<&str>,
 ) -> PlannedTitle {
-    let display_label = match (t.index, t.name.as_deref()) {
-        (idx, Some(n)) if !n.is_empty() => format!("Title {idx} — {n}"),
-        (idx, _) => format!("Title {idx}"),
+    let identity_display = identity
+        .map(|i| i.display_title.as_str())
+        .filter(|s| !s.is_empty());
+    let display_label = match (t.index, identity_display, t.name.as_deref()) {
+        (idx, Some(dt), _) => format!("Title {idx} — {dt}"),
+        (idx, None, Some(n)) if !n.is_empty() => format!("Title {idx} — {n}"),
+        (idx, _, _) => format!("Title {idx}"),
     };
     let output_filename = t
         .output_file
@@ -209,7 +220,7 @@ fn plan_one_title(
         .unwrap_or_else(|| format!("title_t{:02}.mkv", t.index));
     let (output_dir, final_path) = match naming {
         Some(opts) => {
-            let final_p = scheme_path(t, role, opts, episode_number, episode_title);
+            let final_p = scheme_path(t, role, identity, opts, episode_number, episode_title);
             let dir = final_p
                 .parent()
                 .map(|p| p.to_path_buf())
@@ -231,6 +242,7 @@ fn plan_one_title(
 fn scheme_path(
     t: &TitleAttributes,
     role: TitleRole,
+    identity: Option<&TitleIdentity>,
     opts: &NamingOpts,
     episode_number: Option<u32>,
     episode_title: Option<&str>,
@@ -270,11 +282,19 @@ fn scheme_path(
     match role {
         TitleRole::Main => scheme.movie_path(&movie_ctx),
         other_role => {
-            let display_title = t
-                .name
-                .as_deref()
+            // Prefer TheDiscDB's display title for the extra's filename
+            // ("Theatrical Trailer.mkv"); fall back to MakeMKV's title
+            // name; last resort "Title N".
+            let display_title = identity
+                .map(|i| i.display_title.as_str())
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
+                .or_else(|| {
+                    t.name
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                })
                 .unwrap_or_else(|| format!("Title {}", t.index));
             let title_identity = crate::identify::TitleIdentity {
                 index: t.index,
