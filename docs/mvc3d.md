@@ -261,14 +261,40 @@ Replacing it with `libmvc` once that decoder lands is the obvious
 future optimisation -- the rest of the pipeline already streams
 YUV between subprocesses.
 
-The mvcC-format MKVs (modern MakeMKV with the dependent view in
-per-frame BlockAdditions, e.g. `samples/3D_LR_Pattern.mkv`) still
-fail with a clear "BlockAddition extractor not yet built" message.
-That extractor is the next milestone: walk MKV clusters, pull
-BlockAddID 1 blob (the dependent view's NAL units), prepend the
-appropriate Subset SPS / PPS from the mvcC config record, and
-splice into an Annex B stream alongside the base view -- exactly
-the same input format ldecod is happy to consume today.
+### mvcC BlockAddition extractor + packaging discovery
+
+`src/mvc/mkv_extract.rs` walks Segment / Tracks / TrackEntry to find a
+video track with an `mvcC` BlockAdditionMapping, then walks
+Segment / Cluster / { SimpleBlock | BlockGroup -> Block + BlockAdditions }
+to recover the dependent-view NALs. For per-frame BlockAddition
+packaging it splices BlockAddID=1 payload (dep view) with the Block
+payload (base view) into a single Annex B stream, prepending the
+`mvcC` SPS / PPS list as Annex B parameter sets. SimpleBlock content
+is converted from length-prefixed NALs to Annex B unchanged. Six
+unit tests cover the Block-header / lacing / track-filter logic.
+
+Running the extractor against `samples/3D_LR_Pattern.mkv` revealed
+that this sample, despite *carrying* an `mvcC` BlockAdditionMapping,
+uses **SimpleBlock** for the actual frames -- and SimpleBlock cannot
+carry BlockAdditions. The H.264 elementary stream inside each
+SimpleBlock has the same NAL-type histogram as the
+inline-stereo-mode sample (262 type-7 SPS, 261 type-15 Subset SPS,
+1566 type-5 IDR, 34386 type-1 slices, 35952 type-20 MVC dep-view
+slice extensions). Both `mkvextract` and our walker produce
+byte-identical 59 MB Annex B streams from it.
+
+ldecod, which decodes the stereo-mode-13/14 sample into per-view
+YUVs, does *not* recognise this stream as MVC -- it produces a
+single `output.yuv` rather than the
+`output_ViewId0000.yuv` / `output_ViewId0001.yuv` pair. Both
+streams look superficially similar; the most plausible suspects
+are subtle differences in Subset SPS `profile_idc` (Multiview High
+vs Stereo High), view-id-list ordering, prefix-NAL (type 14)
+presence/absence between base and dep slices, or SEI hints
+(view-scalability info, parallel-decoding info) that ldecod uses
+to switch modes. Chasing this belongs in the `libmvc` phase --
+replacing ldecod removes the recognition heuristic that's failing
+here.
 
 ### Build / tooling state (2026-05-28)
 
