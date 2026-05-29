@@ -229,8 +229,8 @@ copying subs through without depth.
 
 | Phase | Scope |
 |---|---|
-| **0** (sketch — current) | This document + module stubs. No 3D code runs. |
-| **1** | `libmvc` skeleton: subset SPS / MVC SPS parse, NAL types 14/15/20 routing, per-view DPB scaffolding, golden-frame test harness against `ldecod`. Single SSIF input, raw YUV output of both views, no integration into 3drip yet. |
+| ~~**0** (sketch)~~ | ✅ Done. Design doc + module stubs. |
+| **1** (in progress) | `libmvc` skeleton: subset SPS / MVC SPS parse, NAL types 14/15/20 routing, per-view DPB scaffolding, golden-frame test harness against `ldecod`. Single SSIF input, raw YUV output of both views, no integration into 3drip yet. **Sub-progress: bit reader + Exp-Golomb + RBSP extraction + NAL header parsing + Subset SPS MVC extension are landed and tested (22 unit tests including the canonical 3D BD two-view layout).** Remaining for phase 1: slice-header MVC extension, per-view DPB, inter-view prediction wiring against an upstream H.264 base-view decoder. |
 | **2** | `libmvc` correctness: ref-list construction (G.8.2), inter-view prediction wiring (G.8.4), bit-exact YUV match against `ldecod` on ≥3 SSIF fixtures spanning the corpus. |
 | **3** | Integration: Rust `LibmvcDecoder` impl of `MvcDecoder` trait, SBS / Half-SBS composer. End-to-end "disc → SBS MKV" on one real 3D BD. |
 | **4** | TAB / Half-TAB / Frame-Sequential / Interleaved layouts. Hardware-accelerated composition (VA-API). |

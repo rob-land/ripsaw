@@ -1,7 +1,17 @@
 // 3D MVC pipeline. See docs/mvc3d.md.
+//
+// `bitstream`, `rbsp`, `nal`, and `sps` are the phase-0 bitstream
+// plumbing — they implement just enough of Annex G to recognise MVC
+// NAL units and decode the Subset SPS MVC extension. The actual MVC
+// decoder (slice header parsing, reference-picture-list construction,
+// inter-view prediction wiring) lives ahead in the libmvc skeleton.
 
+pub mod bitstream;
 pub mod decoder;
 pub mod layout;
+pub mod nal;
+pub mod rbsp;
+pub mod sps;
 
 use serde::{Deserialize, Serialize};
 
