@@ -109,7 +109,7 @@ pub fn parse_lookup_response(json: &str, expected_hash: &str) -> Result<Vec<Iden
                     continue;
                 }
                 out.push(Identity {
-                    media_item_id: media_item.id.clone(),
+                    media_item_id: media_item.id.to_string(),
                     release_slug: release.slug.clone(),
                     disc_index: disc.index,
                     titles: disc.titles.iter().map(title_identity_from).collect(),
@@ -178,7 +178,7 @@ struct MediaItemConnection {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MediaItemNode {
-    id: String,
+    id: i64,
     #[allow(dead_code)] title: Option<String>,
     #[allow(dead_code)] year: Option<i32>,
     #[allow(dead_code)] slug: Option<String>,
@@ -303,7 +303,7 @@ mod tests {
             "data": {
               "mediaItems": {
                 "nodes": [{
-                  "id": "mi-1", "title": "Some Movie", "year": 2020,
+                  "id": 760, "title": "Some Movie", "year": 2020,
                   "slug": "some-movie", "imageUrl": null, "type": "Movie",
                   "releases": [
                     {"slug": "us-bd", "isbn": null, "locale": "en-US",
@@ -358,7 +358,7 @@ mod tests {
             "data": {
               "mediaItems": {
                 "nodes": [{
-                  "id": "mi-1",
+                  "id": 760,
                   "title": "Some Movie",
                   "year": 2020,
                   "slug": "some-movie",
@@ -389,7 +389,7 @@ mod tests {
         }"#;
         let result = parse_lookup_response(json, "BBBB").unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].media_item_id, "mi-1");
+        assert_eq!(result[0].media_item_id, "760");
         assert_eq!(result[0].release_slug, "us-bd");
         assert_eq!(result[0].disc_index, 1);
         assert_eq!(result[0].titles.len(), 1);
