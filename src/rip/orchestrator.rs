@@ -29,7 +29,6 @@ enum RipMessage {
 /// the task tears itself down cleanly if the page disappears.
 pub fn run_rip_queue(
     iso_path: PathBuf,
-    output_root: PathBuf,
     queue: Vec<RipQueueItem>,
     progress_weak: glib::WeakRef<RipProgressPage>,
 ) {
@@ -38,37 +37,36 @@ pub fn run_rip_queue(
     // Worker on the tokio runtime: walks the queue, runs extract_title
     // for each title, relays events on rip_tx.
     crate::runtime::tokio_runtime().spawn(async move {
-        if let Err(e) = tokio::fs::create_dir_all(&output_root).await {
-            let _ = rip_tx
-                .send(RipMessage::Finished(
-                    0,
-                    Err(anyhow::anyhow!(
-                        "could not create output directory {}: {e}",
-                        output_root.display()
-                    )),
-                ))
-                .await;
-            let _ = rip_tx.send(RipMessage::AllDone).await;
-            return;
-        }
-
         for (index_in_queue, item) in queue.iter().enumerate() {
             let _ = rip_tx
                 .send(RipMessage::Started(index_in_queue, item.clone()))
                 .await;
 
+            if let Err(e) = tokio::fs::create_dir_all(&item.output_dir).await {
+                let _ = rip_tx
+                    .send(RipMessage::Finished(
+                        index_in_queue,
+                        Err(anyhow::anyhow!(
+                            "could not create output directory {}: {e}",
+                            item.output_dir.display()
+                        )),
+                    ))
+                    .await;
+                continue;
+            }
+
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ExtractEvent>(64);
 
             let extract_handle = {
                 let iso_path = iso_path.clone();
-                let output_root = output_root.clone();
+                let output_dir = item.output_dir.clone();
                 let filename = item.expected_output_filename.clone();
                 let title_index = item.title_index;
                 tokio::spawn(async move {
                     extract_title(
                         &ScanSource::Iso(iso_path),
                         title_index,
-                        &output_root,
+                        &output_dir,
                         &filename,
                         Some(event_tx),
                     )
@@ -81,12 +79,30 @@ pub fn run_rip_queue(
                 let _ = rip_tx.send(RipMessage::Event(event)).await;
             }
 
-            let result = match extract_handle.await {
+            let extract_result = match extract_handle.await {
                 Ok(r) => r,
                 Err(join_err) => Err(anyhow::anyhow!("extract task panicked: {join_err}")),
             };
+
+            // If the planner requested a final path, rename the produced
+            // file to match (creating parent directories as needed). This is
+            // how Jellyfin/Plex/Kodi naming actually lands on disk.
+            let final_result = match (extract_result, &item.final_path) {
+                (Ok(produced), Some(final_path)) if produced != *final_path => {
+                    let move_res = rename_to_final(&produced, final_path).await;
+                    match move_res {
+                        Ok(()) => Ok(final_path.clone()),
+                        Err(e) => Err(anyhow::anyhow!(
+                            "extracted to {}; rename to {} failed: {e}",
+                            produced.display(),
+                            final_path.display()
+                        )),
+                    }
+                }
+                (other, _) => other,
+            };
             let _ = rip_tx
-                .send(RipMessage::Finished(index_in_queue, result))
+                .send(RipMessage::Finished(index_in_queue, final_result))
                 .await;
         }
         let _ = rip_tx.send(RipMessage::AllDone).await;
@@ -95,6 +111,29 @@ pub fn run_rip_queue(
     // Consumer on the GTK main thread: receives RipMessages and updates
     // the RipProgressPage. Holds only a weak ref so a closed page lets
     // this loop fall through.
+
+    async fn rename_to_final(
+        from: &std::path::Path,
+        to: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        if let Some(parent) = to.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        // Same-filesystem rename is atomic and cheap. If `to` is on a
+        // different filesystem `rename` errors with EXDEV — fall back to
+        // copy-and-remove for that case.
+        match tokio::fs::rename(from, to).await {
+            Ok(()) => Ok(()),
+            // EXDEV = 18 on Linux. We're a Linux-only crate.
+            Err(e) if e.raw_os_error() == Some(18) => {
+                tokio::fs::copy(from, to).await?;
+                tokio::fs::remove_file(from).await?;
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     glib::MainContext::default().spawn_local(async move {
         while let Ok(msg) = rip_rx.recv().await {
             let Some(progress) = progress_weak.upgrade() else {

@@ -9,9 +9,10 @@ use gtk::{gio, CompositeTemplate};
 use crate::identify::composite::{analyze_relations, TitleRelation};
 use crate::identify::pipeline::IdentificationResult;
 use crate::identify::DiscType;
-use crate::naming;
 use crate::rip::makemkv_parse::{MakemkvScan, TitleAttributes};
-use crate::ui::rip_progress_page::{queue_from_selection, RipProgressPage};
+use crate::rip::plan::{default_library_root, naming_opts_for_unidentified, plan_rip};
+use crate::settings::SchemeKind;
+use crate::ui::rip_progress_page::{RipProgressPage, RipQueueItem};
 
 mod imp {
     use super::*;
@@ -198,16 +199,22 @@ impl TitleListPage {
             .unwrap_or_else(|| "Unknown Disc".to_string());
 
         let titles_snapshot = self.imp().titles.borrow().clone();
-        let identification_for_queue = build_pseudo_identification(&titles_snapshot);
-        let queue = queue_from_selection(&identification_for_queue, &selected);
+        let identification_for_plan = build_pseudo_identification(&titles_snapshot, &disc_name);
+
+        let library_root = default_library_root();
+        let naming_opts = naming_opts_for_unidentified(
+            library_root,
+            SchemeKind::Jellyfin,
+            &disc_name,
+        );
+        let plan = plan_rip(&identification_for_plan, &selected, Some(&naming_opts));
+        let queue: Vec<RipQueueItem> = plan.into_iter().map(RipQueueItem::from).collect();
 
         let progress = RipProgressPage::default();
         progress.set_queue(&queue);
-
-        let output_root = output_root_for(&disc_name);
         progress.append_log(&format!(
-            "Output directory: {}",
-            output_root.display()
+            "Library root: {} (Jellyfin scheme)",
+            naming_opts.library_root.display(),
         ));
 
         if let Some(nav) = navigation_view(self) {
@@ -216,18 +223,20 @@ impl TitleListPage {
             tracing::warn!("TitleListPage has no NavigationView ancestor; cannot push RipProgressPage");
         }
 
-        crate::rip::orchestrator::run_rip_queue(
-            iso_path,
-            output_root,
-            queue,
-            progress.downgrade(),
-        );
+        crate::rip::orchestrator::run_rip_queue(iso_path, queue, progress.downgrade());
     }
 }
 
-fn build_pseudo_identification(titles: &[TitleAttributes]) -> IdentificationResult {
+fn build_pseudo_identification(
+    titles: &[TitleAttributes],
+    disc_name: &str,
+) -> IdentificationResult {
     IdentificationResult {
         scan: MakemkvScan {
+            disc: crate::rip::makemkv_parse::DiscAttributes {
+                name: Some(disc_name.to_string()),
+                ..Default::default()
+            },
             titles: titles.to_vec(),
             ..Default::default()
         },
@@ -236,14 +245,6 @@ fn build_pseudo_identification(titles: &[TitleAttributes]) -> IdentificationResu
         content_hash: None,
         identities: Vec::new(),
     }
-}
-
-fn output_root_for(disc_name: &str) -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let safe = naming::sanitise(disc_name);
-    home.join("Videos").join("threedrip").join(safe)
 }
 
 fn navigation_view(page: &TitleListPage) -> Option<adw::NavigationView> {

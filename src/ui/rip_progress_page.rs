@@ -5,15 +5,30 @@ use adw::subclass::prelude::*;
 use gtk::glib;
 use gtk::CompositeTemplate;
 
-use crate::identify::pipeline::IdentificationResult;
+use std::path::PathBuf;
+
 use crate::rip::makemkv::{ExtractEvent, ExtractProgress};
-use crate::rip::makemkv_parse::TitleAttributes;
+use crate::rip::plan::PlannedTitle;
 
 #[derive(Debug, Clone)]
 pub struct RipQueueItem {
     pub title_index: u32,
     pub display_label: String,
+    pub output_dir: PathBuf,
     pub expected_output_filename: String,
+    pub final_path: Option<PathBuf>,
+}
+
+impl From<PlannedTitle> for RipQueueItem {
+    fn from(p: PlannedTitle) -> Self {
+        RipQueueItem {
+            title_index: p.title_index,
+            display_label: p.display_label,
+            output_dir: p.output_dir,
+            expected_output_filename: p.output_filename,
+            final_path: p.final_path,
+        }
+    }
 }
 
 mod imp {
@@ -146,30 +161,3 @@ impl RipProgressPage {
     }
 }
 
-pub fn queue_from_selection(
-    identification: &IdentificationResult,
-    selected_indexes: &[u32],
-) -> Vec<RipQueueItem> {
-    selected_indexes
-        .iter()
-        .filter_map(|idx| {
-            identification
-                .scan
-                .titles
-                .iter()
-                .find(|t| t.index == *idx)
-                .map(|t| RipQueueItem {
-                    title_index: t.index,
-                    display_label: rip_label(t),
-                    expected_output_filename: t.output_file.clone().unwrap_or_else(|| {
-                        format!("title_t{:02}.mkv", t.index)
-                    }),
-                })
-        })
-        .collect()
-}
-
-fn rip_label(t: &TitleAttributes) -> String {
-    let name = t.name.as_deref().filter(|s| !s.is_empty()).unwrap_or("(untitled)");
-    format!("Title {} — {}", t.index, name)
-}

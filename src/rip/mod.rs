@@ -6,6 +6,7 @@ pub mod makemkv_parse;
 pub mod makemkv_install;
 pub mod drive;
 pub mod orchestrator;
+pub mod plan;
 
 #[derive(Debug, Clone)]
 pub struct DiscScan {

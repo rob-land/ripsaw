@@ -176,6 +176,12 @@ impl ThreeDripWindow {
             .unwrap_or_else(|| PathBuf::from(""));
         let page = TitleListPage::from_identification(&result, iso_path);
         self.imp().nav.push(&page);
+
+        // Hand the live MountedIso off to the application-wide tracker so it
+        // gets cleaned up on shutdown rather than leaking until reboot.
+        if let Some(mount) = result.mount {
+            crate::state::track_mount(mount);
+        }
     }
 
     fn toast(&self, message: &str) {
