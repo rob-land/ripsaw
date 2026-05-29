@@ -25,11 +25,25 @@ pub mod id {
     pub const SEGMENT: u32 = 0x1853_8067;
     pub const TRACKS: u32 = 0x1654_AE6B;
     pub const TRACK_ENTRY: u32 = 0xAE;
+    pub const TRACK_NUMBER: u32 = 0xD7;
+    pub const TRACK_TYPE: u32 = 0x83;
     pub const BLOCK_ADDITION_MAPPING: u32 = 0x41E4;
     pub const BLOCK_ADD_ID_TYPE: u32 = 0x41E7;
     pub const BLOCK_ADD_ID_EXTRA_DATA: u32 = 0x41ED;
+    pub const BLOCK_ADD_ID_VALUE: u32 = 0x41F0;
     pub const VIDEO: u32 = 0xE0;
     pub const STEREO_MODE: u32 = 0x53B8;
+
+    // Cluster + block IDs used by the BlockAddition extractor.
+    pub const CLUSTER: u32 = 0x1F43_B675;
+    pub const CLUSTER_TIMESTAMP: u32 = 0xE7;
+    pub const SIMPLE_BLOCK: u32 = 0xA3;
+    pub const BLOCK_GROUP: u32 = 0xA0;
+    pub const BLOCK: u32 = 0xA1;
+    pub const BLOCK_ADDITIONS: u32 = 0x75A1;
+    pub const BLOCK_MORE: u32 = 0xA6;
+    pub const BLOCK_ADD_ID: u32 = 0xEE;
+    pub const BLOCK_ADDITIONAL: u32 = 0xA5;
 }
 
 pub struct EbmlReader<R: Read + Seek> {

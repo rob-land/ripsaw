@@ -11,6 +11,7 @@ pub mod bitstream;
 pub mod decoder;
 pub mod ebml;
 pub mod layout;
+pub mod mkv_extract;
 pub mod mvcc;
 pub mod nal;
 pub mod rbsp;
