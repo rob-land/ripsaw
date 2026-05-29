@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist gettext-domain="ripsaw">
-  <enum id="land.rob.Ripsaw.NamingScheme">
+  <enum id="land.rob.ripsaw.NamingScheme">
     <value nick="jellyfin" value="0"/>
     <value nick="plex"     value="1"/>
     <value nick="kodi"     value="2"/>
     <value nick="emby"     value="3"/>
   </enum>
 
-  <schema id="land.rob.Ripsaw" path="/land/rob/Ripsaw/">
-    <key name="default-naming-scheme" enum="land.rob.Ripsaw.NamingScheme">
+  <schema id="land.rob.ripsaw" path="/land/rob/ripsaw/">
+    <key name="default-naming-scheme" enum="land.rob.ripsaw.NamingScheme">
       <default>"jellyfin"</default>
       <summary>Default media-server naming scheme</summary>
     </key>

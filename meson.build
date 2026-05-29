@@ -10,7 +10,7 @@ project(
 i18n = import('i18n')
 gnome = import('gnome')
 
-app_id = get_option('profile') == 'development' ? 'land.rob.Ripsaw.Devel' : 'land.rob.Ripsaw'
+app_id = get_option('profile') == 'development' ? 'land.rob.ripsaw.Devel' : 'land.rob.ripsaw'
 profile = get_option('profile')
 
 prefix = get_option('prefix')

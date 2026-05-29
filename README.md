@@ -8,7 +8,7 @@ transcoding with content-type presets, and 3D MVC Blu-ray conversion to
 SBS/OU/etc.
 
 The project name is read as "3D rip". The reverse-DNS application ID
-(`land.rob.Ripsaw`) is a placeholder and should be updated to an
+(`land.rob.ripsaw`) is a placeholder and should be updated to an
 `io.github.<owner>.Ripsaw` form once the canonical repo location is
 decided.
 

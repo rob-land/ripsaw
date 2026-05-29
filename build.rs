@@ -78,7 +78,7 @@ fn main() {
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <gresources>
-  <gresource prefix="/land/rob/Ripsaw">
+  <gresource prefix="/land/rob/ripsaw">
 {files}
   </gresource>
 </gresources>

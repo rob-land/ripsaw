@@ -13,6 +13,6 @@ pub mod transcode;
 pub mod mvc;
 pub mod naming;
 
-pub const APP_ID: &str = "land.rob.Ripsaw";
+pub const APP_ID: &str = "land.rob.ripsaw";
 pub const APP_NAME: &str = "Ripsaw";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

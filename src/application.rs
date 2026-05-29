@@ -6,7 +6,7 @@ use gtk::glib::clone;
 pub fn run() -> Result<()> {
     let app = adw::Application::builder()
         .application_id(crate::APP_ID)
-        .resource_base_path("/land/rob/Ripsaw/")
+        .resource_base_path("/land/rob/ripsaw/")
         .build();
 
     app.connect_startup(|app| {

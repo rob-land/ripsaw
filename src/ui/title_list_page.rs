@@ -27,7 +27,7 @@ mod imp {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/land/rob/Ripsaw/ui/title-list-page.ui")]
+    #[template(resource = "/land/rob/ripsaw/ui/title-list-page.ui")]
     pub struct TitleListPage {
         #[template_child] pub title_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child] pub rip_button: TemplateChild<gtk::Button>,

@@ -15,7 +15,7 @@ mod imp {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/land/rob/Ripsaw/ui/window.ui")]
+    #[template(resource = "/land/rob/ripsaw/ui/window.ui")]
     pub struct RipsawWindow {
         #[template_child]
         pub toasts: TemplateChild<adw::ToastOverlay>,

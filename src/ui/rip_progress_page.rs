@@ -39,7 +39,7 @@ mod imp {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/land/rob/Ripsaw/ui/rip-progress-page.ui")]
+    #[template(resource = "/land/rob/ripsaw/ui/rip-progress-page.ui")]
     pub struct RipProgressPage {
         #[template_child] pub current_label: TemplateChild<adw::ActionRow>,
         #[template_child] pub current_progress: TemplateChild<gtk::ProgressBar>,

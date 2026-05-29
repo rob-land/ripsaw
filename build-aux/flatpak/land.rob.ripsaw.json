@@ -1,7 +1,7 @@
 {
   "_comment": "Stub Flatpak manifest. MakeMKV is not bundled — invoked on the host via flatpak-spawn --host. See docs/architecture.md § Sandboxing & Flatpak.",
 
-  "id": "land.rob.Ripsaw",
+  "id": "land.rob.ripsaw",
   "runtime": "org.gnome.Platform",
   "runtime-version": "47",
   "sdk": "org.gnome.Sdk",

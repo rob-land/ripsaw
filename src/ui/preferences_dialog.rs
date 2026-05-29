@@ -11,7 +11,7 @@ mod imp {
     use super::*;
 
     #[derive(Default, CompositeTemplate)]
-    #[template(resource = "/land/rob/Ripsaw/ui/preferences-dialog.ui")]
+    #[template(resource = "/land/rob/ripsaw/ui/preferences-dialog.ui")]
     pub struct PreferencesDialog {
         #[template_child] pub library_root_row: TemplateChild<adw::ActionRow>,
         #[template_child] pub scheme_combo: TemplateChild<adw::ComboRow>,

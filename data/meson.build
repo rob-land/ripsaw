@@ -1,6 +1,6 @@
 desktop_file = i18n.merge_file(
   input: configure_file(
-    input:  'land.rob.Ripsaw.desktop.in',
+    input:  'land.rob.ripsaw.desktop.in',
     output: app_id + '.desktop.in',
     configuration: { 'app-id': app_id },
   ),
@@ -13,7 +13,7 @@ desktop_file = i18n.merge_file(
 
 metainfo_file = i18n.merge_file(
   input: configure_file(
-    input:  'land.rob.Ripsaw.metainfo.xml.in',
+    input:  'land.rob.ripsaw.metainfo.xml.in',
     output: app_id + '.metainfo.xml.in',
     configuration: { 'app-id': app_id },
   ),
@@ -25,7 +25,7 @@ metainfo_file = i18n.merge_file(
 )
 
 install_data(
-  'schemas' / 'land.rob.Ripsaw.gschema.xml',
+  'schemas' / 'land.rob.ripsaw.gschema.xml',
   install_dir: datadir / 'glib-2.0' / 'schemas',
   rename: app_id + '.gschema.xml',
 )
