@@ -37,11 +37,6 @@ template $ThreeDripTitleListPage: Adw.NavigationPage {
         title: _("Disc type");
         description: _("Auto-detected from title durations. Toggle if it's wrong.");
 
-        Adw.SwitchRow series_toggle {
-          title: _("TV series");
-          subtitle: _("Each ripped title gets sequential S01E01, S01E02, ...");
-        }
-
         Adw.EntryRow title_override {
           title: _("Series / Movie title");
 
@@ -54,8 +49,14 @@ template $ThreeDripTitleListPage: Adw.NavigationPage {
           }
         }
 
+        Adw.SwitchRow series_toggle {
+          title: _("TV series");
+          subtitle: _("Each ripped title gets sequential S01E01, S01E02, ...");
+        }
+
         Adw.SpinRow season_override {
           title: _("Season number");
+          visible: false;
           adjustment: Adjustment {
             lower: 0;
             upper: 99;

@@ -141,12 +141,13 @@ impl TitleListPage {
         self.imp().series_toggle.connect_active_notify(clone!(
             #[weak(rename_to = page)]
             self,
-            move |toggle| page.set_entries_visible(toggle.is_active())
+            move |toggle| page.set_series_widgets_visible(toggle.is_active())
         ));
-        self.set_entries_visible(detected == DiscContentKind::Series);
+        self.set_series_widgets_visible(detected == DiscContentKind::Series);
     }
 
-    fn set_entries_visible(&self, visible: bool) {
+    fn set_series_widgets_visible(&self, visible: bool) {
+        self.imp().season_override.set_visible(visible);
         for entry in self.imp().episode_entries.borrow().iter() {
             entry.set_visible(visible);
         }
