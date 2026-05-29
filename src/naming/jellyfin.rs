@@ -51,23 +51,40 @@ fn movie_folder_name(ctx: &MovieContext) -> String {
     if let Some(y) = ctx.year {
         s.push_str(&format!(" ({y})"));
     }
-    if let Some(imdb) = ctx.imdb_id {
-        s.push_str(&format!(" [imdbid-{imdb}]"));
-    } else if let Some(tmdb) = ctx.tmdb_id {
-        s.push_str(&format!(" [tmdbid-{tmdb}]"));
+    if let Some(bracket) = movie_id_bracket(ctx) {
+        s.push_str(&bracket);
     }
     s
 }
 
 fn movie_basename(ctx: &MovieContext) -> String {
+    // Jellyfin's recommendation is that filename mirrors the folder
+    // name, including the metadata-provider ID. Variant suffix comes
+    // last so the matching prefix stays intact:
+    //   Skyfall (2012) [tmdbid-37724] - 3D.mkv
     let mut s = sanitise(ctx.title);
     if let Some(y) = ctx.year {
         s.push_str(&format!(" ({y})"));
+    }
+    if let Some(bracket) = movie_id_bracket(ctx) {
+        s.push_str(&bracket);
     }
     if let Some(suffix) = variant_suffix(ctx.variant) {
         s.push_str(suffix);
     }
     s
+}
+
+/// Jellyfin metadata-provider tag (" [imdbid-X]", " [tmdbid-N]").
+/// IMDb wins when both are present — per Jellyfin docs, only one
+/// provider tag is honoured, and IMDb is the most stable canonical
+/// identifier. Returns `None` when no ID is known.
+fn movie_id_bracket(ctx: &MovieContext) -> Option<String> {
+    if let Some(imdb) = ctx.imdb_id {
+        Some(format!(" [imdbid-{imdb}]"))
+    } else {
+        ctx.tmdb_id.map(|tmdb| format!(" [tmdbid-{tmdb}]"))
+    }
 }
 
 fn series_folder_name(ctx: &EpisodeContext) -> String {
@@ -113,17 +130,31 @@ mod tests {
     }
 
     #[test]
-    fn movie_folder_uses_imdbid_bracket_syntax() {
+    fn movie_folder_and_filename_share_imdbid_bracket() {
+        // Per Jellyfin docs (jellyfin.org/docs/general/server/media/movies):
+        // "Each file must begin exactly with the parent folder name —
+        // including any year and/or metadata provider IDs". So the ID
+        // is duplicated in both folder and filename.
         let p = Jellyfin.movie_path(&movie());
-        assert_eq!(p, Path::new("/lib/Movies/Avatar (2009) [imdbid-tt0499549]/Avatar (2009).mkv"));
+        assert_eq!(
+            p,
+            Path::new(
+                "/lib/Movies/Avatar (2009) [imdbid-tt0499549]/Avatar (2009) [imdbid-tt0499549].mkv"
+            )
+        );
     }
 
     #[test]
-    fn movie_with_3d_variant_appends_suffix_to_filename_only() {
+    fn movie_with_3d_variant_appends_suffix_after_id_bracket() {
         let mut m = movie();
         m.variant = Some(MovieVariant::Stereo3d);
         let p = Jellyfin.movie_path(&m);
-        assert_eq!(p, Path::new("/lib/Movies/Avatar (2009) [imdbid-tt0499549]/Avatar (2009) - 3D.mkv"));
+        assert_eq!(
+            p,
+            Path::new(
+                "/lib/Movies/Avatar (2009) [imdbid-tt0499549]/Avatar (2009) [imdbid-tt0499549] - 3D.mkv"
+            )
+        );
     }
 
     #[test]
@@ -132,7 +163,10 @@ mod tests {
         m.imdb_id = None;
         m.tmdb_id = Some(19995);
         let p = Jellyfin.movie_path(&m);
-        assert_eq!(p, Path::new("/lib/Movies/Avatar (2009) [tmdbid-19995]/Avatar (2009).mkv"));
+        assert_eq!(
+            p,
+            Path::new("/lib/Movies/Avatar (2009) [tmdbid-19995]/Avatar (2009) [tmdbid-19995].mkv")
+        );
     }
 
     #[test]
@@ -259,6 +293,11 @@ mod tests {
         let mut m = movie();
         m.title = "Lockout: M.A.X.";
         let p = Jellyfin.movie_path(&m);
-        assert_eq!(p, Path::new("/lib/Movies/Lockout M.A.X (2009) [imdbid-tt0499549]/Lockout M.A.X (2009).mkv"));
+        assert_eq!(
+            p,
+            Path::new(
+                "/lib/Movies/Lockout M.A.X (2009) [imdbid-tt0499549]/Lockout M.A.X (2009) [imdbid-tt0499549].mkv"
+            )
+        );
     }
 }

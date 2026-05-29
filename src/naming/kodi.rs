@@ -58,7 +58,23 @@ fn movie_folder_name(ctx: &MovieContext) -> String {
     if let Some(y) = ctx.year {
         s.push_str(&format!(" ({y})"));
     }
+    if let Some(bracket) = movie_id_bracket(ctx) {
+        s.push_str(&bracket);
+    }
     s
+}
+
+/// Kodi (Omega / v21+) filename identifier: " {tmdb=N}" or
+/// " {imdb=ttN}". Uses the equals-sign syntax documented at
+/// kodi.wiki/view/Naming_video_files/Movies § "Filename
+/// identifiers". TMDb is preferred when present; IMDb is the
+/// fallback (Kodi recommends using a scraper's native ID).
+fn movie_id_bracket(ctx: &MovieContext) -> Option<String> {
+    if let Some(tmdb) = ctx.tmdb_id {
+        Some(format!(" {{tmdb={tmdb}}}"))
+    } else {
+        ctx.imdb_id.map(|imdb| format!(" {{imdb={imdb}}}"))
+    }
 }
 
 fn series_folder_name(ctx: &EpisodeContext) -> String {
@@ -97,8 +113,35 @@ mod tests {
     }
 
     #[test]
-    fn movie_path_has_no_ids_in_folder_or_filename() {
+    fn movie_path_uses_imdb_bracket_in_folder_and_filename() {
+        // Kodi v21+ filename identifiers: `{tmdb=N}` / `{imdb=ttN}`.
+        // TMDb is preferred when present; this fixture only has IMDb,
+        // so the IMDb form lands.
         let p = Kodi.movie_path(&movie());
+        assert_eq!(
+            p,
+            Path::new(
+                "/lib/Movies/Avatar (2009) {imdb=tt0499549}/Avatar (2009) {imdb=tt0499549}.mkv"
+            )
+        );
+    }
+
+    #[test]
+    fn movie_path_prefers_tmdb_when_both_present() {
+        let mut m = movie();
+        m.tmdb_id = Some(19995);
+        let p = Kodi.movie_path(&m);
+        assert_eq!(
+            p,
+            Path::new("/lib/Movies/Avatar (2009) {tmdb=19995}/Avatar (2009) {tmdb=19995}.mkv")
+        );
+    }
+
+    #[test]
+    fn movie_path_drops_id_section_when_none_known() {
+        let mut m = movie();
+        m.imdb_id = None;
+        let p = Kodi.movie_path(&m);
         assert_eq!(p, Path::new("/lib/Movies/Avatar (2009)/Avatar (2009).mkv"));
     }
 
@@ -107,7 +150,12 @@ mod tests {
         let mut m = movie();
         m.variant = Some(MovieVariant::Stereo3d);
         let p = Kodi.movie_path(&m);
-        assert_eq!(p, Path::new("/lib/Movies/Avatar (2009)/Avatar (2009) - 3D.mkv"));
+        assert_eq!(
+            p,
+            Path::new(
+                "/lib/Movies/Avatar (2009) {imdb=tt0499549}/Avatar (2009) {imdb=tt0499549} - 3D.mkv"
+            )
+        );
     }
 
     #[test]
@@ -122,7 +170,12 @@ mod tests {
         let m = movie();
         let ctx = ExtraContext { movie: &m, title: &title, role: TitleRole::Trailer };
         let p = Kodi.extras_path(&ctx);
-        assert_eq!(p, Path::new("/lib/Movies/Avatar (2009)/Avatar (2009)-trailer.mkv"));
+        assert_eq!(
+            p,
+            Path::new(
+                "/lib/Movies/Avatar (2009) {imdb=tt0499549}/Avatar (2009) {imdb=tt0499549}-trailer.mkv"
+            )
+        );
     }
 
     #[test]
@@ -137,7 +190,10 @@ mod tests {
         let m = movie();
         let ctx = ExtraContext { movie: &m, title: &title, role: TitleRole::BehindTheScenes };
         let p = Kodi.extras_path(&ctx);
-        assert_eq!(p, Path::new("/lib/Movies/Avatar (2009)/extras/Making of Avatar.mkv"));
+        assert_eq!(
+            p,
+            Path::new("/lib/Movies/Avatar (2009) {imdb=tt0499549}/extras/Making of Avatar.mkv")
+        );
     }
 
     #[test]
