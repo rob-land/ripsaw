@@ -14,6 +14,7 @@ pub mod mvcc;
 pub mod nal;
 pub mod rbsp;
 pub mod ref_pic_list_modification;
+pub mod sei;
 pub mod sps;
 
 use serde::{Deserialize, Serialize};
