@@ -96,6 +96,103 @@ pub fn parse(bytes: &[u8]) -> Result<MvcDecoderConfigurationRecord, MvccError> {
     })
 }
 
+/// 3D content detected in an MKV. Carries the mvcC bytes when present
+/// and the Matroska StereoMode element when one is set on the video
+/// track.
+#[derive(Debug, Clone, Default)]
+pub struct Mkv3dInfo {
+    pub mvcc_bytes: Option<Vec<u8>>,
+    pub stereo_mode: Option<u64>,
+}
+
+impl Mkv3dInfo {
+    /// `true` if either the mvcC BlockAddition is present OR the Matroska
+    /// StereoMode indicates MVC-style packing (modes 13 and 14 = "both
+    /// eyes laced in one block"). Modes 1/2/3 (already-packed
+    /// side-by-side / over-under) are NOT MVC.
+    pub fn has_mvc(&self) -> bool {
+        if self.mvcc_bytes.is_some() {
+            return true;
+        }
+        matches!(self.stereo_mode, Some(13) | Some(14))
+    }
+}
+
+/// Walk an MKV and collect both the mvcC BlockAddition bytes (when
+/// present) and the video track's StereoMode (when set). One pass over
+/// the file.
+pub fn scan_3d_info<R: Read + Seek>(
+    reader: &mut EbmlReader<R>,
+) -> Result<Mkv3dInfo, EbmlError> {
+    let mut info = Mkv3dInfo::default();
+    let segment_size = match walk_to(reader, ebml::id::SEGMENT, None)? {
+        Some(s) => s,
+        None => return Ok(info),
+    };
+    let segment_end = reader.position()? + segment_size;
+    while reader.position()? < segment_end {
+        let id = reader.read_vint_id()?;
+        let size = reader.read_vint_size()?;
+        if id == ebml::id::TRACKS {
+            let tracks_end = reader.position()? + size;
+            while reader.position()? < tracks_end {
+                let id = reader.read_vint_id()?;
+                let size = reader.read_vint_size()?;
+                if id == ebml::id::TRACK_ENTRY {
+                    let entry_end = reader.position()? + size;
+                    scan_track_entry_full(reader, entry_end, &mut info)?;
+                    reader.seek(entry_end)?;
+                } else {
+                    reader.skip(size)?;
+                }
+            }
+            return Ok(info);
+        } else {
+            reader.skip(size)?;
+        }
+    }
+    Ok(info)
+}
+
+fn scan_track_entry_full<R: Read + Seek>(
+    reader: &mut EbmlReader<R>,
+    end: u64,
+    info: &mut Mkv3dInfo,
+) -> Result<(), EbmlError> {
+    while reader.position()? < end {
+        let id = reader.read_vint_id()?;
+        let size = reader.read_vint_size()?;
+        match id {
+            ebml::id::BLOCK_ADDITION_MAPPING => {
+                let map_end = reader.position()? + size;
+                if let Some(bytes) = scan_block_addition_mapping(reader, map_end)? {
+                    if info.mvcc_bytes.is_none() {
+                        info.mvcc_bytes = Some(bytes);
+                    }
+                }
+                reader.seek(map_end)?;
+            }
+            ebml::id::VIDEO => {
+                let video_end = reader.position()? + size;
+                while reader.position()? < video_end {
+                    let id = reader.read_vint_id()?;
+                    let size = reader.read_vint_size()?;
+                    if id == ebml::id::STEREO_MODE {
+                        let mode = reader.read_uint(size as usize)?;
+                        if info.stereo_mode.is_none() {
+                            info.stereo_mode = Some(mode);
+                        }
+                    } else {
+                        reader.skip(size)?;
+                    }
+                }
+            }
+            _ => reader.skip(size)?,
+        }
+    }
+    Ok(())
+}
+
 /// Walk an MKV looking for the first BlockAdditionMapping whose
 /// BlockAddIDType equals `mvcC` (0x6D766343), and return the bytes
 /// stored in its BlockAddIDExtraData. Returns `Ok(None)` if no such

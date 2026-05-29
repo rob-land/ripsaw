@@ -28,6 +28,8 @@ pub mod id {
     pub const BLOCK_ADDITION_MAPPING: u32 = 0x41E4;
     pub const BLOCK_ADD_ID_TYPE: u32 = 0x41E7;
     pub const BLOCK_ADD_ID_EXTRA_DATA: u32 = 0x41ED;
+    pub const VIDEO: u32 = 0xE0;
+    pub const STEREO_MODE: u32 = 0x53B8;
 }
 
 pub struct EbmlReader<R: Read + Seek> {

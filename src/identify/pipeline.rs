@@ -24,7 +24,7 @@ use crate::identify::{
     DiscType, Identity,
 };
 use crate::mvc::ebml::EbmlReader;
-use crate::mvc::mvcc::find_mvcc_bytes;
+use crate::mvc::mvcc::scan_3d_info;
 use crate::rip::{
     iso_mount::MountedIso,
     makemkv::{scan, ScanSource},
@@ -97,8 +97,9 @@ pub async fn identify_mkv(mkv_path: PathBuf) -> Result<IdentificationResult> {
         .await
         .with_context(|| format!("probing {}", mkv_path.display()))?;
 
-    let has_mvc = detect_mvcc(&mkv_path);
+    let (has_mvc, stereo_mode) = detect_3d(&mkv_path);
     let scan_data = synthesise_scan(&mkv_path, &report);
+    let _ = stereo_mode; // surfaced through has_mvc; detailed mode UX is a TODO
     let disc_type = if has_mvc { DiscType::BluRay3D } else { DiscType::BluRay };
 
     Ok(IdentificationResult {
@@ -112,12 +113,18 @@ pub async fn identify_mkv(mkv_path: PathBuf) -> Result<IdentificationResult> {
     })
 }
 
-fn detect_mvcc(mkv_path: &std::path::Path) -> bool {
+/// Returns (has_mvc, stereo_mode). `has_mvc` is true when either the
+/// mvcC BlockAddition is present or the Matroska StereoMode element
+/// indicates MVC-style "both eyes laced" packing (modes 13, 14).
+fn detect_3d(mkv_path: &std::path::Path) -> (bool, Option<u64>) {
     let Ok(file) = File::open(mkv_path) else {
-        return false;
+        return (false, None);
     };
     let mut reader = EbmlReader::new(file);
-    matches!(find_mvcc_bytes(&mut reader), Ok(Some(_)))
+    match scan_3d_info(&mut reader) {
+        Ok(info) => (info.has_mvc(), info.stereo_mode),
+        Err(_) => (false, None),
+    }
 }
 
 fn synthesise_scan(mkv_path: &std::path::Path, report: &ffprobe::FfprobeReport) -> MakemkvScan {
