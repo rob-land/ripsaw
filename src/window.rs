@@ -5,7 +5,8 @@ use adw::subclass::prelude::*;
 use gtk::glib::{self, clone};
 use gtk::{gio, CompositeTemplate};
 
-use crate::identify::pipeline::{identify_iso, IdentificationResult};
+use crate::identify::pipeline::{identify_iso, identify_physical_disc, IdentificationResult};
+use crate::rip::drive::{detect_mounted_optical_discs, DetectedDisc};
 use crate::ui::title_list_page::TitleListPage;
 
 mod imp {
@@ -66,8 +67,70 @@ impl ThreeDripWindow {
                 window.open_iso();
             })
             .build();
-        self.add_action_entries([open_iso]);
+        let open_disc = gio::ActionEntry::builder("open-disc")
+            .activate(|window: &Self, _action, _param| {
+                window.open_disc();
+            })
+            .build();
+        self.add_action_entries([open_iso, open_disc]);
         self.setup_drop_target();
+    }
+
+    fn open_disc(&self) {
+        let discs = match detect_mounted_optical_discs() {
+            Ok(d) if d.is_empty() => {
+                self.toast("No optical disc detected. Insert one and try again.");
+                return;
+            }
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("optical-drive detection failed: {e}");
+                self.toast(&format!("Could not detect optical drives: {e}"));
+                return;
+            }
+        };
+        // For now, just pick the first mounted disc. A picker UI for
+        // multi-drive systems can come later.
+        let disc = discs.into_iter().next().expect("non-empty discs");
+        self.scan_physical_disc(disc);
+    }
+
+    fn scan_physical_disc(&self, disc: DetectedDisc) {
+        tracing::info!(
+            "identifying physical disc {} at {}",
+            disc.device.display(),
+            disc.mount_path.display(),
+        );
+        self.toast(&format!(
+            "Scanning {} ({})...",
+            disc.label.as_deref().unwrap_or("disc"),
+            disc.device.display(),
+        ));
+
+        let (tx, rx) = async_channel::bounded(1);
+        let index = disc.disc_index;
+        let mount = disc.mount_path.clone();
+        crate::runtime::tokio_runtime().spawn(async move {
+            let _ = tx.send(identify_physical_disc(index, mount).await).await;
+        });
+
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                match rx.recv().await {
+                    Ok(Ok(result)) => window.show_identification(result),
+                    Ok(Err(e)) => {
+                        tracing::error!("identify failed: {e:#}");
+                        window.toast(&format!("Identify failed: {e}"));
+                    }
+                    Err(e) => {
+                        tracing::error!("scan channel closed: {e}");
+                        window.toast("Scan worker stopped unexpectedly");
+                    }
+                }
+            }
+        ));
     }
 
     fn setup_drop_target(&self) {
@@ -171,7 +234,7 @@ impl ThreeDripWindow {
         ));
     }
 
-    fn show_identification(&self, result: IdentificationResult) {
+    pub(crate) fn show_identification(&self, result: IdentificationResult) {
         let n = result.scan.titles.len();
         let disc_name = result
             .scan

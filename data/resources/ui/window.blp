@@ -11,8 +11,20 @@ template $ThreeDripWindow: Adw.ApplicationWindow {
     Adw.HeaderBar {
       [start]
       Button {
+        action-name: "win.open-disc";
+        tooltip-text: _("Scan a disc in an optical drive");
+
+        child: Adw.ButtonContent {
+          icon-name: "media-optical-symbolic";
+          label: _("Open Disc");
+        };
+      }
+
+      [start]
+      Button {
         action-name: "win.open-iso";
         styles ["suggested-action"]
+        tooltip-text: _("Open a disc image (.iso) file");
 
         child: Adw.ButtonContent {
           icon-name: "document-open-symbolic";

@@ -42,6 +42,36 @@ impl IdentificationResult {
     }
 }
 
+/// Drive a physical optical disc end-to-end: scan via `disc:N` + walk an
+/// already-mounted path for hashing + TheDiscDB lookup. The caller passes
+/// the mount path that udisks2 (or the desktop's auto-mount) has placed
+/// the disc at; we never set it up or tear it down ourselves — the
+/// desktop owns the mount lifecycle for inserted physical media.
+pub async fn identify_physical_disc(
+    disc_index: u32,
+    mount_path: PathBuf,
+) -> Result<IdentificationResult> {
+    let source = ScanSource::Disc(disc_index);
+    let scan_data = scan(&source).await.context("running makemkvcon scan")?;
+
+    let hash = enumerate_disc_files(&mount_path)
+        .map(|files| content_hash(&files))
+        .ok();
+    let identities = match (&hash, TheDiscDbClient::with_default_endpoint()) {
+        (Some(h), Ok(client)) => client.lookup_by_hash(h).await.unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let disc_type = detect_disc_type_with_mount(&scan_data, &mount_path);
+
+    Ok(IdentificationResult {
+        scan: scan_data,
+        mount: None,
+        disc_type,
+        content_hash: hash,
+        identities,
+    })
+}
+
 /// Drive an ISO end-to-end: scan + mount + hash + TheDiscDB lookup. The
 /// mount is the precondition for hashing (we need filesystem access to
 /// the disc's payload directory). If mounting fails, the function still
