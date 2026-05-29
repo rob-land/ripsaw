@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -48,6 +48,8 @@ mod imp {
         #[template_child] pub log_view: TemplateChild<gtk::TextView>,
 
         pub queue_rows: RefCell<Vec<adw::ActionRow>>,
+        pub success_count: Cell<usize>,
+        pub failure_count: Cell<usize>,
     }
 
     #[glib::object_subclass]
@@ -82,6 +84,10 @@ impl RipProgressPage {
         for row in rows.drain(..) {
             group.remove(&row);
         }
+        // Reset counters for the new queue (the same page may be reused
+        // if the user starts a second rip without navigating away).
+        self.imp().success_count.set(0);
+        self.imp().failure_count.set(0);
         for item in items {
             let row = adw::ActionRow::builder()
                 .title(&item.display_label)
@@ -112,6 +118,18 @@ impl RipProgressPage {
             match &output {
                 Ok(p) => row.set_subtitle(&format!("done • {}", p.display())),
                 Err(e) => row.set_subtitle(&format!("failed • {e}")),
+            }
+        }
+        // Update aggregate success/failure counters so finish_queue can
+        // render an accurate summary instead of "all titles complete".
+        match &output {
+            Ok(_) => {
+                let n = self.imp().success_count.get() + 1;
+                self.imp().success_count.set(n);
+            }
+            Err(_) => {
+                let n = self.imp().failure_count.get() + 1;
+                self.imp().failure_count.set(n);
             }
         }
         let queue_count = rows.len() as f64;
@@ -157,11 +175,27 @@ impl RipProgressPage {
     }
 
     pub fn finish_queue(&self) {
+        let ok = self.imp().success_count.get();
+        let failed = self.imp().failure_count.get();
+        let total = ok + failed;
+        let (title, subtitle) = match (ok, failed) {
+            (_, 0) => ("All titles done".to_string(), format!("{ok} succeeded")),
+            (0, _) => (
+                "Rip failed".to_string(),
+                format!("{failed} of {total} titles failed — see queue rows for details"),
+            ),
+            _ => (
+                format!("Finished with {failed} failure(s)"),
+                format!("{ok} succeeded, {failed} failed of {total}"),
+            ),
+        };
         self.imp().current_progress.set_fraction(1.0);
-        self.imp().current_progress.set_text(Some("complete"));
+        self.imp()
+            .current_progress
+            .set_text(Some(if failed == 0 { "complete" } else { "complete with failures" }));
         self.imp().total_progress.set_fraction(1.0);
-        self.imp().current_label.set_title("All titles done");
-        self.imp().current_label.set_subtitle("");
+        self.imp().current_label.set_title(&title);
+        self.imp().current_label.set_subtitle(&subtitle);
     }
 }
 
