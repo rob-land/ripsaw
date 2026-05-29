@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Wrapper around the JM ldecod binary built from
+# https://vcgit.hhi.fraunhofer.de/jvet/JM at /home/rob/3rdparty/JM.
+# Symlinking would work too; the wrapper makes path failures explicit.
+LDECOD=/home/rob/3rdparty/JM/bin/umake/gcc-15.2/x86_64/release/ldecod
+if [ ! -x "$LDECOD" ]; then
+  echo "ldecod missing -- rebuild with:" >&2
+  echo "  cd /home/rob/3rdparty/JM && cmake -S . -B build && cmake --build build --target ldecod" >&2
+  exit 1
+fi
+exec "$LDECOD" "$@"

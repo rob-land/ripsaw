@@ -8,7 +8,9 @@
 
 pub mod bitstream;
 pub mod decoder;
+pub mod ebml;
 pub mod layout;
+pub mod mvcc;
 pub mod nal;
 pub mod rbsp;
 pub mod sps;

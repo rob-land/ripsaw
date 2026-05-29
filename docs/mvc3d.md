@@ -230,7 +230,25 @@ copying subs through without depth.
 | Phase | Scope |
 |---|---|
 | ~~**0** (sketch)~~ | ✅ Done. Design doc + module stubs. |
-| **1** (in progress) | `libmvc` skeleton: subset SPS / MVC SPS parse, NAL types 14/15/20 routing, per-view DPB scaffolding, golden-frame test harness against `ldecod`. Single SSIF input, raw YUV output of both views, no integration into 3drip yet. **Sub-progress: bit reader + Exp-Golomb + RBSP extraction + NAL header parsing + Subset SPS MVC extension are landed and tested (22 unit tests including the canonical 3D BD two-view layout).** Remaining for phase 1: slice-header MVC extension, per-view DPB, inter-view prediction wiring against an upstream H.264 base-view decoder. |
+| **1** (in progress) | `libmvc` skeleton: subset SPS / MVC SPS parse, NAL types 14/15/20 routing, per-view DPB scaffolding, golden-frame test harness against `ldecod`. Single SSIF input, raw YUV output of both views, no integration into 3drip yet. **Sub-progress:** bit reader + Exp-Golomb + RBSP extraction + NAL header parsing + Subset SPS MVC extension + minimal Matroska EBML walker + mvcC (MVCDecoderConfigurationRecord) reader (29 unit + 2 real-world integration tests). The real-world test extracts the mvcC BlockAddIDExtraData from `samples/3D_LR_Pattern.mkv` and confirms profile_idc 128 (Stereo High), level 41, and a type-15 Subset SPS NAL whose RBSP starts as expected. Remaining for phase 1: slice-header MVC extension, per-view DPB, inter-view prediction wiring against an upstream H.264 base-view decoder. |
+
+### Build / tooling state (2026-05-28)
+
+- **`ldecod`** built from `https://vcgit.hhi.fraunhofer.de/jvet/JM` at
+  `/home/rob/3rdparty/JM` with `cmake -B build` + relaxed `-Werror`
+  (modern GCC's `-Werror=maybe-uninitialized` etc. trip the legacy
+  source; warnings are dropped to non-fatal via `CMAKE_C_FLAGS`).
+  Binary at `bin/umake/gcc-15.2/x86_64/release/ldecod`. Wrapper at
+  `scripts/ldecod` for convenience.
+- **JVT MVC conformance bitstreams** are not staged. The samples in
+  `samples/` (modern MakeMKV-produced 3D MKVs + several 3D BD ISOs)
+  are real MVC content from production discs and cover the cases
+  we'll meet in the wild. A formal JVT conformance set is worth
+  adding for finer edge-case coverage but is not blocking phase-1.
+- **Real-world fixture** at `tests/fixtures/mvc/3d_lr_pattern.mvcc.bin`
+  (258 bytes) is the mvcC payload extracted from
+  `3D_LR_Pattern.mkv`. The fixture lets the real-world integration
+  test pass even when the sample collection is missing.
 | **2** | `libmvc` correctness: ref-list construction (G.8.2), inter-view prediction wiring (G.8.4), bit-exact YUV match against `ldecod` on ≥3 SSIF fixtures spanning the corpus. |
 | **3** | Integration: Rust `LibmvcDecoder` impl of `MvcDecoder` trait, SBS / Half-SBS composer. End-to-end "disc → SBS MKV" on one real 3D BD. |
 | **4** | TAB / Half-TAB / Frame-Sequential / Interleaved layouts. Hardware-accelerated composition (VA-API). |
