@@ -27,7 +27,13 @@ impl Scheme for Kodi {
             None => format!("S{:02}E{:02}", ctx.season, ctx.episode),
         };
         let title = sanitise(ctx.series_title);
-        let filename = format!("{title} {ep_part}.mkv");
+        let episode_part = ctx
+            .episode_title
+            .map(|t| sanitise(t))
+            .filter(|t| !t.is_empty())
+            .map(|t| format!(" {t}"))
+            .unwrap_or_default();
+        let filename = format!("{title} {ep_part}{episode_part}.mkv");
         ctx.root.join(folder).join(season_folder).join(filename)
     }
 
@@ -150,5 +156,26 @@ mod tests {
         };
         let p = Kodi.episode_path(&ctx);
         assert_eq!(p, Path::new("/lib/Shows/The Expanse (2015)/Season 01/The Expanse S01E03.mkv"));
+    }
+
+    #[test]
+    fn episode_path_appends_title_after_episode_marker() {
+        let ctx = EpisodeContext {
+            root: Path::new("/lib/Shows"),
+            series_title: "The Expanse",
+            series_year: Some(2015),
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            season: 1,
+            episode: 3,
+            episode_end: None,
+            episode_title: Some("Remember the Cant"),
+        };
+        let p = Kodi.episode_path(&ctx);
+        assert_eq!(
+            p,
+            Path::new("/lib/Shows/The Expanse (2015)/Season 01/The Expanse S01E03 Remember the Cant.mkv")
+        );
     }
 }

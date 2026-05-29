@@ -10,6 +10,8 @@ use crate::identify::composite::{analyze_relations, TitleRelation};
 use crate::identify::pipeline::IdentificationResult;
 use crate::identify::DiscType;
 use crate::rip::makemkv_parse::{MakemkvScan, TitleAttributes};
+use std::collections::HashMap;
+
 use crate::rip::plan::{
     auto_detect_content_kind, default_library_root, naming_opts_for_unidentified, plan_rip,
     DiscContentKind,
@@ -28,6 +30,7 @@ mod imp {
         #[template_child] pub series_toggle: TemplateChild<adw::SwitchRow>,
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
+        pub episode_entries: RefCell<Vec<gtk::Entry>>,
         pub titles: RefCell<Vec<TitleAttributes>>,
         pub iso_path: RefCell<Option<PathBuf>>,
         pub disc_name: RefCell<Option<String>>,
@@ -88,11 +91,24 @@ impl TitleListPage {
         let detected = auto_detect_content_kind(&result.scan.titles);
         self.imp().series_toggle.set_active(detected == DiscContentKind::Series);
         self.populate_rows(&result.scan);
+        self.imp().series_toggle.connect_active_notify(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |toggle| page.set_entries_visible(toggle.is_active())
+        ));
+        self.set_entries_visible(detected == DiscContentKind::Series);
+    }
+
+    fn set_entries_visible(&self, visible: bool) {
+        for entry in self.imp().episode_entries.borrow().iter() {
+            entry.set_visible(visible);
+        }
     }
 
     fn populate_rows(&self, scan: &MakemkvScan) {
         let group = self.imp().title_group.get();
         let mut checkboxes = Vec::with_capacity(scan.titles.len());
+        let mut episode_entries = Vec::with_capacity(scan.titles.len());
 
         let pairs: Vec<(u32, &str)> = scan
             .titles
@@ -137,11 +153,22 @@ impl TitleListPage {
                 .build();
             row.add_prefix(&check);
             row.set_activatable_widget(Some(&check));
+
+            let episode_entry = gtk::Entry::builder()
+                .placeholder_text("Episode title (optional)")
+                .valign(gtk::Align::Center)
+                .width_chars(28)
+                .visible(false)
+                .build();
+            row.add_suffix(&episode_entry);
+
             group.add(&row);
             checkboxes.push(check);
+            episode_entries.push(episode_entry);
         }
 
         self.imp().checkboxes.replace(checkboxes);
+        self.imp().episode_entries.replace(episode_entries);
         self.refresh_rip_sensitivity();
     }
 
@@ -166,6 +193,25 @@ impl TitleListPage {
         let group = gio::SimpleActionGroup::new();
         group.add_action(&rip_action);
         self.insert_action_group("page", Some(&group));
+    }
+
+    fn collect_episode_titles(&self) -> HashMap<u32, String> {
+        let titles = self.imp().titles.borrow();
+        self.imp()
+            .episode_entries
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entry)| {
+                let text = entry.text();
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    titles.get(i).map(|t| (t.index, trimmed.to_string()))
+                }
+            })
+            .collect()
     }
 
     fn selected_indexes(&self) -> Vec<u32> {
@@ -224,7 +270,13 @@ impl TitleListPage {
             content_kind,
             &disc_name,
         );
-        let plan = plan_rip(&identification_for_plan, &selected, Some(&naming_opts));
+        let episode_titles = self.collect_episode_titles();
+        let plan = plan_rip(
+            &identification_for_plan,
+            &selected,
+            Some(&naming_opts),
+            &episode_titles,
+        );
         let queue: Vec<RipQueueItem> = plan.into_iter().map(RipQueueItem::from).collect();
 
         let progress = RipProgressPage::default();

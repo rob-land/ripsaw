@@ -30,7 +30,13 @@ impl Scheme for Plex {
         };
         let title = sanitise(ctx.series_title);
         let year_part = ctx.series_year.map(|y| format!(" ({y})")).unwrap_or_default();
-        let filename = format!("{title}{year_part} - {ep_part}.mkv");
+        let episode_part = ctx
+            .episode_title
+            .map(|t| sanitise(t))
+            .filter(|t| !t.is_empty())
+            .map(|t| format!(" - {t}"))
+            .unwrap_or_default();
+        let filename = format!("{title}{year_part} - {ep_part}{episode_part}.mkv");
         ctx.root.join(folder).join(season_folder).join(filename)
     }
 
@@ -169,6 +175,29 @@ mod tests {
             p,
             Path::new(
                 "/lib/Shows/The Expanse (2015) {tvdb-280619}/Season 01/The Expanse (2015) - s01e03.mkv"
+            )
+        );
+    }
+
+    #[test]
+    fn episode_path_appends_title_with_hyphen_when_provided() {
+        let ctx = EpisodeContext {
+            root: Path::new("/lib/Shows"),
+            series_title: "The Expanse",
+            series_year: Some(2015),
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: Some(280619),
+            season: 1,
+            episode: 3,
+            episode_end: None,
+            episode_title: Some("Remember the Cant"),
+        };
+        let p = Plex.episode_path(&ctx);
+        assert_eq!(
+            p,
+            Path::new(
+                "/lib/Shows/The Expanse (2015) {tvdb-280619}/Season 01/The Expanse (2015) - s01e03 - Remember the Cant.mkv"
             )
         );
     }

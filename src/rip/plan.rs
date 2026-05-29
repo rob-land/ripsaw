@@ -2,6 +2,7 @@
 // concrete rip plan: where each title's MKV should land in the library
 // once it has been extracted and renamed.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use once_cell::sync::Lazy;
@@ -146,10 +147,16 @@ pub struct PlannedTitle {
 /// is treated as the Main feature and everything else as Other. For series
 /// content (when `naming.content_kind == Series`), every selected title is
 /// numbered sequentially as an episode starting at `naming.episode_start`.
+///
+/// `episode_titles_by_index` maps the makemkvcon title index (not the
+/// episode number) to the user-supplied episode title. Empty when the
+/// user hasn't filled any in — the planner falls back to bare
+/// `S01E01.mkv` style filenames in that case.
 pub fn plan_rip(
     identification: &IdentificationResult,
     selected_indexes: &[u32],
     naming: Option<&NamingOpts>,
+    episode_titles_by_index: &HashMap<u32, String>,
 ) -> Vec<PlannedTitle> {
     let main_index = main_title_index(identification);
     let role_for = |idx: u32| role_for_title(idx, identification, main_index);
@@ -175,7 +182,11 @@ pub fn plan_rip(
                     } else {
                         None
                     };
-                    plan_one_title(t, role, naming, episode_number)
+                    let episode_title = episode_titles_by_index
+                        .get(&t.index)
+                        .map(|s| s.as_str())
+                        .filter(|s| !s.trim().is_empty());
+                    plan_one_title(t, role, naming, episode_number, episode_title)
                 })
         })
         .collect()
@@ -186,6 +197,7 @@ fn plan_one_title(
     role: TitleRole,
     naming: Option<&NamingOpts>,
     episode_number: Option<u32>,
+    episode_title: Option<&str>,
 ) -> PlannedTitle {
     let display_label = match (t.index, t.name.as_deref()) {
         (idx, Some(n)) if !n.is_empty() => format!("Title {idx} — {n}"),
@@ -197,7 +209,7 @@ fn plan_one_title(
         .unwrap_or_else(|| format!("title_t{:02}.mkv", t.index));
     let (output_dir, final_path) = match naming {
         Some(opts) => {
-            let final_p = scheme_path(t, role, opts, episode_number);
+            let final_p = scheme_path(t, role, opts, episode_number, episode_title);
             let dir = final_p
                 .parent()
                 .map(|p| p.to_path_buf())
@@ -221,6 +233,7 @@ fn scheme_path(
     role: TitleRole,
     opts: &NamingOpts,
     episode_number: Option<u32>,
+    episode_title: Option<&str>,
 ) -> PathBuf {
     let scheme: Box<dyn Scheme> = match opts.scheme {
         SchemeKind::Jellyfin | SchemeKind::Emby => Box::new(Jellyfin),
@@ -239,8 +252,9 @@ fn scheme_path(
             season: opts.season,
             episode: episode_number.unwrap_or(1),
             episode_end: None,
-            episode_title: t.name.as_deref(),
+            episode_title,
         };
+        let _ = t.name; // we used to default to this; explicit episode_title wins.
         return scheme.episode_path(&episode_ctx);
     }
 
@@ -410,7 +424,7 @@ mod tests {
             DiscContentKind::Movie,
             "Some Disc",
         );
-        let plan = plan_rip(&id, &[0, 1], Some(&opts));
+        let plan = plan_rip(&id, &[0, 1], Some(&opts), &HashMap::new());
         assert_eq!(plan.len(), 2);
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
@@ -506,7 +520,7 @@ mod tests {
         assert_eq!(opts.disc_title, "Dobiegillis");
         assert_eq!(opts.season, 1);
 
-        let plan = plan_rip(&id, &[0, 1, 2], Some(&opts));
+        let plan = plan_rip(&id, &[0, 1, 2], Some(&opts), &HashMap::new());
         assert_eq!(plan.len(), 3);
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
@@ -536,7 +550,7 @@ mod tests {
         );
         opts.episode_start = 7;
         opts.season = 2;
-        let plan = plan_rip(&id, &[0], Some(&opts));
+        let plan = plan_rip(&id, &[0], Some(&opts), &HashMap::new());
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
             std::path::Path::new("/lib/Shows/Series Name/Season 02/Series Name S02E07.mkv")
@@ -544,9 +558,69 @@ mod tests {
     }
 
     #[test]
+    fn user_supplied_episode_titles_land_in_filename() {
+        let id = scan_with(
+            vec![
+                title(0, "raw0", 1500, "X_t00.mkv"),
+                title(1, "raw1", 1505, "X_t01.mkv"),
+            ],
+            Some("series"),
+        );
+        let opts = naming_opts_for_unidentified(
+            PathBuf::from("/lib"),
+            SchemeKind::Jellyfin,
+            DiscContentKind::Series,
+            "Some Series",
+        );
+        let mut episode_titles = HashMap::new();
+        episode_titles.insert(0u32, "Pilot".to_string());
+        episode_titles.insert(1u32, "The Sequel".to_string());
+
+        let plan = plan_rip(&id, &[0, 1], Some(&opts), &episode_titles);
+        assert_eq!(
+            plan[0].final_path.as_deref().unwrap(),
+            std::path::Path::new("/lib/Shows/Some Series/Season 01/Some Series S01E01 - Pilot.mkv")
+        );
+        assert_eq!(
+            plan[1].final_path.as_deref().unwrap(),
+            std::path::Path::new("/lib/Shows/Some Series/Season 01/Some Series S01E02 - The Sequel.mkv")
+        );
+    }
+
+    #[test]
+    fn missing_episode_title_falls_back_to_bare_sxxeyy() {
+        let id = scan_with(
+            vec![
+                title(0, "raw0", 1500, "X_t00.mkv"),
+                title(1, "raw1", 1505, "X_t01.mkv"),
+            ],
+            Some("series"),
+        );
+        let opts = naming_opts_for_unidentified(
+            PathBuf::from("/lib"),
+            SchemeKind::Jellyfin,
+            DiscContentKind::Series,
+            "Some Series",
+        );
+        let mut episode_titles = HashMap::new();
+        episode_titles.insert(0u32, "Pilot".to_string());
+        // Title 1 is left out of the map.
+
+        let plan = plan_rip(&id, &[0, 1], Some(&opts), &episode_titles);
+        assert_eq!(
+            plan[0].final_path.as_deref().unwrap(),
+            std::path::Path::new("/lib/Shows/Some Series/Season 01/Some Series S01E01 - Pilot.mkv")
+        );
+        assert_eq!(
+            plan[1].final_path.as_deref().unwrap(),
+            std::path::Path::new("/lib/Shows/Some Series/Season 01/Some Series S01E02.mkv")
+        );
+    }
+
+    #[test]
     fn no_naming_opts_means_flat_output_with_no_final_path() {
         let id = scan_with(vec![title(0, "M", 60, "x_t00.mkv")], Some("d"));
-        let plan = plan_rip(&id, &[0], None);
+        let plan = plan_rip(&id, &[0], None, &HashMap::new());
         assert_eq!(plan.len(), 1);
         assert!(plan[0].final_path.is_none());
         assert_eq!(plan[0].output_filename, "x_t00.mkv");

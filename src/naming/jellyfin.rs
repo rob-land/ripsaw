@@ -24,7 +24,13 @@ impl Scheme for Jellyfin {
         };
         let title = sanitise(ctx.series_title);
         let year_part = ctx.series_year.map(|y| format!(" ({y})")).unwrap_or_default();
-        let filename = format!("{title}{year_part} {ep_part}.mkv");
+        let episode_part = ctx
+            .episode_title
+            .map(|t| sanitise(t))
+            .filter(|t| !t.is_empty())
+            .map(|t| format!(" - {t}"))
+            .unwrap_or_default();
+        let filename = format!("{title}{year_part} {ep_part}{episode_part}.mkv");
         ctx.root.join(series_folder).join(season_folder).join(filename)
     }
 
@@ -138,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn episode_path_has_zero_padded_season_episode() {
+    fn episode_path_includes_episode_title_when_provided() {
         let ctx = EpisodeContext {
             root: Path::new("/lib/Shows"),
             series_title: "The Expanse",
@@ -152,6 +158,38 @@ mod tests {
             episode_title: Some("Remember the Cant"),
         };
         let p = Jellyfin.episode_path(&ctx);
+        assert_eq!(
+            p,
+            Path::new(
+                "/lib/Shows/The Expanse (2015) [imdbid-tt3230854]/Season 01/The Expanse (2015) S01E03 - Remember the Cant.mkv"
+            )
+        );
+    }
+
+    #[test]
+    fn episode_path_omits_title_suffix_when_none_or_empty() {
+        let mut ctx = EpisodeContext {
+            root: Path::new("/lib/Shows"),
+            series_title: "The Expanse",
+            series_year: Some(2015),
+            tmdb_id: None,
+            imdb_id: Some("tt3230854"),
+            tvdb_id: None,
+            season: 1,
+            episode: 3,
+            episode_end: None,
+            episode_title: None,
+        };
+        let p = Jellyfin.episode_path(&ctx);
+        assert_eq!(
+            p,
+            Path::new(
+                "/lib/Shows/The Expanse (2015) [imdbid-tt3230854]/Season 01/The Expanse (2015) S01E03.mkv"
+            )
+        );
+        ctx.episode_title = Some("   ");
+        let p = Jellyfin.episode_path(&ctx);
+        // Whitespace-only title sanitises to empty and gets dropped.
         assert_eq!(
             p,
             Path::new(
