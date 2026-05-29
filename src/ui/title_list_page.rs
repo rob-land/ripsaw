@@ -4,6 +4,8 @@ use gtk::glib;
 use gtk::CompositeTemplate;
 
 use crate::identify::composite::{analyze_relations, TitleRelation};
+use crate::identify::pipeline::IdentificationResult;
+use crate::identify::DiscType;
 use crate::rip::makemkv_parse::MakemkvScan;
 
 mod imp {
@@ -55,13 +57,35 @@ impl TitleListPage {
         page
     }
 
+    pub fn from_identification(result: &IdentificationResult) -> Self {
+        let page: Self = glib::Object::new();
+        page.populate_with_identity(result);
+        page
+    }
+
+    fn populate_with_identity(&self, result: &IdentificationResult) {
+        let group = self.imp().title_group.get();
+        group.set_title(&format_group_title(result));
+        group.set_description(Some(&format_group_description(result)));
+        if let Some(name) = &result.scan.disc.name {
+            self.set_title(name);
+        }
+        self.populate_rows(&result.scan);
+    }
+
     pub fn populate(&self, scan: &MakemkvScan) {
         let group = self.imp().title_group.get();
 
         if let Some(name) = &scan.disc.name {
             self.set_title(name);
         }
+        let _ = group;
 
+        self.populate_rows(scan);
+    }
+
+    fn populate_rows(&self, scan: &MakemkvScan) {
+        let group = self.imp().title_group.get();
         let pairs: Vec<(u32, &str)> = scan
             .titles
             .iter()
@@ -96,6 +120,43 @@ impl TitleListPage {
                 .build();
             group.add(&row);
         }
+    }
+}
+
+fn format_group_title(result: &IdentificationResult) -> String {
+    if let Some(first) = result.identities.first() {
+        if result.identities.len() == 1 {
+            format!("Identified as {}", first.release_slug)
+        } else {
+            format!("{} matching releases", result.identities.len())
+        }
+    } else {
+        "Not in TheDiscDB catalog".into()
+    }
+}
+
+fn format_group_description(result: &IdentificationResult) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(format!("{} detected", format_disc_type(result.disc_type)));
+    if let Some(h) = &result.content_hash {
+        parts.push(format!("content hash {h}"));
+    } else if result.mount.is_some() {
+        parts.push("content hash unavailable".into());
+    } else {
+        parts.push("could not mount for hashing".into());
+    }
+    if !result.is_identified() {
+        parts.push("submit a contribution to extend the catalog".into());
+    }
+    parts.join("  •  ")
+}
+
+fn format_disc_type(t: DiscType) -> &'static str {
+    match t {
+        DiscType::Dvd => "DVD",
+        DiscType::BluRay => "Blu-ray",
+        DiscType::UltraHdBluRay => "4K UHD Blu-ray",
+        DiscType::BluRay3D => "3D Blu-ray",
     }
 }
 

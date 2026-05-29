@@ -5,7 +5,7 @@ use adw::subclass::prelude::*;
 use gtk::glib::{self, clone};
 use gtk::{gio, CompositeTemplate};
 
-use crate::rip::makemkv::{scan, ScanSource};
+use crate::identify::pipeline::{identify_iso, IdentificationResult};
 use crate::ui::title_list_page::TitleListPage;
 
 mod imp {
@@ -112,14 +112,13 @@ impl ThreeDripWindow {
     }
 
     fn scan_iso(&self, path: PathBuf) {
-        tracing::info!("scanning {}", path.display());
+        tracing::info!("identifying {}", path.display());
         self.toast(&format!("Scanning {}...", path.display()));
 
         let (tx, rx) = async_channel::bounded(1);
         let path_for_task = path.clone();
         crate::runtime::tokio_runtime().spawn(async move {
-            let source = ScanSource::Iso(path_for_task);
-            let _ = tx.send(scan(&source).await).await;
+            let _ = tx.send(identify_iso(path_for_task).await).await;
         });
 
         glib::MainContext::default().spawn_local(clone!(
@@ -127,27 +126,10 @@ impl ThreeDripWindow {
             self,
             async move {
                 match rx.recv().await {
-                    Ok(Ok(scan_result)) => {
-                        let n = scan_result.titles.len();
-                        let version = scan_result
-                            .makemkv_version
-                            .as_deref()
-                            .unwrap_or("?");
-                        tracing::info!(
-                            "scan succeeded: {n} titles via MakeMKV {version}"
-                        );
-                        let disc = scan_result
-                            .disc
-                            .name
-                            .as_deref()
-                            .unwrap_or("(unnamed disc)");
-                        window.toast(&format!("Scanned {disc}: {n} titles"));
-                        let page = TitleListPage::from_scan(&scan_result);
-                        window.imp().nav.push(&page);
-                    }
+                    Ok(Ok(result)) => window.show_identification(result),
                     Ok(Err(e)) => {
-                        tracing::error!("scan failed: {e:#}");
-                        window.toast(&format!("Scan failed: {e}"));
+                        tracing::error!("identify failed: {e:#}");
+                        window.toast(&format!("Identify failed: {e}"));
                     }
                     Err(e) => {
                         tracing::error!("scan channel closed: {e}");
@@ -158,8 +140,50 @@ impl ThreeDripWindow {
         ));
     }
 
+    fn show_identification(&self, result: IdentificationResult) {
+        let n = result.scan.titles.len();
+        let disc_name = result
+            .scan
+            .disc
+            .name
+            .as_deref()
+            .unwrap_or("(unnamed disc)");
+
+        if result.is_identified() {
+            let slug = result
+                .identities
+                .first()
+                .map(|i| i.release_slug.as_str())
+                .unwrap_or("");
+            self.toast(&format!("{disc_name}: identified as {slug}"));
+        } else if let Some(h) = &result.content_hash {
+            self.toast(&format!(
+                "{disc_name}: {n} titles • {} • not in catalog (hash {})",
+                describe_disc_type(result.disc_type),
+                &h[..12]
+            ));
+        } else {
+            self.toast(&format!(
+                "{disc_name}: {n} titles • {} • not mounted (no hash, no lookup)",
+                describe_disc_type(result.disc_type)
+            ));
+        }
+
+        let page = TitleListPage::from_identification(&result);
+        self.imp().nav.push(&page);
+    }
+
     fn toast(&self, message: &str) {
         let toast = adw::Toast::builder().title(message).timeout(4).build();
         self.imp().toasts.add_toast(toast);
+    }
+}
+
+fn describe_disc_type(t: crate::identify::DiscType) -> &'static str {
+    match t {
+        crate::identify::DiscType::Dvd => "DVD",
+        crate::identify::DiscType::BluRay => "Blu-ray",
+        crate::identify::DiscType::UltraHdBluRay => "4K UHD",
+        crate::identify::DiscType::BluRay3D => "3D Blu-ray",
     }
 }

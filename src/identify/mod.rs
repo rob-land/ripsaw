@@ -3,6 +3,7 @@
 pub mod composite;
 pub mod disc_hash;
 pub mod from_scan;
+pub mod pipeline;
 pub mod thediscdb;
 pub mod tmdb;
 pub mod submit;
