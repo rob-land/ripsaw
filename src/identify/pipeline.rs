@@ -100,6 +100,7 @@ pub async fn identify_mkv(mkv_path: PathBuf) -> Result<IdentificationResult> {
     let (has_mvc, stereo_mode) = detect_3d(&mkv_path);
     let scan_data = synthesise_scan(&mkv_path, &report);
     let _ = stereo_mode; // surfaced through has_mvc; detailed mode UX is a TODO
+    let _has_mvcc = has_mvc; // used below to discriminate the StereoSource variant
     let disc_type = if has_mvc { DiscType::BluRay3D } else { DiscType::BluRay };
 
     Ok(IdentificationResult {
