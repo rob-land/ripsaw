@@ -63,47 +63,62 @@ pub async fn apply_post_rip_metadata(
 }
 
 async fn apply_chapter_titles(path: &Path, titles: &[String]) -> Result<()> {
-    // 1. Dump existing chapters from the MKV -- this preserves the
-    //    ChapterTimeStart values MakeMKV wrote.
+    // 1. Dump existing chapters from the MKV. mkvextract's
+    //    "destination" syntax (mode 2) writes the XML to a file --
+    //    there is no stdout mode in current mkvextract.
+    let chapters_xml = path.with_extension("chapters.xml.tmp");
     let extracted = Command::new("mkvextract")
         .arg(path)
         .arg("chapters")
-        .arg("--")
-        .stdout(Stdio::piped())
+        .arg(&chapters_xml)
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .await
         .context("running mkvextract chapters")?;
     if !extracted.status.success() {
+        let _ = tokio::fs::remove_file(&chapters_xml).await;
         return Err(anyhow!(
             "mkvextract chapters failed: {}",
             String::from_utf8_lossy(&extracted.stderr).trim()
         ));
     }
-    let xml = String::from_utf8(extracted.stdout)
-        .context("mkvextract chapters returned non-UTF-8")?;
+    let xml = match tokio::fs::read_to_string(&chapters_xml).await {
+        Ok(s) => s,
+        Err(_) => {
+            // mkvextract writes no file when the MKV has no chapters.
+            return Err(anyhow!("MKV has no chapter atoms to label"));
+        }
+    };
     if xml.trim().is_empty() {
+        let _ = tokio::fs::remove_file(&chapters_xml).await;
         return Err(anyhow!("MKV has no chapter atoms to label"));
     }
 
-    let updated = splice_chapter_titles(&xml, titles)?;
+    let updated = match splice_chapter_titles(&xml, titles) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&chapters_xml).await;
+            return Err(e);
+        }
+    };
 
-    // 2. Write to a temp file next to the MKV and feed it to mkvpropedit.
-    let tmp = path.with_extension("chapters.xml.tmp");
-    tokio::fs::write(&tmp, &updated)
+    // 2. Overwrite the same temp file with the spliced XML and feed it
+    //    to mkvpropedit.
+    tokio::fs::write(&chapters_xml, &updated)
         .await
-        .context("writing temporary chapters.xml")?;
+        .context("writing spliced chapters.xml")?;
 
     let status = Command::new("mkvpropedit")
         .arg(path)
         .arg("-c")
-        .arg(&tmp)
+        .arg(&chapters_xml)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .status()
         .await
         .context("running mkvpropedit -c")?;
-    let _ = tokio::fs::remove_file(&tmp).await;
+    let _ = tokio::fs::remove_file(&chapters_xml).await;
 
     if !status.success() {
         return Err(anyhow!("mkvpropedit -c exited with {}", status));
