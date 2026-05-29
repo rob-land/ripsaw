@@ -230,7 +230,45 @@ copying subs through without depth.
 | Phase | Scope |
 |---|---|
 | ~~**0** (sketch)~~ | ✅ Done. Design doc + module stubs. |
-| **1** (in progress) | `libmvc` skeleton: subset SPS / MVC SPS parse, NAL types 14/15/20 routing, per-view DPB scaffolding, golden-frame test harness against `ldecod`. Single SSIF input, raw YUV output of both views, no integration into 3drip yet. **Sub-progress:** bit reader + Exp-Golomb + RBSP extraction + NAL header parsing + Subset SPS MVC extension + minimal Matroska EBML walker + mvcC (MVCDecoderConfigurationRecord) reader + ref_pic_list_modification with MVC inter-view IDCs 4 & 5 (36 unit + 2 real-world integration tests). The real-world test extracts the mvcC BlockAddIDExtraData from `samples/3D_LR_Pattern.mkv` and confirms profile_idc 128 (Stereo High), level 41, and a type-15 Subset SPS NAL whose RBSP starts as expected. Remaining for phase 1: full slice-header parser (base spec + MVC SEI hooks), per-view DPB, inter-view prediction wiring against an upstream H.264 base-view decoder. |
+| **1** (in progress) | `libmvc` skeleton: subset SPS / MVC SPS parse, NAL types 14/15/20 routing, per-view DPB scaffolding, golden-frame test harness against `ldecod`. Single SSIF input, raw YUV output of both views, no integration into 3drip yet. **Sub-progress:** bit reader + Exp-Golomb + RBSP extraction + NAL header parsing + Subset SPS MVC extension + minimal Matroska EBML walker + mvcC (MVCDecoderConfigurationRecord) reader + ref_pic_list_modification with MVC inter-view IDCs 4 & 5 + frame_packing_arrangement SEI parser + Annex B NAL stream splitter (50 unit + 2 real-world integration tests). The real-world test extracts the mvcC BlockAddIDExtraData from `samples/3D_LR_Pattern.mkv` and confirms profile_idc 128 (Stereo High), level 41, and a type-15 Subset SPS NAL whose RBSP starts as expected. Remaining for phase 1: full slice-header parser (base spec + MVC SEI hooks), per-view DPB, inter-view prediction wiring against an upstream H.264 base-view decoder. |
+
+### Inline-MVC conversion path lands (2026-05-29)
+
+The convert::runner now produces a real Full Side-by-Side .mkv from
+an inline-MVC source (Matroska stereo mode 13 / 14) end-to-end:
+
+```
+input.mkv
+  ↓  mkvextract tracks 0:track.h264
+track.h264  (Annex B byte stream that contains the full MVC bitstream:
+             SPS + Subset SPS + base view slices + type-20 dep view
+             slices, all in one elementary stream)
+  ↓  ldecod -f decoder.cfg
+output_ViewId0000.yuv  (base view, 1920×1080 yuv420p)
+output_ViewId0001.yuv  (dependent view, 1920×1080 yuv420p)
+  ↓  ffmpeg -f rawvideo -i view0 -f rawvideo -i view1
+     -filter_complex "[0:v][1:v]hstack=inputs=2[v]"
+     -map [v] -i input.mkv (for audio + subs)
+     -c:v libx264 -crf 18 -c:a copy -c:s copy
+output.fsbs.mkv  (3840×1080 H.264, with mapped audio + subtitle tracks)
+```
+
+`scripts/ldecod` is a wrapper around the JM build at
+`/home/rob/3rdparty/JM/bin/umake/<toolchain>/release/ldecod`.
+Conversion runtime is dominated by ldecod (JM reference decoder,
+single-threaded, no SIMD); minutes per minute of source content.
+Replacing it with `libmvc` once that decoder lands is the obvious
+future optimisation -- the rest of the pipeline already streams
+YUV between subprocesses.
+
+The mvcC-format MKVs (modern MakeMKV with the dependent view in
+per-frame BlockAdditions, e.g. `samples/3D_LR_Pattern.mkv`) still
+fail with a clear "BlockAddition extractor not yet built" message.
+That extractor is the next milestone: walk MKV clusters, pull
+BlockAddID 1 blob (the dependent view's NAL units), prepend the
+appropriate Subset SPS / PPS from the mvcC config record, and
+splice into an Annex B stream alongside the base view -- exactly
+the same input format ldecod is happy to consume today.
 
 ### Build / tooling state (2026-05-28)
 
