@@ -101,6 +101,26 @@ pub fn run_rip_queue(
                 }
                 (other, _) => other,
             };
+
+            // After a successful rip, embed chapter titles + Segment.Title
+            // via mkvpropedit. This is best-effort -- the metadata module
+            // logs and continues on tool/format failures; we only treat
+            // setup failures as fatal here.
+            if let Ok(landed) = &final_result {
+                if let Err(e) = crate::rip::metadata::apply_post_rip_metadata(
+                    landed,
+                    &item.chapter_titles,
+                    item.segment_title.as_deref(),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "post-rip metadata for {} failed at setup: {e:#}",
+                        landed.display()
+                    );
+                }
+            }
+
             let _ = rip_tx
                 .send(RipMessage::Finished(index_in_queue, final_result))
                 .await;

@@ -257,6 +257,7 @@ mod tests {
             role: TitleRole::Trailer,
             display_title: "Theatrical Trailer".into(),
             source_file: None,
+            chapters: Vec::new(),
             season: None,
             episode: None,
         };
@@ -278,6 +279,7 @@ mod tests {
             role: TitleRole::Main,
             display_title: "Avatar".into(),
             source_file: None,
+            chapters: Vec::new(),
             season: None,
             episode: None,
         };

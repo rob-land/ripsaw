@@ -151,11 +151,28 @@ fn hashes_equal(a: &str, b: &str) -> bool {
 
 fn title_identity_from(t: &TitleNode) -> TitleIdentity {
     let item = t.item.as_ref();
+    let chapters = item
+        .map(|i| {
+            i.chapters
+                .iter()
+                .filter_map(|c| {
+                    c.title
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| crate::identify::ChapterIdentity {
+                            index: c.index,
+                            title: s.to_string(),
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     TitleIdentity {
         index: t.index,
         role: parse_role(item.and_then(|i| i.item_type.as_deref())),
         display_title: item.and_then(|i| i.title.clone()).unwrap_or_default(),
         source_file: t.source_file.clone(),
+        chapters,
         season: item.and_then(|i| i.season),
         episode: item.and_then(|i| i.episode),
     }
@@ -273,14 +290,11 @@ struct ItemNode {
     episode: Option<u32>,
     #[serde(rename = "type")]
     item_type: Option<String>,
-    // chapters are accepted but currently unused in the projected Identity.
-    #[allow(dead_code)]
     #[serde(default)]
     chapters: Vec<ChapterNode>,
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct ChapterNode {
     index: u32,
     title: Option<String>,

@@ -157,6 +157,16 @@ pub struct TitleIdentity {
     /// MakeMKV's title index.
     #[serde(default)]
     pub source_file: Option<String>,
+    /// Per-chapter titles (1-based by `index`). Empty when TheDiscDB
+    /// has no chapters submitted for the title.
+    #[serde(default)]
+    pub chapters: Vec<ChapterIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChapterIdentity {
+    pub index: u32,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -140,6 +140,13 @@ pub struct PlannedTitle {
     /// `None` means leave the file where MakeMKV put it (used when no naming
     /// scheme is applied — flat output to a single directory).
     pub final_path: Option<PathBuf>,
+    /// Per-chapter titles from TheDiscDB (1-based, ordered). Empty when
+    /// there is no identity or the title has no submitted chapters.
+    /// Embedded into the MKV via mkvpropedit after the rip succeeds.
+    pub chapter_titles: Vec<String>,
+    /// Value to write to the MKV's Segment.Title via
+    /// `mkvpropedit --edit info --set title=...`. `None` skips the set.
+    pub segment_title: Option<String>,
 }
 
 /// Build per-title rip targets. Roles are inferred from
@@ -253,6 +260,21 @@ fn plan_one_title(
         }
         None => (PathBuf::new(), None),
     };
+    let chapter_titles = identity
+        .map(|i| {
+            let mut by_index = i.chapters.clone();
+            by_index.sort_by_key(|c| c.index);
+            by_index.into_iter().map(|c| c.title).collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    // The MKV Segment.Title is the human-facing name shown by some
+    // players. Use the filename basename (without .mkv) so it always
+    // matches what is on disk -- per the user's request that this
+    // mirror the filename.
+    let segment_title = final_path
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned());
     PlannedTitle {
         title_index: t.index,
         display_label,
@@ -260,6 +282,8 @@ fn plan_one_title(
         output_dir,
         output_filename,
         final_path,
+        chapter_titles,
+        segment_title,
     }
 }
 
@@ -325,6 +349,7 @@ fn scheme_path(
                 role: other_role,
                 display_title,
                 source_file: t.source_file.clone(),
+                chapters: Vec::new(),
                 season: None,
                 episode: None,
             };

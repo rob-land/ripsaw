@@ -17,6 +17,8 @@ pub struct RipQueueItem {
     pub output_dir: PathBuf,
     pub expected_output_filename: String,
     pub final_path: Option<PathBuf>,
+    pub chapter_titles: Vec<String>,
+    pub segment_title: Option<String>,
 }
 
 impl From<PlannedTitle> for RipQueueItem {
@@ -27,6 +29,8 @@ impl From<PlannedTitle> for RipQueueItem {
             output_dir: p.output_dir,
             expected_output_filename: p.output_filename,
             final_path: p.final_path,
+            chapter_titles: p.chapter_titles,
+            segment_title: p.segment_title,
         }
     }
 }

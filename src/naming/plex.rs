@@ -209,6 +209,7 @@ mod tests {
             role: TitleRole::BehindTheScenes,
             display_title: "Making of Avatar".into(),
             source_file: None,
+            chapters: Vec::new(),
             season: None,
             episode: None,
         };
