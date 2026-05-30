@@ -283,18 +283,40 @@ inline-stereo-mode sample (262 type-7 SPS, 261 type-15 Subset SPS,
 slice extensions). Both `mkvextract` and our walker produce
 byte-identical 59 MB Annex B streams from it.
 
-ldecod, which decodes the stereo-mode-13/14 sample into per-view
-YUVs, does *not* recognise this stream as MVC -- it produces a
-single `output.yuv` rather than the
-`output_ViewId0000.yuv` / `output_ViewId0001.yuv` pair. Both
-streams look superficially similar; the most plausible suspects
-are subtle differences in Subset SPS `profile_idc` (Multiview High
-vs Stereo High), view-id-list ordering, prefix-NAL (type 14)
-presence/absence between base and dep slices, or SEI hints
-(view-scalability info, parallel-decoding info) that ldecod uses
-to switch modes. Chasing this belongs in the `libmvc` phase --
-replacing ldecod removes the recognition heuristic that's failing
-here.
+### mvcC decode resolution (2026-05-29)
+
+Two unrelated-looking decisions kept the mvcC pipeline broken:
+
+1. **`DecodeAllLayers = 1`** on the ldecod config. The default JM
+   config has it `= 0`, and with that flag off ldecod prints
+   "Found Subsequence SPS NALU. Ignoring." for every type-15 NAL
+   and "Found SVC extension NALU (20). Ignoring." for every
+   dependent-view slice -- so the output is single-view *regardless*
+   of bitstream contents. This applies to both the inline and the
+   mvcC packagings; the inline path appeared to "work" only because
+   we'd already added the flag to the runner's config; running the
+   bare default-cfg decoder against the inline stream produces the
+   same single-view result.
+
+2. **Don't prepend the mvcC's SPS / PPS list.** MakeMKV's mvcC
+   sources embed the H.264 parameter sets (SPS / Subset SPS / PPS)
+   inside the SimpleBlock content, so the Annex B stream
+   `extract_to_annex_b` emits already contains a complete parameter-
+   set burst once it gets past the first AUD. Prepending the mvcC
+   record's parameter-set list at the top duplicates SPS-id=0 and
+   Subset SPS-id=0, and ldecod (under DecodeAllLayers=1) **segfaults
+   during initialisation**. Skipping the prepend makes the stream
+   decode cleanly into ViewId0000 + ViewId0001 YUVs at the expected
+   1920x1080.
+
+With both in place: `samples/3D_LR_Pattern.mkv` decodes via
+`extract_to_annex_b -> ldecod -> ffmpeg compose` end-to-end. The
+runner now routes `StereoSource::MvcWithBlockAdditions` through
+the same pipeline as the inline source -- only the front-end
+extractor differs (our walker vs `mkvextract`). `libmvc` is still
+the long-term performance fix (JM is single-threaded, no SIMD;
+minutes-per-minute-of-source-content) but is no longer a
+correctness requirement.
 
 ### Build / tooling state (2026-05-28)
 
