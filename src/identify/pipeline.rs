@@ -80,6 +80,7 @@ pub async fn identify_physical_disc(
         _ => Vec::new(),
     };
     let disc_type = detect_disc_type_with_mount(&scan_data, &mount_path);
+    let has_mvc = scan_has_mvc(&scan_data);
 
     Ok(IdentificationResult {
         scan: scan_data,
@@ -89,7 +90,22 @@ pub async fn identify_physical_disc(
         identities,
         source,
         source_file: None,
-        has_mvc: false,
+        has_mvc,
+    })
+}
+
+/// True when any title on the disc carries a stream MakeMKV identifies
+/// as MVC. The two codec strings we care about are SINFO code 6
+/// (`Mpeg4-MVC-3D`) and SINFO code 7 (`Mpeg4 MVC High@L4.1/...`); a
+/// match on either is sufficient.
+fn scan_has_mvc(scan: &MakemkvScan) -> bool {
+    scan.titles.iter().any(|t| {
+        t.streams.iter().any(|s| {
+            let short = s.codec_short.as_deref().unwrap_or("");
+            let long = s.codec_long.as_deref().unwrap_or("");
+            short.to_ascii_uppercase().contains("MVC")
+                || long.to_ascii_uppercase().contains("MVC")
+        })
     })
 }
 
@@ -265,6 +281,7 @@ pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
         None => (detect_disc_type(&scan_data), None, Vec::new()),
     };
 
+    let has_mvc = scan_has_mvc(&scan_data);
     Ok(IdentificationResult {
         scan: scan_data,
         mount,
@@ -273,6 +290,6 @@ pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
         identities,
         source,
         source_file: Some(iso_path),
-        has_mvc: false,
+        has_mvc,
     })
 }
