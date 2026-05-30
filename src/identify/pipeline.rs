@@ -51,6 +51,10 @@ pub struct IdentificationResult {
     /// True when MakeMKV-style mvcC was detected in the source — i.e.
     /// the file or disc carries an MVC dependent view track.
     pub has_mvc: bool,
+    /// `BDMV/META/DL/bdmt_eng.xml` content when present. Used as
+    /// pre-fill data on the title list page when TheDiscDB has no
+    /// match for the disc.
+    pub bdmt: Option<crate::identify::bdmt::BdmtMetadata>,
 }
 
 impl IdentificationResult {
@@ -81,6 +85,9 @@ pub async fn identify_physical_disc(
     };
     let disc_type = detect_disc_type_with_mount(&scan_data, &mount_path);
     let has_mvc = scan_has_mvc(&scan_data);
+    let bdmt = crate::identify::bdmt::read_from_mount(&mount_path)
+        .ok()
+        .flatten();
 
     Ok(IdentificationResult {
         scan: scan_data,
@@ -91,6 +98,7 @@ pub async fn identify_physical_disc(
         source,
         source_file: None,
         has_mvc,
+        bdmt,
     })
 }
 
@@ -134,6 +142,7 @@ pub async fn identify_mkv(mkv_path: PathBuf) -> Result<IdentificationResult> {
         source: ScanSource::Iso(mkv_path.clone()),
         source_file: Some(mkv_path),
         has_mvc,
+        bdmt: None,
     })
 }
 
@@ -282,6 +291,9 @@ pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
     };
 
     let has_mvc = scan_has_mvc(&scan_data);
+    let bdmt = mount
+        .as_ref()
+        .and_then(|m| crate::identify::bdmt::read_from_mount(&m.mount_point).ok().flatten());
     Ok(IdentificationResult {
         scan: scan_data,
         mount,
@@ -291,5 +303,6 @@ pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
         source,
         source_file: Some(iso_path),
         has_mvc,
+        bdmt,
     })
 }

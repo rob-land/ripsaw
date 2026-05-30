@@ -65,6 +65,57 @@ template $RipsawTitleListPage: Adw.NavigationPage {
         }
       }
 
+      Adw.PreferencesGroup submission_group {
+        title: _("Submission metadata");
+        description: _("Fill in to submit a new entry to TheDiscDB. Optional for corrections to an existing disc.");
+
+        Adw.SpinRow year_row {
+          title: _("Year");
+          adjustment: Adjustment {
+            lower: 1900;
+            upper: 2100;
+            step-increment: 1;
+            value: 2025;
+          };
+        }
+
+        Adw.EntryRow tmdb_id_row {
+          title: _("TMDb ID");
+        }
+
+        Adw.EntryRow imdb_id_row {
+          title: _("IMDb ID (tt…)");
+        }
+
+        Adw.EntryRow plot_row {
+          title: _("Plot");
+        }
+
+        Adw.EntryRow tagline_row {
+          title: _("Tagline");
+        }
+
+        Adw.EntryRow release_slug_row {
+          title: _("Release slug");
+        }
+
+        Adw.EntryRow release_title_row {
+          title: _("Release title");
+        }
+
+        Adw.EntryRow locale_row {
+          title: _("Locale (e.g. en-us)");
+        }
+
+        Adw.EntryRow region_code_row {
+          title: _("Region code (1 / A / B / …)");
+        }
+
+        Adw.EntryRow upc_row {
+          title: _("UPC / barcode");
+        }
+      }
+
       Adw.PreferencesGroup output_group {
         title: _("Output");
         description: _("Choose how the selected titles are produced.");

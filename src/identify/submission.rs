@@ -267,6 +267,204 @@ fn format_duration(seconds: u64) -> String {
     }
 }
 
+/// Movie-level metadata; populates `data/<type>/{Title (Year)}/metadata.json`
+/// in TheDiscDB/data.
+#[derive(Debug, Clone, Default)]
+pub struct MovieMetadata {
+    pub title: String,
+    pub year: Option<u32>,
+    pub content_type: ContentType,
+    pub plot: Option<String>,
+    pub tagline: Option<String>,
+    pub tmdb_id: Option<u64>,
+    pub imdb_id: Option<String>,
+    pub tvdb_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContentType {
+    #[default]
+    Movie,
+    Series,
+}
+
+impl ContentType {
+    fn discdb_string(self) -> &'static str {
+        match self {
+            ContentType::Movie => "Movie",
+            ContentType::Series => "Series",
+        }
+    }
+    fn dir_segment(self) -> &'static str {
+        match self {
+            ContentType::Movie => "movie",
+            ContentType::Series => "series",
+        }
+    }
+}
+
+/// Release-level metadata; populates the release.json under the
+/// release-slug subdirectory.
+#[derive(Debug, Clone, Default)]
+pub struct ReleaseMetadata {
+    pub slug: String,
+    pub title: String,
+    pub year: Option<u32>,
+    pub locale: Option<String>,
+    pub region_code: Option<String>,
+    pub upc: Option<String>,
+    pub asin: Option<String>,
+}
+
+/// Render the movie-level `metadata.json` per TheDiscDB/data shape.
+pub fn render_metadata_json(movie: &MovieMetadata) -> String {
+    let slug = title_slug(&movie.title, movie.year);
+    let mut external_ids = serde_json::Map::new();
+    if let Some(t) = movie.tmdb_id {
+        external_ids.insert("Tmdb".into(), serde_json::Value::String(t.to_string()));
+    }
+    if let Some(i) = &movie.imdb_id {
+        external_ids.insert("Imdb".into(), serde_json::Value::String(i.clone()));
+    }
+    if let Some(t) = &movie.tvdb_id {
+        external_ids.insert("Tvdb".into(), serde_json::Value::String(t.clone()));
+    }
+    let mut obj = serde_json::json!({
+        "Title": movie.title,
+        "FullTitle": movie.title,
+        "SortTitle": sort_title(&movie.title),
+        "Slug": slug,
+        "Type": movie.content_type.discdb_string(),
+        "Groups": [],
+    });
+    if let Some(y) = movie.year {
+        obj["Year"] = serde_json::json!(y);
+    }
+    if !external_ids.is_empty() {
+        obj["ExternalIds"] = serde_json::Value::Object(external_ids);
+    }
+    if let Some(p) = &movie.plot {
+        obj["Plot"] = serde_json::Value::String(p.clone());
+    }
+    if let Some(t) = &movie.tagline {
+        obj["Tagline"] = serde_json::Value::String(t.clone());
+    }
+    serde_json::to_string_pretty(&obj).expect("serde_json never fails on owned data")
+}
+
+/// Render the release-level `release.json` per TheDiscDB/data shape.
+pub fn render_release_json(release: &ReleaseMetadata) -> String {
+    let mut obj = serde_json::json!({
+        "Slug": release.slug,
+        "Title": release.title,
+        "SortTitle": format!(
+            "{} {}",
+            release.year.map(|y| y.to_string()).unwrap_or_default(),
+            release.title
+        )
+        .trim()
+        .to_string(),
+    });
+    if let Some(y) = release.year {
+        obj["Year"] = serde_json::json!(y);
+    }
+    if let Some(l) = &release.locale {
+        obj["Locale"] = serde_json::Value::String(l.clone());
+    }
+    if let Some(r) = &release.region_code {
+        obj["RegionCode"] = serde_json::Value::String(r.clone());
+    }
+    if let Some(u) = &release.upc {
+        obj["Upc"] = serde_json::Value::String(u.clone());
+    }
+    if let Some(a) = &release.asin {
+        obj["Asin"] = serde_json::Value::String(a.clone());
+    }
+    serde_json::to_string_pretty(&obj).expect("serde_json never fails on owned data")
+}
+
+/// Turn a movie title + year into the slug TheDiscDB uses (lowercase,
+/// hyphenated, year suffix).
+pub fn title_slug(title: &str, year: Option<u32>) -> String {
+    let mut s: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c
+            } else if c == ' ' || c == '-' {
+                '-'
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    s.retain(|c| c != ' ');
+    // collapse runs of '-'
+    while s.contains("--") {
+        s = s.replace("--", "-");
+    }
+    let trimmed = s.trim_matches('-').to_string();
+    match year {
+        Some(y) => format!("{trimmed}-{y}"),
+        None => trimmed,
+    }
+}
+
+fn sort_title(title: &str) -> String {
+    // Strip leading articles ("The", "A", "An") for sort key, per
+    // TheDiscDB convention.
+    let trimmed = title.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    for prefix in ["the ", "a ", "an "] {
+        if lower.starts_with(prefix) {
+            return trimmed[prefix.len()..].to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Stage a full new-disc submission: movie metadata.json,
+/// release.json, and the per-disc disc0N.json under the staging
+/// root mirroring TheDiscDB's data tree layout. Returns the
+/// directory the files landed in.
+pub fn stage_full_submission(
+    movie: &MovieMetadata,
+    release: &ReleaseMetadata,
+    disc: &DiscSubmission,
+    scan: &MakemkvScan,
+    identity: Option<&Identity>,
+    edits: &HashMap<u32, TitleEdit>,
+) -> anyhow::Result<std::path::PathBuf> {
+    let folder_name = match movie.year {
+        Some(y) => format!("{} ({y})", movie.title),
+        None => movie.title.clone(),
+    };
+    let dir = staging_root()
+        .join("data")
+        .join(movie.content_type.dir_segment())
+        .join(sanitize_dir(&folder_name))
+        .join(sanitize_dir(&release.slug));
+    std::fs::create_dir_all(&dir)?;
+
+    let metadata_path = dir.parent().unwrap().join("metadata.json");
+    std::fs::write(&metadata_path, render_metadata_json(movie))?;
+
+    let release_path = dir.join("release.json");
+    std::fs::write(&release_path, render_release_json(release))?;
+
+    let disc_filename = format!("disc{:02}.json", disc.disc_index.max(1));
+    let disc_path = dir.join(&disc_filename);
+    std::fs::write(&disc_path, render_disc_json(disc, scan, identity, edits))?;
+
+    Ok(dir)
+}
+
+fn sanitize_dir(name: &str) -> String {
+    // Posix-safe directory name: keep most chars, replace path separators.
+    name.replace('/', "_").replace('\\', "_")
+}
+
 /// Where on disk staged submissions land. Honours `$XDG_DATA_HOME`,
 /// falling back to `$HOME/.local/share/`. Public so the UI can pop a
 /// toast / dialog telling the user where to look.
@@ -501,5 +699,69 @@ mod tests {
     fn size_formatter_matches_thediscdb_style() {
         assert_eq!(format_size(35_830_161_408), "35.8 GB");
         assert_eq!(format_size(750_000_000), "750 MB");
+    }
+
+    #[test]
+    fn metadata_json_contains_external_ids_when_present() {
+        let m = MovieMetadata {
+            title: "Skyfall".into(),
+            year: Some(2012),
+            content_type: ContentType::Movie,
+            plot: Some("James Bond's loyalty to M is tested.".into()),
+            tagline: Some("Think on your sins.".into()),
+            tmdb_id: Some(37724),
+            imdb_id: Some("tt1074638".into()),
+            tvdb_id: None,
+        };
+        let j: serde_json::Value = serde_json::from_str(&render_metadata_json(&m)).unwrap();
+        assert_eq!(j["Title"], "Skyfall");
+        assert_eq!(j["Type"], "Movie");
+        assert_eq!(j["Year"], 2012);
+        assert_eq!(j["Slug"], "skyfall-2012");
+        assert_eq!(j["SortTitle"], "Skyfall");
+        assert_eq!(j["ExternalIds"]["Tmdb"], "37724");
+        assert_eq!(j["ExternalIds"]["Imdb"], "tt1074638");
+        assert_eq!(j["Plot"], "James Bond's loyalty to M is tested.");
+        assert_eq!(j["Tagline"], "Think on your sins.");
+    }
+
+    #[test]
+    fn release_json_renders_slug_year_locale_upc() {
+        let r = ReleaseMetadata {
+            slug: "2020-james-bond-collection-blu-ray".into(),
+            title: "2020 James Bond Collection Blu-ray".into(),
+            year: Some(2020),
+            locale: Some("en-us".into()),
+            region_code: Some("1".into()),
+            upc: Some("883904346708".into()),
+            asin: None,
+        };
+        let j: serde_json::Value = serde_json::from_str(&render_release_json(&r)).unwrap();
+        assert_eq!(j["Slug"], "2020-james-bond-collection-blu-ray");
+        assert_eq!(j["Year"], 2020);
+        assert_eq!(j["Locale"], "en-us");
+        assert_eq!(j["RegionCode"], "1");
+        assert_eq!(j["Upc"], "883904346708");
+    }
+
+    #[test]
+    fn title_slug_lowercases_and_replaces_spaces() {
+        assert_eq!(
+            title_slug("10 Cloverfield Lane", Some(2016)),
+            "10-cloverfield-lane-2016"
+        );
+        assert_eq!(
+            title_slug("The Lord of the Rings", Some(2001)),
+            "the-lord-of-the-rings-2001"
+        );
+        assert_eq!(title_slug("Movie!", None), "movie");
+    }
+
+    #[test]
+    fn sort_title_strips_leading_article() {
+        assert_eq!(sort_title("The Matrix"), "Matrix");
+        assert_eq!(sort_title("A Few Good Men"), "Few Good Men");
+        assert_eq!(sort_title("An American in Paris"), "American in Paris");
+        assert_eq!(sort_title("Skyfall"), "Skyfall");
     }
 }

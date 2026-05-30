@@ -38,6 +38,18 @@ mod imp {
         #[template_child] pub output_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child] pub output_format_row: TemplateChild<adw::ComboRow>,
         #[template_child] pub encoder_backend_row: TemplateChild<adw::ComboRow>,
+        #[template_child] pub year_row: TemplateChild<adw::SpinRow>,
+        #[template_child] pub tmdb_id_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub imdb_id_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub plot_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub tagline_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub release_slug_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub release_title_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub locale_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub region_code_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub upc_row: TemplateChild<adw::EntryRow>,
+        #[allow(dead_code)]
+        #[template_child] pub submission_group: TemplateChild<adw::PreferencesGroup>,
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
         pub episode_entries: RefCell<Vec<gtk::Entry>>,
@@ -55,6 +67,10 @@ mod imp {
         /// is unidentified or the input wasn't a physical-disc / ISO
         /// source (e.g. a stand-alone MKV).
         pub content_hash: RefCell<String>,
+        /// Parsed `BDMV/META/DL/bdmt_eng.xml` content when present.
+        /// Pre-fills disc title + per-title display titles when
+        /// TheDiscDB has no match.
+        pub bdmt: RefCell<Option<crate::identify::bdmt::BdmtMetadata>>,
     }
 
     #[glib::object_subclass]
@@ -139,14 +155,40 @@ impl TitleListPage {
         self.imp()
             .content_hash
             .replace(result.content_hash.clone().unwrap_or_default());
+        // Stash bdmt for later use (pre-fill of per-title display
+        // titles + the title-detail page).
+        self.imp().bdmt.replace(result.bdmt.clone());
+        // Pre-fill submission metadata fields from the matched
+        // TheDiscDB identity (when there is one) so corrections
+        // start from the existing record rather than blank.
+        if let Some(identity) = result.identities.first() {
+            if let Some(y) = identity.year {
+                self.imp().year_row.set_value(y as f64);
+            }
+            if let Some(t) = identity.tmdb_id {
+                self.imp().tmdb_id_row.set_text(&t.to_string());
+            }
+            if let Some(i) = &identity.imdb_id {
+                self.imp().imdb_id_row.set_text(i);
+            }
+            self.imp()
+                .release_slug_row
+                .set_text(&identity.release_slug);
+        }
         if let Some(name) = &result.scan.disc.name {
             self.set_title(name);
         }
         let detected = auto_detect_content_kind(&result.scan.titles);
         self.imp().series_toggle.set_active(detected == DiscContentKind::Series);
 
-        // Pre-fill the editable title and season fields from the disc label.
-        if let Some(disc_name) = &result.scan.disc.name {
+        // Pre-fill the editable title and season fields. Precedence:
+        // bdmt_eng.xml disc title beats the parsed UDF disc label,
+        // because the publisher authored bdmt. The label is a
+        // backup parsing path.
+        let bdmt_title = result.bdmt.as_ref().and_then(|b| b.disc_title.clone());
+        if let Some(t) = &bdmt_title {
+            self.imp().title_override.set_text(t);
+        } else if let Some(disc_name) = &result.scan.disc.name {
             let (guess_title, guess_season) = parse_series_label(disc_name);
             self.imp().title_override.set_text(&guess_title);
             if let Some(s) = guess_season {
@@ -192,19 +234,33 @@ impl TitleListPage {
             .map(|i| i.titles.as_slice())
             .unwrap_or(&[]);
 
+        // Per-title display titles from bdmt_eng.xml, keyed by the
+        // BDA `titleNumber` attribute (1-based -> MakeMKV index +1).
+        let bdmt = self.imp().bdmt.borrow();
+        let bdmt_names = bdmt.as_ref().map(|b| &b.title_names);
+
         for (t, relation) in scan.titles.iter().zip(relations.iter()) {
             let identity = crate::rip::plan::match_identity_for(identity_titles, t);
             let role = identity.map(|i| i.role);
-            let display_title = identity
+            let identity_display = identity
                 .map(|i| i.display_title.as_str())
                 .filter(|s| !s.is_empty());
+            // bdmt titles are 1-based; MakeMKV titles are 0-based. Try
+            // both mappings since some authoring tools differ.
+            let bdmt_display = bdmt_names.and_then(|m| {
+                m.get(&(t.index + 1))
+                    .or_else(|| m.get(&t.index))
+                    .map(|s| s.as_str())
+            });
 
-            // Row title: TheDiscDB display title if we have one, otherwise
-            // the MakeMKV name, otherwise just "Title N".
-            let title_label = match (display_title, t.name.as_deref()) {
-                (Some(dt), _) => format!("Title {} — {}", t.index, dt),
-                (None, Some(n)) if !n.is_empty() => format!("Title {} — {}", t.index, n),
-                (None, _) => format!("Title {}", t.index),
+            // Row title: precedence is TheDiscDB > bdmt > MakeMKV name.
+            let title_label = match (identity_display, bdmt_display, t.name.as_deref()) {
+                (Some(dt), _, _) => format!("Title {} — {}", t.index, dt),
+                (None, Some(bd), _) => format!("Title {} — {}", t.index, bd),
+                (None, None, Some(n)) if !n.is_empty() => {
+                    format!("Title {} — {}", t.index, n)
+                }
+                _ => format!("Title {}", t.index),
             };
             let duration = format_duration(t.duration_seconds.unwrap_or(0));
             let size = format_bytes(t.size_bytes.unwrap_or(0));
@@ -308,9 +364,17 @@ impl TitleListPage {
             .unwrap_or(&[]);
         let identity = match_identity_for(identity_titles, title_attr);
 
+        let bdmt = self.imp().bdmt.borrow();
+        let bdmt_default = bdmt.as_ref().and_then(|b| {
+            b.title_names
+                .get(&(title_index + 1))
+                .or_else(|| b.title_names.get(&title_index))
+                .cloned()
+        });
         let display_default = identity
             .map(|i| i.display_title.clone())
             .filter(|s| !s.is_empty())
+            .or(bdmt_default)
             .or_else(|| title_attr.name.clone())
             .unwrap_or_else(|| format!("Title {}", title_index));
 
@@ -378,13 +442,71 @@ impl TitleListPage {
         self.insert_action_group("page", Some(&group));
     }
 
+    /// Read the disc-metadata UI rows into a (MovieMetadata,
+    /// ReleaseMetadata) pair. Empty optional fields → `None`.
+    fn read_submission_metadata(
+        &self,
+    ) -> (
+        crate::identify::submission::MovieMetadata,
+        crate::identify::submission::ReleaseMetadata,
+    ) {
+        use crate::identify::submission::{
+            ContentType, MovieMetadata, ReleaseMetadata,
+        };
+        let title = self.imp().title_override.text().trim().to_string();
+        let year_raw = self.imp().year_row.value() as u32;
+        let year = if (1900..=2100).contains(&year_raw) {
+            Some(year_raw)
+        } else {
+            None
+        };
+        let opt = |row: &adw::EntryRow| {
+            let s = row.text().trim().to_string();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        };
+        let movie = MovieMetadata {
+            title: title.clone(),
+            year,
+            content_type: if self.imp().series_toggle.is_active() {
+                ContentType::Series
+            } else {
+                ContentType::Movie
+            },
+            plot: opt(&self.imp().plot_row),
+            tagline: opt(&self.imp().tagline_row),
+            tmdb_id: opt(&self.imp().tmdb_id_row).and_then(|s| s.parse().ok()),
+            imdb_id: opt(&self.imp().imdb_id_row),
+            tvdb_id: None,
+        };
+        let release = ReleaseMetadata {
+            slug: opt(&self.imp().release_slug_row).unwrap_or_else(|| "blu-ray".into()),
+            title: opt(&self.imp().release_title_row).unwrap_or_else(|| {
+                match year {
+                    Some(y) => format!("{y} Blu-ray"),
+                    None => "Blu-ray".into(),
+                }
+            }),
+            year,
+            locale: opt(&self.imp().locale_row),
+            region_code: opt(&self.imp().region_code_row),
+            upc: opt(&self.imp().upc_row),
+            asin: None,
+        };
+        (movie, release)
+    }
+
     /// Stage a `disc0N.json` for TheDiscDB, surface the path in a
     /// toast, and open the data-repo GitHub page so the user can
     /// open a PR. Hash + identity come from the original scan;
     /// per-title edits from the title-detail page state.
     fn submit_corrections(&self) {
         use crate::identify::submission::{
-            github_repo_url, open_in_browser, stage_submission, DiscSubmission,
+            github_repo_url, open_in_browser, stage_full_submission, stage_submission,
+            DiscSubmission,
         };
         let disc_name = self
             .imp()
@@ -425,7 +547,21 @@ impl TitleListPage {
             comment: None,
         };
         let edits = self.imp().title_edits.borrow().clone();
-        match stage_submission(&disc, &scan_snapshot, identity, &edits) {
+        // If the user has filled in disc-level metadata (year, IDs,
+        // plot, etc), we stage the full new-disc submission tree
+        // (metadata.json + release.json + disc0N.json) rather than
+        // just the per-disc corrections file.
+        let (movie, release) = self.read_submission_metadata();
+        let staged = if !movie.title.is_empty()
+            && (movie.year.is_some()
+                || movie.tmdb_id.is_some()
+                || movie.imdb_id.is_some())
+        {
+            stage_full_submission(&movie, &release, &disc, &scan_snapshot, identity, &edits)
+        } else {
+            stage_submission(&disc, &scan_snapshot, identity, &edits)
+        };
+        match staged {
             Ok(path) => {
                 let msg = format!(
                     "Staged TheDiscDB submission at {} — opening data repo…",
@@ -932,6 +1068,7 @@ fn build_pseudo_identification(
         source: crate::rip::makemkv::ScanSource::Iso(std::path::PathBuf::new()),
         source_file: None,
         has_mvc: false,
+        bdmt: None,
     }
 }
 

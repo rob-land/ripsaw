@@ -488,6 +488,7 @@ mod tests {
             source: crate::rip::makemkv::ScanSource::Iso(std::path::PathBuf::new()),
             source_file: None,
             has_mvc: false,
+            bdmt: None,
         }
     }
 
