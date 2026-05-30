@@ -178,6 +178,8 @@ pub fn plan_rip(
     selected_indexes: &[u32],
     naming: Option<&NamingOpts>,
     episode_titles_by_index: &HashMap<u32, String>,
+    display_overrides_by_index: &HashMap<u32, String>,
+    role_overrides_by_index: &HashMap<u32, TitleRole>,
 ) -> Vec<PlannedTitle> {
     let main_index = main_title_index(identification);
     let identity_titles: &[TitleIdentity] = identification
@@ -196,13 +198,20 @@ pub fn plan_rip(
                 .find(|t| t.index == *idx)
                 .map(|t| {
                     let identity = match_identity_for(identity_titles, t);
-                    let role = identity.map(|i| i.role).unwrap_or_else(|| {
-                        if Some(t.index) == main_index {
-                            TitleRole::Main
-                        } else {
-                            TitleRole::Other
-                        }
-                    });
+                    // Role precedence: user override on the detail
+                    // page > TheDiscDB identity > longest-title-is-Main
+                    // heuristic > Other.
+                    let role = role_overrides_by_index
+                        .get(&t.index)
+                        .copied()
+                        .or_else(|| identity.map(|i| i.role))
+                        .unwrap_or_else(|| {
+                            if Some(t.index) == main_index {
+                                TitleRole::Main
+                            } else {
+                                TitleRole::Other
+                            }
+                        });
                     let is_series_episode = matches!(
                         naming,
                         Some(n) if n.content_kind == DiscContentKind::Series
@@ -218,7 +227,18 @@ pub fn plan_rip(
                         .get(&t.index)
                         .map(|s| s.as_str())
                         .filter(|s| !s.trim().is_empty());
-                    plan_one_title(t, role, identity, naming, episode_number, episode_title)
+                    let display_override = display_overrides_by_index
+                        .get(&t.index)
+                        .map(|s| s.as_str());
+                    plan_one_title(
+                        t,
+                        role,
+                        identity,
+                        display_override,
+                        naming,
+                        episode_number,
+                        episode_title,
+                    )
                 })
         })
         .collect()
@@ -247,17 +267,25 @@ fn plan_one_title(
     t: &TitleAttributes,
     role: TitleRole,
     identity: Option<&TitleIdentity>,
+    display_override: Option<&str>,
     naming: Option<&NamingOpts>,
     episode_number: Option<u32>,
     episode_title: Option<&str>,
 ) -> PlannedTitle {
-    let identity_display = identity
-        .map(|i| i.display_title.as_str())
-        .filter(|s| !s.is_empty());
-    let display_label = match (t.index, identity_display, t.name.as_deref()) {
-        (idx, Some(dt), _) => format!("Title {idx} — {dt}"),
-        (idx, None, Some(n)) if !n.is_empty() => format!("Title {idx} — {n}"),
-        (idx, _, _) => format!("Title {idx}"),
+    // Display precedence: user override (from TitleDetailPage) >
+    // TheDiscDB identity > MakeMKV scan name > "Title N".
+    let resolved_display = display_override
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            identity
+                .map(|i| i.display_title.clone())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| t.name.clone().filter(|s| !s.is_empty()));
+    let display_label = match (t.index, resolved_display.as_deref()) {
+        (idx, Some(dt)) => format!("Title {idx} — {dt}"),
+        (idx, None) => format!("Title {idx}"),
     };
     let output_filename = t
         .output_file
@@ -265,7 +293,15 @@ fn plan_one_title(
         .unwrap_or_else(|| format!("title_t{:02}.mkv", t.index));
     let (output_dir, final_path) = match naming {
         Some(opts) => {
-            let final_p = scheme_path(t, role, identity, opts, episode_number, episode_title);
+            let final_p = scheme_path(
+                t,
+                role,
+                identity,
+                resolved_display.as_deref(),
+                opts,
+                episode_number,
+                episode_title,
+            );
             let dir = final_p
                 .parent()
                 .map(|p| p.to_path_buf())
@@ -312,6 +348,7 @@ fn scheme_path(
     t: &TitleAttributes,
     role: TitleRole,
     identity: Option<&TitleIdentity>,
+    display_override: Option<&str>,
     opts: &NamingOpts,
     episode_number: Option<u32>,
     episode_title: Option<&str>,
@@ -351,13 +388,18 @@ fn scheme_path(
     match role {
         TitleRole::Main => scheme.movie_path(&movie_ctx),
         other_role => {
-            // Prefer TheDiscDB's display title for the extra's filename
-            // ("Theatrical Trailer.mkv"); fall back to MakeMKV's title
-            // name; last resort "Title N".
-            let display_title = identity
-                .map(|i| i.display_title.as_str())
+            // Precedence: user override > TheDiscDB display title >
+            // MakeMKV name > "Title N".
+            let display_title = display_override
+                .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
+                .or_else(|| {
+                    identity
+                        .map(|i| i.display_title.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                })
                 .or_else(|| {
                     t.name
                         .as_deref()
@@ -533,7 +575,7 @@ mod tests {
             DiscContentKind::Movie,
             "Some Disc",
         );
-        let plan = plan_rip(&id, &[0, 1], Some(&opts), &HashMap::new());
+        let plan = plan_rip(&id, &[0, 1], Some(&opts), &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(plan.len(), 2);
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
@@ -629,7 +671,7 @@ mod tests {
         assert_eq!(opts.disc_title, "Dobiegillis");
         assert_eq!(opts.season, 1);
 
-        let plan = plan_rip(&id, &[0, 1, 2], Some(&opts), &HashMap::new());
+        let plan = plan_rip(&id, &[0, 1, 2], Some(&opts), &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(plan.len(), 3);
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
@@ -659,7 +701,7 @@ mod tests {
         );
         opts.episode_start = 7;
         opts.season = 2;
-        let plan = plan_rip(&id, &[0], Some(&opts), &HashMap::new());
+        let plan = plan_rip(&id, &[0], Some(&opts), &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
             std::path::Path::new("/lib/Shows/Series Name/Season 02/Series Name S02E07.mkv")
@@ -685,7 +727,7 @@ mod tests {
         episode_titles.insert(0u32, "Pilot".to_string());
         episode_titles.insert(1u32, "The Sequel".to_string());
 
-        let plan = plan_rip(&id, &[0, 1], Some(&opts), &episode_titles);
+        let plan = plan_rip(&id, &[0, 1], Some(&opts), &episode_titles, &HashMap::new(), &HashMap::new());
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
             std::path::Path::new("/lib/Shows/Some Series/Season 01/Some Series S01E01 - Pilot.mkv")
@@ -715,7 +757,7 @@ mod tests {
         episode_titles.insert(0u32, "Pilot".to_string());
         // Title 1 is left out of the map.
 
-        let plan = plan_rip(&id, &[0, 1], Some(&opts), &episode_titles);
+        let plan = plan_rip(&id, &[0, 1], Some(&opts), &episode_titles, &HashMap::new(), &HashMap::new());
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
             std::path::Path::new("/lib/Shows/Some Series/Season 01/Some Series S01E01 - Pilot.mkv")
@@ -729,7 +771,7 @@ mod tests {
     #[test]
     fn no_naming_opts_means_flat_output_with_no_final_path() {
         let id = scan_with(vec![title(0, "M", 60, "x_t00.mkv")], Some("d"));
-        let plan = plan_rip(&id, &[0], None, &HashMap::new());
+        let plan = plan_rip(&id, &[0], None, &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(plan.len(), 1);
         assert!(plan[0].final_path.is_none());
         assert_eq!(plan[0].output_filename, "x_t00.mkv");

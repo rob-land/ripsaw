@@ -61,5 +61,14 @@ template $RipsawPreferencesDialog: Adw.PreferencesDialog {
         title: _("API key");
       }
     }
+
+    Adw.PreferencesGroup {
+      title: _("TMDB");
+      description: _("Used by the submission form's \"look up\" buttons to pull title, year, plot, tagline, and the IMDb ↔ TMDB cross-reference. Sign up for a free v3 key at https://www.themoviedb.org/settings/api.");
+
+      Adw.PasswordEntryRow tmdb_key_row {
+        title: _("API key");
+      }
+    }
   }
 }

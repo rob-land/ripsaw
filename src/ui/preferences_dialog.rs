@@ -19,6 +19,7 @@ mod imp {
         #[template_child] pub sonarr_key_row: TemplateChild<adw::PasswordEntryRow>,
         #[template_child] pub radarr_url_row: TemplateChild<adw::EntryRow>,
         #[template_child] pub radarr_key_row: TemplateChild<adw::PasswordEntryRow>,
+        #[template_child] pub tmdb_key_row: TemplateChild<adw::PasswordEntryRow>,
     }
 
     #[glib::object_subclass]
@@ -69,6 +70,7 @@ impl PreferencesDialog {
         self.imp().sonarr_key_row.set_text(current.sonarr.api_key.as_deref().unwrap_or(""));
         self.imp().radarr_url_row.set_text(current.radarr.url.as_deref().unwrap_or(""));
         self.imp().radarr_key_row.set_text(current.radarr.api_key.as_deref().unwrap_or(""));
+        self.imp().tmdb_key_row.set_text(current.tmdb_api_key.as_deref().unwrap_or(""));
     }
 
     fn connect_signals(&self) {
@@ -103,6 +105,7 @@ impl PreferencesDialog {
         connect_password_apply(&imp.sonarr_key_row, |s, t| s.sonarr.api_key = nonempty(t));
         connect_entry_apply(&imp.radarr_url_row, |s, t| s.radarr.url = nonempty(t));
         connect_password_apply(&imp.radarr_key_row, |s, t| s.radarr.api_key = nonempty(t));
+        connect_password_apply(&imp.tmdb_key_row, |s, t| s.tmdb_api_key = nonempty(t));
     }
 
     fn pick_library_root(&self) {

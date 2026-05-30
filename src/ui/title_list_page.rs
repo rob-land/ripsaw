@@ -434,11 +434,25 @@ impl TitleListPage {
             self,
             move |_, _| page.submit_corrections()
         ));
+        let tmdb_action = gio::SimpleAction::new("lookup-tmdb", None);
+        tmdb_action.connect_activate(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_, _| page.start_tmdb_lookup()
+        ));
+        let imdb_action = gio::SimpleAction::new("lookup-imdb", None);
+        imdb_action.connect_activate(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_, _| page.start_imdb_lookup()
+        ));
 
         let group = gio::SimpleActionGroup::new();
         group.add_action(&process_action);
         group.add_action(&sonarr_action);
         group.add_action(&submit_action);
+        group.add_action(&tmdb_action);
+        group.add_action(&imdb_action);
         self.insert_action_group("page", Some(&group));
     }
 
@@ -667,6 +681,123 @@ impl TitleListPage {
         // PlannedTitle -> RipQueueItem), so a single Process click
         // produces both the raw MVC MKV and the FSBS/HSBS/etc. output.
         self.start_rip();
+    }
+
+    /// Look up by TMDb ID using the value currently in tmdb_id_row.
+    /// Applies title / year / plot / tagline / imdb_id back to the
+    /// submission fields when the call succeeds.
+    fn start_tmdb_lookup(&self) {
+        let id_text = self.imp().tmdb_id_row.text().trim().to_string();
+        let Ok(id) = id_text.parse::<u64>() else {
+            self.toast_in_window("Enter a numeric TMDb ID first.");
+            return;
+        };
+        let series = self.imp().series_toggle.is_active();
+        self.do_tmdb_lookup(Box::new(move |c| Box::pin(async move {
+            if series { c.fetch_series(id).await } else { c.fetch_movie(id).await }
+        })));
+    }
+
+    /// Look up by IMDb ID using the value currently in imdb_id_row.
+    /// Routes through TMDB's /find endpoint (no separate IMDb API).
+    fn start_imdb_lookup(&self) {
+        let id_text = self.imp().imdb_id_row.text().trim().to_string();
+        if id_text.is_empty() {
+            self.toast_in_window("Enter an IMDb ID (tt…) first.");
+            return;
+        }
+        self.do_tmdb_lookup(Box::new(move |c| Box::pin(async move {
+            c.fetch_by_imdb_id(&id_text).await
+        })));
+    }
+
+    /// Shared dispatch: pull the API key from settings, run the
+    /// requester on the tokio runtime, apply the result to the
+    /// submission fields on the GTK main thread.
+    fn do_tmdb_lookup(
+        &self,
+        request: Box<
+            dyn FnOnce(
+                    crate::identify::tmdb::TmdbClient,
+                )
+                    -> std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = anyhow::Result<crate::identify::tmdb::TmdbDetails>,
+                                > + Send,
+                        >,
+                    >
+                + Send,
+        >,
+    ) {
+        let key = crate::settings::settings()
+            .lock()
+            .expect("settings mutex")
+            .tmdb_api_key
+            .clone()
+            .unwrap_or_default();
+        let key = key.trim().to_string();
+        if key.is_empty() {
+            self.toast_in_window(
+                "Set the TMDB API key in Preferences first (free, from themoviedb.org).",
+            );
+            return;
+        }
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<crate::identify::tmdb::TmdbDetails>>(1);
+        crate::runtime::tokio_runtime().spawn(async move {
+            let client = crate::identify::tmdb::TmdbClient::new(key);
+            let _ = tx.send(request(client).await).await;
+        });
+
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak(rename_to = page)]
+            self,
+            async move {
+                match rx.recv().await {
+                    Ok(Ok(d)) => page.apply_tmdb_details(&d),
+                    Ok(Err(e)) => {
+                        tracing::error!("TMDB lookup failed: {e:#}");
+                        page.toast_in_window(&format!("TMDB lookup failed: {e}"));
+                    }
+                    Err(e) => {
+                        tracing::error!("TMDB channel closed: {e}");
+                    }
+                }
+            }
+        ));
+    }
+
+    /// Fill the submission fields from a TMDB lookup result.
+    fn apply_tmdb_details(&self, d: &crate::identify::tmdb::TmdbDetails) {
+        if let Some(t) = &d.title {
+            self.imp().title_override.set_text(t);
+        }
+        if let Some(y) = d.year {
+            self.imp().year_row.set_value(y as f64);
+        }
+        if let Some(p) = &d.plot {
+            self.imp().plot_row.set_text(p);
+        }
+        if let Some(t) = &d.tagline {
+            self.imp().tagline_row.set_text(t);
+        }
+        if let Some(id) = d.tmdb_id {
+            self.imp().tmdb_id_row.set_text(&id.to_string());
+        }
+        if let Some(i) = &d.imdb_id {
+            self.imp().imdb_id_row.set_text(i);
+        }
+        if let Some(ct) = d.content_type {
+            self.imp().series_toggle.set_active(ct == "Series");
+        }
+        if let Some(window) = self.parent_window() {
+            window.add_toast(
+                adw::Toast::builder()
+                    .title("TMDB details applied to submission fields.")
+                    .timeout(3)
+                    .build(),
+            );
+        }
     }
 
     fn start_sonarr_lookup(&self) {
@@ -1017,11 +1148,31 @@ impl TitleListPage {
         naming_opts.conversion_codec =
             crate::convert::plan::ConversionPlan::default_codec();
         let episode_titles = self.collect_episode_titles();
+        // Per-title overrides from the TitleDetailPage: display title
+        // → filename + segment.title; role → naming-scheme bucket
+        // (Main vs Extras subfolder).
+        let title_edits = self.imp().title_edits.borrow();
+        let display_overrides: HashMap<u32, String> = title_edits
+            .iter()
+            .filter_map(|(idx, e)| {
+                e.display_title
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| (*idx, s.clone()))
+            })
+            .collect();
+        let role_overrides: HashMap<u32, crate::identify::TitleRole> = title_edits
+            .iter()
+            .filter_map(|(idx, e)| e.role.map(|r| (*idx, r)))
+            .collect();
+        drop(title_edits);
         let plan = plan_rip(
             &identification_for_plan,
             &selected,
             Some(&naming_opts),
             &episode_titles,
+            &display_overrides,
+            &role_overrides,
         );
         let queue: Vec<RipQueueItem> = plan.into_iter().map(RipQueueItem::from).collect();
 

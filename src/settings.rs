@@ -21,6 +21,11 @@ pub struct UserSettings {
     pub sonarr: ServarrConfig,
     #[serde(default)]
     pub radarr: ServarrConfig,
+    /// TMDB v3 API key. Sign up at <https://www.themoviedb.org/settings/api>.
+    /// Used for the per-disc "look up by TMDB ID / IMDb ID" buttons on
+    /// the submission form.
+    #[serde(default)]
+    pub tmdb_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
