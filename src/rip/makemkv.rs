@@ -62,6 +62,23 @@ pub fn minimum_supported_version() -> Version {
     Version { major: 1, minor: 17, patch: 0 }
 }
 
+/// Below this version, MakeMKV silently drops the MVC dependent-view
+/// track on 3D Blu-rays even when our keep-mvc profile says to keep
+/// it -- the binary just doesn't write mvcC BlockAdditions or
+/// stereo_mode flags. Diagnosed against Jurassic Park 3D on Linux
+/// v1.17.8 (drops MVC) vs Windows v1.18.2 (writes mvcC) using the
+/// same `+sel:mvcvideo` selector. v1.18 is the first build where the
+/// CLI rip produces a 3D-capable output on the discs we have.
+pub fn minimum_mvc_capable_version() -> Version {
+    Version { major: 1, minor: 18, patch: 0 }
+}
+
+impl Version {
+    pub fn supports_mvc(&self) -> bool {
+        self.at_least(&minimum_mvc_capable_version())
+    }
+}
+
 fn parse_version_from_banner(text: &str) -> Option<Version> {
     // Banner: "MakeMKV v1.17.8 linux(x64-release) started"
     let after_v = text.split_once(" v")?.1;

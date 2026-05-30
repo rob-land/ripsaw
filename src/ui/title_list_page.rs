@@ -144,7 +144,55 @@ impl TitleListPage {
         // Default the format combo to "Off" so a regular rip is a single
         // click; user opts in by changing it.
         page.imp().output_format_row.set_selected(0);
+        // 3D-on-old-MakeMKV warning: probe makemkvcon's version and
+        // warn (toast) if it's below the version that reliably writes
+        // mvcC BlockAddition output. Without that, our keep-mvc
+        // profile is silently ignored and the produced MKV is 2D.
+        // Diagnosed against Jurassic Park 3D on v1.17.8 (drops MVC)
+        // vs the working samples authored by v1.18.2 (writes mvcC).
+        if result.has_mvc {
+            page.warn_if_makemkv_too_old_for_3d();
+        }
         page
+    }
+
+    /// Probe makemkvcon's version asynchronously and toast a warning
+    /// when it's below the mvcC-capable minimum. Best-effort: silent
+    /// when probe fails (no-op if makemkvcon is missing -- the rip
+    /// will surface a clearer error in that case).
+    fn warn_if_makemkv_too_old_for_3d(&self) {
+        let (tx, rx) =
+            async_channel::bounded::<crate::rip::makemkv::ProbeOutcome>(1);
+        crate::runtime::tokio_runtime().spawn(async move {
+            let _ = tx.send(crate::rip::makemkv::probe().await).await;
+        });
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak(rename_to = page)]
+            self,
+            async move {
+                let Ok(outcome) = rx.recv().await else { return; };
+                let version = match outcome {
+                    crate::rip::makemkv::ProbeOutcome::Ok(v)
+                    | crate::rip::makemkv::ProbeOutcome::Outdated(v) => v,
+                    crate::rip::makemkv::ProbeOutcome::Missing => return,
+                };
+                if version.supports_mvc() {
+                    return;
+                }
+                if let Some(window) = page.parent_window() {
+                    window.add_toast(
+                        adw::Toast::builder()
+                            .title(&format!(
+                                "MakeMKV v{}.{}.{} drops the MVC track on 3D Blu-rays. \
+                                 Upgrade to v1.18+ for 3D rips to include the dependent view.",
+                                version.major, version.minor, version.patch
+                            ))
+                            .timeout(12)
+                            .build(),
+                    );
+                }
+            }
+        ));
     }
 
     fn populate_with_identity(&self, result: &IdentificationResult) {

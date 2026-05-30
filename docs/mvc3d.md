@@ -278,6 +278,41 @@ output_ViewId0001.yuv  (dependent view, 1920×1080 yuv420p)
 output.fsbs.mkv  (3840×1080 H.264, with mapped audio + subtitle tracks)
 ```
 
+### MakeMKV CLI version requirement for 3D (2026-05-30)
+
+Diagnosed against Jurassic Park 3D
+(`samples/Jurassic Park (1993) [tmdb-329] - 3D.iso`):
+
+- The disc's title 0 = `00803.mpls` carries the 3D content with
+  two video streams: `Mpeg4 AVC` (base) + `Mpeg4-MVC-3D` (dep).
+- Linux MakeMKV v1.17.8 with our keep-mvc profile produces output
+  with **0 mvcC BlockAddition bytes** and **no stereo_mode flag**.
+  The dependent-view track is dropped entirely. Same result with
+  the no-profile default, the take-all profile (`+sel:all`), and
+  every variant of the selector we tried.
+- The existing working samples in `samples/` were authored by
+  **Windows MakeMKV v1.18.2** (`3D_LR_Pattern.mkv`) and
+  **Windows v1.14.4** (`3D MVC Resolution test.mkv`) -- the
+  former writes mvcC BlockAddition, the latter writes stereo_mode
+  13 inline. Both are 3D-decodable; both came from a binary that
+  supports MVC output. v1.17.8 does not.
+
+Verdict: **Ripsaw requires MakeMKV v1.18+** for the 3D
+rip-and-convert path to work. The `keep-mvc.mmcp.xml` profile is
+necessary but not sufficient on the older binary.
+
+Runtime check: src/rip/makemkv.rs gains `minimum_mvc_capable_version()`
+returning 1.18.0 + a `Version::supports_mvc()` helper, and the title
+list page toasts a warning when the user opens a 3D source on an
+older MakeMKV. The user can either upgrade (v1.18.3 was the latest
+as of this writing) or accept that the rip will produce a flat 2D
+MKV without the dependent view.
+
+The Phase A FSBS-from-MVC pipeline (extract_to_annex_b → ldecod →
+ffmpeg hstack) still works correctly on the samples authored by
+v1.18+; the only thing it can't do is rescue a 3D rip that was made
+by v1.17.x and is now permanently 2D on disk.
+
 `scripts/ldecod` is a wrapper around the JM build at
 `/home/rob/3rdparty/JM/bin/umake/<toolchain>/release/ldecod`.
 Conversion runtime is dominated by ldecod (JM reference decoder,
