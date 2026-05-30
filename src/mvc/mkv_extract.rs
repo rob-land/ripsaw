@@ -30,23 +30,52 @@ const DEFAULT_BLOCK_ADD_ID: u64 = 1;
 /// resulting stream is what we hand to ldecod to recover both views.
 ///
 /// Returns counts of (frames, base_nals, dep_nals) that were written.
+///
+/// **Note on prepended parameter sets.** MakeMKV's mvcC sources we've
+/// observed (e.g. `3D_LR_Pattern.mkv`) use SimpleBlock for the video
+/// frames and embed the H.264 parameter sets (SPS / Subset SPS / PPS)
+/// _inside the Block content_ -- so the Annex B output already
+/// contains a valid parameter-set burst from the in-stream NALs. If
+/// we ALSO prepend the mvcC config record's SPS / PPS list at the top
+/// of the file, ldecod sees two SPS-id=0 / Subset SPS-id=0 / PPS-id=0
+/// triplets up front and (with DecodeAllLayers=1) segfaults during
+/// initialisation. We skip the prepend by default; if a real
+/// per-frame BlockAddition source ever turns up that genuinely needs
+/// the mvcC's parameter sets to be findable, the caller can use
+/// `extract_to_annex_b_with_prepended_params` instead.
 pub fn extract_to_annex_b<R: Read + Seek, W: Write>(
     reader: &mut EbmlReader<R>,
     out: &mut W,
 ) -> Result<ExtractionStats> {
-    // Pass 1: walk the Tracks block to learn (a) which track number is
-    // the video track with mvcC, and (b) the bytes of its mvcC
-    // BlockAddition extra data. The mvcC bytes give us the parameter
-    // sets we need to seed the Annex B output.
+    extract_to_annex_b_inner(reader, out, false)
+}
+
+/// Variant that prepends the mvcC's SPS / PPS list. Useful for "true"
+/// BlockAddition sources where the Block content doesn't carry the
+/// parameter sets inline. Not used by the default convert pipeline.
+#[allow(dead_code)]
+pub fn extract_to_annex_b_with_prepended_params<R: Read + Seek, W: Write>(
+    reader: &mut EbmlReader<R>,
+    out: &mut W,
+) -> Result<ExtractionStats> {
+    extract_to_annex_b_inner(reader, out, true)
+}
+
+fn extract_to_annex_b_inner<R: Read + Seek, W: Write>(
+    reader: &mut EbmlReader<R>,
+    out: &mut W,
+    prepend_params: bool,
+) -> Result<ExtractionStats> {
     reader.seek(0)?;
     let info = find_mvc_track(reader)?
         .ok_or_else(|| anyhow!("no video track with mvcC BlockAdditionMapping found in MKV"))?;
 
     let mvcc = parse_mvcc(&info.mvcc_bytes).context("parsing mvcC record")?;
-    // Header: each SPS / PPS NAL prefixed with the Annex B start code.
-    for nal in mvcc.sps_nals.iter().chain(mvcc.pps_nals.iter()) {
-        out.write_all(ANNEX_B_START_CODE)?;
-        out.write_all(nal)?;
+    if prepend_params {
+        for nal in mvcc.sps_nals.iter().chain(mvcc.pps_nals.iter()) {
+            out.write_all(ANNEX_B_START_CODE)?;
+            out.write_all(nal)?;
+        }
     }
 
     let length_size = mvcc.length_size_minus_one as usize + 1;
@@ -54,8 +83,6 @@ pub fn extract_to_annex_b<R: Read + Seek, W: Write>(
         return Err(anyhow!("mvcC lengthSizeMinusOne yields {length_size}; expected 1..=4"));
     }
 
-    // Pass 2: walk all Cluster -> Block / BlockGroup -> base + dep view
-    // NAL units for the target track.
     reader.seek(0)?;
     let mut stats = ExtractionStats::default();
     walk_segment_for_blocks(reader, info.track_number, length_size, out, &mut stats)?;

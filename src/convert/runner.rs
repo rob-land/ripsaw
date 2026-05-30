@@ -39,13 +39,9 @@ pub async fn run_conversion(
             run_stereo3d_filter(&plan, input_layout.ffmpeg_stereo3d_in(), event_tx).await
         }
         StereoSource::MvcInlineLaced => run_mvc_inline_pipeline(&plan, event_tx).await,
-        StereoSource::MvcWithBlockAdditions => Err(anyhow!(
-            "mvcC-format MKVs need a BlockAddition extractor that's not yet built. \
-             Modern MakeMKV writes the dependent view as Matroska BlockAdditions \
-             per frame; we need to interleave those with the base track before \
-             feeding the result to ldecod. The 'inline' (stereo mode 13/14) variant \
-             of MVC packaging DOES work today via run_mvc_inline_pipeline."
-        )),
+        StereoSource::MvcWithBlockAdditions => {
+            run_mvc_block_additions_pipeline(&plan, event_tx).await
+        }
         StereoSource::NotStereo => Err(anyhow!(
             "{} doesn't look like a stereo source — no 3D content to convert.",
             plan.input.display()
@@ -87,6 +83,36 @@ async fn run_mvc_inline_pipeline(
     plan: &ConversionPlan,
     event_tx: Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
 ) -> Result<PathBuf> {
+    run_mvc_pipeline(plan, event_tx, MvcExtractor::Mkvextract).await
+}
+
+/// Same shape as run_mvc_inline_pipeline but extracts the Annex B
+/// stream via our own EBML walker (src/mvc/mkv_extract.rs). Used for
+/// mvcC-packaged MakeMKV sources where mkvextract on its own would
+/// not deal with the BlockAddition variant of MVC packaging.
+async fn run_mvc_block_additions_pipeline(
+    plan: &ConversionPlan,
+    event_tx: Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
+) -> Result<PathBuf> {
+    run_mvc_pipeline(plan, event_tx, MvcExtractor::Builtin).await
+}
+
+#[derive(Copy, Clone)]
+enum MvcExtractor {
+    /// `mkvextract <input> tracks 0:track.h264` — works for inline /
+    /// stereo-mode 13/14 sources where the full MVC bitstream lives
+    /// in the regular video track.
+    Mkvextract,
+    /// `crate::mvc::mkv_extract::extract_to_annex_b` -- our own
+    /// EBML walker for mvcC BlockAdditionMapping sources.
+    Builtin,
+}
+
+async fn run_mvc_pipeline(
+    plan: &ConversionPlan,
+    event_tx: Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
+    extractor: MvcExtractor,
+) -> Result<PathBuf> {
     ensure_parent_dir(&plan.output).await?;
 
     let report = ffprobe::probe(&plan.input).await?;
@@ -105,20 +131,58 @@ async fn run_mvc_inline_pipeline(
     let view0 = temp.path().join("output_ViewId0000.yuv");
     let view1 = temp.path().join("output_ViewId0001.yuv");
 
-    log(&event_tx, "Extracting H.264 track from MKV...");
-    let mkvextract_arg = format!("0:{}", h264_path.display());
-    let status = Command::new("mkvextract")
-        .arg(&plan.input)
-        .arg("tracks")
-        .arg(&mkvextract_arg)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .status()
-        .await
-        .context("spawn mkvextract")?;
-    if !status.success() {
-        return Err(anyhow!("mkvextract failed with status {}", status));
+    match extractor {
+        MvcExtractor::Mkvextract => {
+            log(&event_tx, "Extracting H.264 track from MKV (mkvextract)...");
+            let mkvextract_arg = format!("0:{}", h264_path.display());
+            let status = Command::new("mkvextract")
+                .arg(&plan.input)
+                .arg("tracks")
+                .arg(&mkvextract_arg)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .status()
+                .await
+                .context("spawn mkvextract")?;
+            if !status.success() {
+                return Err(anyhow!("mkvextract failed with status {}", status));
+            }
+        }
+        MvcExtractor::Builtin => {
+            log(
+                &event_tx,
+                "Extracting H.264 + MVC dep-view via built-in mvcC walker...",
+            );
+            let input = plan.input.clone();
+            let out_path = h264_path.clone();
+            // The walker is synchronous (std::io); run it on a blocking
+            // thread so we don't stall the runtime on large MKVs.
+            let stats = tokio::task::spawn_blocking(move || -> Result<_> {
+                let file = std::fs::File::open(&input)
+                    .with_context(|| format!("opening {}", input.display()))?;
+                let mut reader = crate::mvc::ebml::EbmlReader::new(file);
+                let out_file = std::fs::File::create(&out_path)
+                    .with_context(|| format!("creating {}", out_path.display()))?;
+                let mut writer = std::io::BufWriter::new(out_file);
+                let stats = crate::mvc::mkv_extract::extract_to_annex_b(
+                    &mut reader,
+                    &mut writer,
+                )?;
+                use std::io::Write;
+                writer.flush().ok();
+                Ok(stats)
+            })
+            .await
+            .context("mvcC extractor thread panicked")??;
+            log(
+                &event_tx,
+                &format!(
+                    "Extracted {} frames ({} base + {} dep NALs)",
+                    stats.frames, stats.base_nals, stats.dep_nals
+                ),
+            );
+        }
     }
 
     log(&event_tx, "Writing ldecod configuration...");
