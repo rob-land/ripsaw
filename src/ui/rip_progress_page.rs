@@ -20,6 +20,8 @@ pub struct RipQueueItem {
     pub chapter_titles: Vec<String>,
     pub segment_title: Option<String>,
     pub conversion_format: Option<crate::convert::format::OutputFormat>,
+    pub conversion_codec: crate::convert::hw::EncodeCodec,
+    pub conversion_hw_backend: crate::convert::hw::HwBackend,
 }
 
 impl From<PlannedTitle> for RipQueueItem {
@@ -33,6 +35,8 @@ impl From<PlannedTitle> for RipQueueItem {
             chapter_titles: p.chapter_titles,
             segment_title: p.segment_title,
             conversion_format: p.conversion_format,
+            conversion_codec: p.conversion_codec,
+            conversion_hw_backend: p.conversion_hw_backend,
         }
     }
 }

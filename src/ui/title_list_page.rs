@@ -36,6 +36,7 @@ mod imp {
         #[template_child] pub season_override: TemplateChild<adw::SpinRow>,
         #[template_child] pub output_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child] pub output_format_row: TemplateChild<adw::ComboRow>,
+        #[template_child] pub encoder_backend_row: TemplateChild<adw::ComboRow>,
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
         pub episode_entries: RefCell<Vec<gtk::Entry>>,
@@ -293,6 +294,21 @@ impl TitleListPage {
         }
     }
 
+    /// Map the encoder-backend ComboRow selection to a HwBackend.
+    /// Row order must mirror the StringList in title-list-page.blp.
+    fn selected_hw_backend(&self) -> crate::convert::hw::HwBackend {
+        use crate::convert::hw::HwBackend;
+        match self.imp().encoder_backend_row.selected() {
+            1 => HwBackend::Auto,
+            2 => HwBackend::Nvenc,
+            3 => HwBackend::Qsv,
+            4 => HwBackend::Vaapi,
+            5 => HwBackend::Amf,
+            6 => HwBackend::V4l2M2m,
+            _ => HwBackend::Software,
+        }
+    }
+
     /// Single entry point for the header's `Process Selected` button.
     /// Dispatches based on input type: physical disc / ISO go through
     /// the rip pipeline (the orchestrator); a standalone MKV with a
@@ -508,7 +524,14 @@ impl TitleListPage {
         };
 
         let output = ConversionPlan::default_output_path(&input, format);
-        let plan = ConversionPlan { input, output, format, source };
+        let plan = ConversionPlan {
+            input,
+            output,
+            format,
+            source,
+            codec: ConversionPlan::default_codec(),
+            hw_backend: self.selected_hw_backend(),
+        };
 
         let (tx, rx) = async_channel::bounded::<anyhow::Result<PathBuf>>(1);
         let plan_for_task = plan.clone();
@@ -667,6 +690,11 @@ impl TitleListPage {
         // Carry the 3D-output-format selection so the orchestrator
         // chains a convert after each successful rip.
         naming_opts.conversion_format = self.selected_output_format();
+        naming_opts.conversion_hw_backend = self.selected_hw_backend();
+        // Codec stays at the default (H.264) until Phase B adds a
+        // separate codec selector to the UI.
+        naming_opts.conversion_codec =
+            crate::convert::plan::ConversionPlan::default_codec();
         let episode_titles = self.collect_episode_titles();
         let plan = plan_rip(
             &identification_for_plan,

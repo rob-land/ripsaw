@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::convert::format::OutputFormat;
+use crate::convert::hw::{EncodeCodec, HwBackend};
 
 #[derive(Debug, Clone)]
 pub struct ConversionPlan {
@@ -10,6 +11,23 @@ pub struct ConversionPlan {
     pub output: PathBuf,
     pub format: OutputFormat,
     pub source: StereoSource,
+    /// Which video codec to emit. Defaults to H.264 for compatibility.
+    pub codec: EncodeCodec,
+    /// CPU vs GPU encode selection. `HwBackend::Software` keeps the
+    /// previous libx264 / libx265 behaviour; `Auto` resolves to the
+    /// first available HW encoder at runtime.
+    pub hw_backend: HwBackend,
+}
+
+impl ConversionPlan {
+    /// Pre-2026-05-30 default: libx264 software encode.
+    pub fn default_codec() -> EncodeCodec {
+        EncodeCodec::H264
+    }
+
+    pub fn default_hw_backend() -> HwBackend {
+        HwBackend::Software
+    }
 }
 
 /// What kind of stereo encoding the input carries. Drives which

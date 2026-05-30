@@ -128,6 +128,11 @@ pub struct NamingOpts {
     /// When set, every ripped title is post-processed into this 3D
     /// output layout via the convert pipeline after rip + rename land.
     pub conversion_format: Option<crate::convert::format::OutputFormat>,
+    /// Codec for the post-rip 3D conversion. Carried through to the
+    /// orchestrator's ConversionPlan build.
+    pub conversion_codec: crate::convert::hw::EncodeCodec,
+    /// HW encode backend for the post-rip 3D conversion.
+    pub conversion_hw_backend: crate::convert::hw::HwBackend,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +159,8 @@ pub struct PlannedTitle {
     /// on the produced MKV after rename + metadata. Carried forward
     /// from NamingOpts.conversion_format on the source page.
     pub conversion_format: Option<crate::convert::format::OutputFormat>,
+    pub conversion_codec: crate::convert::hw::EncodeCodec,
+    pub conversion_hw_backend: crate::convert::hw::HwBackend,
 }
 
 /// Build per-title rip targets. Roles are inferred from
@@ -292,6 +299,12 @@ fn plan_one_title(
         chapter_titles,
         segment_title,
         conversion_format: naming.and_then(|n| n.conversion_format),
+        conversion_codec: naming
+            .map(|n| n.conversion_codec)
+            .unwrap_or_else(crate::convert::plan::ConversionPlan::default_codec),
+        conversion_hw_backend: naming
+            .map(|n| n.conversion_hw_backend)
+            .unwrap_or_else(crate::convert::plan::ConversionPlan::default_hw_backend),
     }
 }
 
@@ -450,6 +463,8 @@ pub fn naming_opts_for_unidentified(
         season,
         episode_start: 1,
         conversion_format: None,
+        conversion_codec: crate::convert::plan::ConversionPlan::default_codec(),
+        conversion_hw_backend: crate::convert::plan::ConversionPlan::default_hw_backend(),
     }
 }
 

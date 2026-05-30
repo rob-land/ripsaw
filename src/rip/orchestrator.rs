@@ -140,6 +140,8 @@ pub fn run_rip_queue(
                             output: output.clone(),
                             format,
                             source,
+                            codec: item.conversion_codec,
+                            hw_backend: item.conversion_hw_backend,
                         };
                         let _ = rip_tx
                             .send(RipMessage::Event(

@@ -7,5 +7,6 @@
 // filter invocation; we run that path today.
 
 pub mod format;
+pub mod hw;
 pub mod plan;
 pub mod runner;

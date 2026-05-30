@@ -73,6 +73,22 @@ template $RipsawTitleListPage: Adw.NavigationPage {
             ]
           };
         }
+
+        Adw.ComboRow encoder_backend_row {
+          title: _("Encoder backend");
+          subtitle: _("CPU vs GPU encode. \"Auto\" picks the best available hardware encoder.");
+          model: StringList {
+            strings [
+              _("Software (libx264, best quality)"),
+              _("Auto (any available hardware encoder)"),
+              _("NVIDIA NVENC"),
+              _("Intel Quick Sync"),
+              _("VAAPI (Intel iHD / AMD VCN)"),
+              _("AMD AMF"),
+              _("V4L2 m2m (ARM SoC)"),
+            ]
+          };
+        }
       }
 
       Adw.PreferencesGroup title_group {

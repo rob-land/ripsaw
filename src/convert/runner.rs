@@ -55,22 +55,35 @@ async fn run_stereo3d_filter(
     event_tx: Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
 ) -> Result<PathBuf> {
     ensure_parent_dir(&plan.output).await?;
-    let filter = format!("stereo3d={}:{}", input_layout, plan.format.ffmpeg_stereo3d_out());
-    let mut child = Command::new("ffmpeg")
-        .arg("-hide_banner").arg("-y")
-        .arg("-i").arg(&plan.input)
-        .arg("-vf").arg(&filter)
-        .arg("-c:v").arg("libx264")
-        .arg("-preset").arg("medium")
-        .arg("-crf").arg("18")
-        .arg("-c:a").arg("copy")
+    let stereo3d_filter =
+        format!("stereo3d={}:{}", input_layout, plan.format.ffmpeg_stereo3d_out());
+    let encoder = resolve_encoder_args(plan, event_tx.as_ref());
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-hide_banner").arg("-y");
+    // VAAPI's `-vaapi_device` has to come before `-i`.
+    for a in &encoder.init {
+        cmd.arg(a);
+    }
+    cmd.arg("-i").arg(&plan.input);
+    // The encoder's pre-input filter chain (e.g. format=nv12,hwupload)
+    // has to run AFTER the stereo3d composition, so chain them.
+    let filter_chain = match &encoder.pre_input_vf {
+        Some(extra) => format!("{stereo3d_filter},{extra}"),
+        None => stereo3d_filter,
+    };
+    cmd.arg("-vf").arg(&filter_chain);
+    for a in &encoder.encoder_args {
+        cmd.arg(a);
+    }
+    cmd.arg("-c:a").arg("copy")
         .arg("-c:s").arg("copy")
         .arg(&plan.output)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("spawn ffmpeg")?;
+        .kill_on_drop(true);
+
+    let mut child = cmd.spawn().context("spawn ffmpeg")?;
     forward_stderr(&mut child, event_tx.clone());
     let status = child.wait().await.context("waiting for ffmpeg")?;
     if !status.success() {
@@ -242,11 +255,30 @@ async fn run_mvc_pipeline(
     }
 
     log(&event_tx, "Composing stereo output and encoding...");
-    let filter = compose_filter(plan.format);
+    let compose = compose_filter(plan.format);
     let video_size = format!("{width}x{height}");
-    let status = Command::new("ffmpeg")
-        .arg("-y").arg("-hide_banner")
-        .arg("-f").arg("rawvideo")
+    let encoder = resolve_encoder_args(plan, event_tx.as_ref());
+    // The compose filter ends with the labeled output [v]. If the
+    // chosen encoder requires a follow-on filter chain (e.g. VAAPI's
+    // format=nv12,hwupload), append it to that output label.
+    let filter_complex = match &encoder.pre_input_vf {
+        Some(extra) => {
+            // compose ends with the `[v]` output label; rewrite it
+            // to `[vraw]` and pipe through the encoder's pre-input
+            // filter (e.g. format=nv12,hwupload) into the final
+            // `[v]` that `-map` consumes.
+            let intermediate = compose.trim_end_matches("[v]");
+            format!("{intermediate}[vraw];[vraw]{extra}[v]")
+        }
+        None => compose,
+    };
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-y").arg("-hide_banner");
+    for a in &encoder.init {
+        cmd.arg(a);
+    }
+    cmd.arg("-f").arg("rawvideo")
         .arg("-pixel_format").arg("yuv420p")
         .arg("-video_size").arg(&video_size)
         .arg("-framerate").arg(&frame_rate)
@@ -257,13 +289,14 @@ async fn run_mvc_pipeline(
         .arg("-framerate").arg(&frame_rate)
         .arg("-i").arg(&view1)
         .arg("-i").arg(&plan.input)
-        .arg("-filter_complex").arg(&filter)
+        .arg("-filter_complex").arg(&filter_complex)
         .arg("-map").arg("[v]")
         .arg("-map").arg("2:a?")
-        .arg("-map").arg("2:s?")
-        .arg("-c:v").arg("libx264")
-        .arg("-preset").arg("medium")
-        .arg("-crf").arg("18")
+        .arg("-map").arg("2:s?");
+    for a in &encoder.encoder_args {
+        cmd.arg(a);
+    }
+    let status = cmd
         .arg("-c:a").arg("copy")
         .arg("-c:s").arg("copy")
         .arg(&plan.output)
@@ -328,6 +361,48 @@ fn resolve_ldecod_path() -> Result<PathBuf> {
          scripts/ldecod wrapper, or put ldecod on PATH. \
          Build instructions are in docs/mvc3d.md § 'Build / tooling state'."
     ))
+}
+
+/// Resolve the plan's encoder selection to concrete ffmpeg argv. Probes
+/// the host for supported HW backends once per call and feeds the chosen
+/// (codec, backend) into hw::encoder_args. Logs the resolution so the
+/// rip progress page shows which encoder the run actually used.
+fn resolve_encoder_args(
+    plan: &ConversionPlan,
+    event_tx: Option<&tokio::sync::mpsc::Sender<ConversionEvent>>,
+) -> crate::convert::hw::EncoderArgs {
+    use crate::convert::hw::{encoder_args, probe_hw_support, HwBackend};
+    let support = probe_hw_support();
+    let chosen = match plan.hw_backend {
+        HwBackend::Auto => support.resolve_auto(plan.codec),
+        explicit => {
+            // If the user picked a specific backend that isn't actually
+            // available on this box, fall back to software rather than
+            // ffmpeg failing on a missing encoder.
+            if support.supports(explicit, plan.codec) {
+                explicit
+            } else {
+                if let Some(tx) = event_tx {
+                    let _ = tx.try_send(ConversionEvent::Log(format!(
+                        "HW backend {:?} unavailable for {:?}; falling back to software encode",
+                        explicit, plan.codec
+                    )));
+                }
+                HwBackend::Software
+            }
+        }
+    };
+    if let Some(tx) = event_tx {
+        let _ = tx.try_send(ConversionEvent::Log(format!(
+            "Encoding {:?} via {} ({})",
+            plan.codec,
+            chosen.label(),
+            chosen
+                .ffmpeg_encoder(plan.codec)
+                .unwrap_or("libx264"),
+        )));
+    }
+    encoder_args(chosen, plan.codec, 18, support.vaapi_device.as_deref())
 }
 
 async fn ensure_parent_dir(p: &Path) -> Result<()> {
