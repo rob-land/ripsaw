@@ -124,7 +124,33 @@ async fn run_mvc_pipeline(
     let height = video.height.unwrap_or(1080);
     let frame_rate = video.r_frame_rate.clone().unwrap_or_else(|| "24000/1001".to_string());
 
-    let temp = tempfile::TempDir::new().context("creating temp dir")?;
+    // MVC decode intermediates are huge: each view is 1920x1080 yuv420p
+    // = 3.1 MB / frame, so a feature-length source needs tens of GB of
+    // scratch per run. The default /tmp on most distros (and certainly
+    // GNOME's tmpfs default) is RAM-backed and far smaller than this --
+    // ldecod silently fails its writes once the tmpfs fills.
+    //
+    // Place the temp dir next to the final output instead. That path is
+    // already a real on-disk location the user picked (their media
+    // library root), and they have to have enough room for the final
+    // MKV anyway. Fall back to system tmp if the output has no parent.
+    let temp_parent = plan
+        .output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    tokio::fs::create_dir_all(&temp_parent)
+        .await
+        .with_context(|| {
+            format!("ensuring temp parent {} exists", temp_parent.display())
+        })?;
+    let temp = tempfile::Builder::new()
+        .prefix("ripsaw-convert-")
+        .tempdir_in(&temp_parent)
+        .with_context(|| {
+            format!("creating temp dir under {}", temp_parent.display())
+        })?;
     let h264_path = temp.path().join("track.h264");
     let cfg_path = temp.path().join("decoder.cfg");
     let yuv_base_stem = temp.path().join("output.yuv");
