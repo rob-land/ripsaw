@@ -215,6 +215,28 @@ pub fn apply_record(state: &mut ExtractProgress, record: &Record) -> Option<Extr
 ///
 /// The subprocess is set up with `kill_on_drop(true)`, so a cancelled
 /// task tears down the running makemkvcon cleanly.
+/// MakeMKV's compiled-in default selector ends with `-sel:mvcvideo`,
+/// which silently drops the dependent-view track on a 3D Blu-ray. The
+/// MKV that comes out then has only the base view -- 1920x1080
+/// flat -- and the downstream 3D convert pipeline has nothing to pack
+/// into FSBS. We ship our own profile that flips that one selector to
+/// `+sel:mvcvideo`; everything else mirrors MakeMKV's default. The
+/// XML is embedded so the dev-from-cargo build doesn't depend on
+/// $datadir being set up.
+const KEEP_MVC_PROFILE_XML: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/data/makemkv/keep-mvc.mmcp.xml"));
+
+/// Write our keep-MVC profile to a temp file and return the path. The
+/// caller keeps the TempDir alive for the duration of the makemkvcon
+/// invocation so the file isn't yanked out from under it.
+fn write_keep_mvc_profile() -> Result<(tempfile::TempDir, PathBuf)> {
+    let dir = tempfile::TempDir::new().context("creating temp dir for MakeMKV profile")?;
+    let path = dir.path().join("ripsaw.mmcp.xml");
+    std::fs::write(&path, KEEP_MVC_PROFILE_XML)
+        .context("writing MakeMKV keep-MVC profile to temp file")?;
+    Ok((dir, path))
+}
+
 pub async fn extract_title(
     source: &ScanSource,
     title_index: u32,
@@ -226,10 +248,15 @@ pub async fn extract_title(
         .await
         .with_context(|| format!("ensuring output dir {} exists", output_dir.display()))?;
 
+    // Hold the TempDir for the lifetime of this fn so the profile XML
+    // file we hand makemkvcon stays on disk until the rip finishes.
+    let (_profile_dir, profile_path) = write_keep_mvc_profile()?;
+
     let arg = source.as_argument();
     let mut child = Command::new("makemkvcon")
         .arg("-r")
         .arg("--noscan")
+        .arg(format!("--profile={}", profile_path.display()))
         .arg("--messages=-stdout")
         .arg("--progress=-stdout")
         .arg("mkv")

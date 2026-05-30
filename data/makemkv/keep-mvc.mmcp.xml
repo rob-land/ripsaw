@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MakeMKV conversion profile used by Ripsaw.
+
+  Identical to MakeMKV's built-in default selector except for the MVC
+  dependent-view track. The built-in default has `-sel:mvcvideo`
+  which silently drops the second view; we flip that to
+  `+sel:mvcvideo` so the produced MKV carries everything we need to
+  convert the title into FSBS / HSBS / etc. downstream.
+
+  Selector grammar (per makemkvcon's compiled-in help string):
+    -sel:all                   start with nothing
+    +sel:(favlang|nolang)      include preferred-language + no-lang tracks
+    +sel:mvcvideo              include MVC dependent-view tracks (the fix)
+    =100:all                   profile priority 100 (irrelevant for us)
+    -10:favlang                deprio non-favlang by 10
+-->
+<profile>
+  <name lang="eng">Ripsaw — keep MVC</name>
+  <description lang="eng">Ripsaw default. Identical to MakeMKV's built-in default profile except MVC dependent-view tracks are retained instead of dropped, so 3D conversion has both views to work with.</description>
+
+  <trackSettings input="default">
+    <output outputSettingsName="copy">
+      <default selected="-sel:all,+sel:(favlang|nolang),+sel:mvcvideo,=100:all,-10:favlang"/>
+    </output>
+  </trackSettings>
+</profile>
