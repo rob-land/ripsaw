@@ -1,0 +1,50 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $RipsawTitleDetailPage: Adw.NavigationPage {
+  title: _("Title details");
+
+  Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {}
+
+    content: Adw.PreferencesPage {
+      Adw.PreferencesGroup identity_group {
+        title: _("Identity");
+        description: _("Override TheDiscDB's title metadata before submitting a correction.");
+
+        Adw.EntryRow display_title_row {
+          title: _("Display title");
+        }
+
+        Adw.ComboRow role_row {
+          title: _("Role");
+          model: StringList {
+            strings [
+              _("Main feature"),
+              _("Trailer"),
+              _("Behind the scenes"),
+              _("Deleted scene"),
+              _("Featurette"),
+              _("Interview"),
+              _("Scene"),
+              _("Short"),
+              _("Extra"),
+            ]
+          };
+        }
+      }
+
+      Adw.PreferencesGroup chapters_group {
+        title: _("Chapters");
+        description: _("Per-chapter names. Pre-filled from TheDiscDB when the disc is identified.");
+      }
+
+      Adw.PreferencesGroup tracks_group {
+        title: _("Audio tracks");
+        description: _("Per-track display name + description. (Editing comes next; for now this section shows TheDiscDB's current data.)");
+        sensitive: false;
+      }
+    };
+  }
+}

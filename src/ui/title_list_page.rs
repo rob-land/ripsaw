@@ -31,6 +31,7 @@ mod imp {
     pub struct TitleListPage {
         #[template_child] pub title_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child] pub process_button: TemplateChild<gtk::Button>,
+        #[template_child] pub submit_button: TemplateChild<gtk::Button>,
         #[template_child] pub series_toggle: TemplateChild<adw::SwitchRow>,
         #[template_child] pub title_override: TemplateChild<adw::EntryRow>,
         #[template_child] pub season_override: TemplateChild<adw::SpinRow>,
@@ -46,6 +47,14 @@ mod imp {
         pub disc_name: RefCell<Option<String>>,
         pub source_kind: RefCell<Option<StereoSource>>,
         pub identities: RefCell<Vec<Identity>>,
+        /// Per-title edits captured on the TitleDetailPage. Keyed by
+        /// MakeMKV title index. Empty until the user opens a detail
+        /// page and changes something.
+        pub title_edits: RefCell<HashMap<u32, crate::ui::title_detail_page::TitleEdit>>,
+        /// TheDiscDB content hash for this disc. Empty when the disc
+        /// is unidentified or the input wasn't a physical-disc / ISO
+        /// source (e.g. a stand-alone MKV).
+        pub content_hash: RefCell<String>,
     }
 
     #[glib::object_subclass]
@@ -127,6 +136,9 @@ impl TitleListPage {
         group.set_title(&format_group_title(result));
         group.set_description(Some(&format_group_description(result)));
         self.imp().identities.replace(result.identities.clone());
+        self.imp()
+            .content_hash
+            .replace(result.content_hash.clone().unwrap_or_default());
         if let Some(name) = &result.scan.disc.name {
             self.set_title(name);
         }
@@ -240,6 +252,24 @@ impl TitleListPage {
                 .build();
             row.add_suffix(&episode_entry);
 
+            // Edit affordance: small icon button on the right that
+            // opens the per-title detail page. Doesn't interfere with
+            // the row's primary activation (which toggles the rip
+            // checkbox).
+            let edit_button = gtk::Button::builder()
+                .icon_name("document-edit-symbolic")
+                .valign(gtk::Align::Center)
+                .tooltip_text("Edit title details (display name, role, chapters)")
+                .css_classes(["flat"])
+                .build();
+            let title_index = t.index;
+            edit_button.connect_clicked(clone!(
+                #[weak(rename_to = page)]
+                self,
+                move |_| page.open_title_detail(title_index)
+            ));
+            row.add_suffix(&edit_button);
+
             group.add(&row);
             checkboxes.push(check);
             episode_entries.push(episode_entry);
@@ -260,6 +290,67 @@ impl TitleListPage {
         self.imp().process_button.set_sensitive(any_checked);
     }
 
+    /// Open the per-title detail page (display title / role / chapter
+    /// edits) for the title with the given MakeMKV index. Pulls
+    /// existing edits + TheDiscDB-provided defaults to pre-populate.
+    fn open_title_detail(&self, title_index: u32) {
+        use crate::rip::plan::match_identity_for;
+        use crate::ui::title_detail_page::{TitleDetailPage, TitleEdit};
+
+        let titles = self.imp().titles.borrow();
+        let Some(title_attr) = titles.iter().find(|t| t.index == title_index) else {
+            return;
+        };
+        let identities = self.imp().identities.borrow();
+        let identity_titles = identities
+            .first()
+            .map(|i| i.titles.as_slice())
+            .unwrap_or(&[]);
+        let identity = match_identity_for(identity_titles, title_attr);
+
+        let display_default = identity
+            .map(|i| i.display_title.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| title_attr.name.clone())
+            .unwrap_or_else(|| format!("Title {}", title_index));
+
+        let chapter_defaults: Vec<String> = identity
+            .map(|i| {
+                let mut chs = i.chapters.clone();
+                chs.sort_by_key(|c| c.index);
+                chs.into_iter().map(|c| c.title).collect()
+            })
+            .unwrap_or_default();
+
+        let existing_edit = self
+            .imp()
+            .title_edits
+            .borrow()
+            .get(&title_index)
+            .cloned()
+            .unwrap_or_else(|| TitleEdit {
+                title_index,
+                ..Default::default()
+            });
+
+        let detail = TitleDetailPage::default();
+        detail.populate(&existing_edit, &display_default, &chapter_defaults);
+        detail.connect_saved(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |edit| {
+                page.imp()
+                    .title_edits
+                    .borrow_mut()
+                    .insert(edit.title_index, edit);
+            }
+        ));
+
+        if let Some(nav) = navigation_view(self) {
+            nav.push(&detail);
+        }
+    }
+
     fn setup_actions(&self) {
         let process_action = gio::SimpleAction::new("process-selected", None);
         process_action.connect_activate(clone!(
@@ -273,11 +364,105 @@ impl TitleListPage {
             self,
             move |_, _| page.start_sonarr_lookup()
         ));
+        let submit_action = gio::SimpleAction::new("submit-corrections", None);
+        submit_action.connect_activate(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_, _| page.submit_corrections()
+        ));
 
         let group = gio::SimpleActionGroup::new();
         group.add_action(&process_action);
         group.add_action(&sonarr_action);
+        group.add_action(&submit_action);
         self.insert_action_group("page", Some(&group));
+    }
+
+    /// Stage a `disc0N.json` for TheDiscDB, surface the path in a
+    /// toast, and open the data-repo GitHub page so the user can
+    /// open a PR. Hash + identity come from the original scan;
+    /// per-title edits from the title-detail page state.
+    fn submit_corrections(&self) {
+        use crate::identify::submission::{
+            github_repo_url, open_in_browser, stage_submission, DiscSubmission,
+        };
+        let disc_name = self
+            .imp()
+            .disc_name
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| "Unknown disc".to_string());
+        let identities = self.imp().identities.borrow();
+        let identity = identities.first();
+        let content_hash = self.imp().content_hash.borrow().clone();
+        let scan_snapshot = {
+            let titles = self.imp().titles.borrow().clone();
+            crate::rip::makemkv_parse::MakemkvScan {
+                disc: crate::rip::makemkv_parse::DiscAttributes {
+                    name: Some(disc_name.clone()),
+                    ..Default::default()
+                },
+                titles,
+                ..Default::default()
+            }
+        };
+        let disc = DiscSubmission {
+            disc_index: identity.map(|i| i.disc_index).unwrap_or(1),
+            disc_slug: identity
+                .map(|i| i.release_slug.clone())
+                .unwrap_or_else(|| "blu-ray".into()),
+            disc_name: disc_name.clone(),
+            format: "Blu-Ray".to_string(),
+            content_hash: if content_hash.is_empty() {
+                // Stand-alone MKV or otherwise-unidentified input
+                // doesn't have a TheDiscDB content hash. Stage under
+                // "unhashed/<disc_name>" so the user can still find
+                // it and figure out where to put it manually.
+                format!("unhashed-{}", disc_name.replace('/', "_"))
+            } else {
+                content_hash
+            },
+            comment: None,
+        };
+        let edits = self.imp().title_edits.borrow().clone();
+        match stage_submission(&disc, &scan_snapshot, identity, &edits) {
+            Ok(path) => {
+                let msg = format!(
+                    "Staged TheDiscDB submission at {} — opening data repo…",
+                    path.display()
+                );
+                if let Some(window) = self.parent_window() {
+                    window.add_toast(
+                        adw::Toast::builder().title(&msg).timeout(8).build(),
+                    );
+                }
+                if let Err(e) = open_in_browser(github_repo_url()) {
+                    tracing::warn!("xdg-open failed: {e:#}");
+                    if let Some(window) = self.parent_window() {
+                        window.add_toast(
+                            adw::Toast::builder()
+                                .title(&format!(
+                                    "Couldn't open browser; visit {}",
+                                    github_repo_url()
+                                ))
+                                .timeout(8)
+                                .build(),
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("submission staging failed: {e:#}");
+                if let Some(window) = self.parent_window() {
+                    window.add_toast(
+                        adw::Toast::builder()
+                            .title(&format!("Submission staging failed: {e}"))
+                            .timeout(8)
+                            .build(),
+                    );
+                }
+            }
+        }
     }
 
     /// Map the output-format ComboRow selection to an OutputFormat.

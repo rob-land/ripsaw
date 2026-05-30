@@ -18,6 +18,17 @@ template $RipsawTitleListPage: Adw.NavigationPage {
           label: _("Process Selected");
         };
       }
+
+      [end]
+      Button submit_button {
+        action-name: "page.submit-corrections";
+        tooltip-text: _("Save corrected title metadata to a staging dir and open TheDiscDB on GitHub");
+
+        child: Adw.ButtonContent {
+          icon-name: "send-to-symbolic";
+          label: _("Submit to TheDiscDB");
+        };
+      }
     }
 
     content: Adw.PreferencesPage {

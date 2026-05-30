@@ -5,6 +5,7 @@ pub mod disc_hash;
 pub mod ffprobe;
 pub mod from_scan;
 pub mod pipeline;
+pub mod submission;
 pub mod thediscdb;
 pub mod tmdb;
 pub mod submit;
