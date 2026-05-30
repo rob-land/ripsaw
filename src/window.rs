@@ -380,10 +380,15 @@ impl RipsawWindow {
             ));
         }
 
+        // For MKV input there's no mount; the input file itself is the
+        // path downstream (convert / transcode) needs. Prefer the
+        // identification's `source_file` (set by identify_iso and
+        // identify_mkv) so the conversion path receives a real path
+        // even when there is no loop-mounted ISO behind it.
         let iso_path = result
-            .mount
-            .as_ref()
-            .map(|m| m.iso_path.clone())
+            .source_file
+            .clone()
+            .or_else(|| result.mount.as_ref().map(|m| m.iso_path.clone()))
             .unwrap_or_else(|| PathBuf::from(""));
         let page = TitleListPage::from_identification(&result, iso_path);
         self.imp().nav.push(&page);
