@@ -340,25 +340,62 @@ fn compose_filter(format: OutputFormat) -> String {
 }
 
 fn resolve_ldecod_path() -> Result<PathBuf> {
-    // 1. RIPSAW_LDECOD env var beats everything.
+    // 1. RIPSAW_LDECOD env var beats everything. Always honour an
+    //    explicit user override first.
     if let Some(raw) = std::env::var_os("RIPSAW_LDECOD") {
         let p = PathBuf::from(raw);
         if p.is_file() {
             return Ok(p);
         }
     }
-    // 2. Wrapper script in this project.
-    let wrapper = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/ldecod");
-    if wrapper.is_file() {
-        return Ok(wrapper);
+    // 2. Compile-time CARGO_MANIFEST_DIR / scripts / ldecod. Works
+    //    for a freshly-built binary in the project directory; becomes
+    //    stale if the project directory is renamed after build (this
+    //    is what bit us going 3drip -> ripsaw; the embedded path
+    //    didn't move with the source tree).
+    let manifest_wrapper =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/ldecod");
+    if manifest_wrapper.is_file() {
+        return Ok(manifest_wrapper);
     }
-    // 3. Bare `ldecod` on PATH.
+    // 3. Runtime sibling of the running binary: walk up from
+    //    current_exe() looking for a scripts/ldecod sibling. For a
+    //    cargo target/release/ripsaw, three parents up is the project
+    //    root. We walk up to five levels so target/release/deps and
+    //    other cargo layouts work too.
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cursor = exe.parent().map(|p| p.to_path_buf());
+        for _ in 0..5 {
+            match cursor {
+                Some(dir) => {
+                    let candidate = dir.join("scripts").join("ldecod");
+                    if candidate.is_file() {
+                        return Ok(candidate);
+                    }
+                    cursor = dir.parent().map(|p| p.to_path_buf());
+                }
+                None => break,
+            }
+        }
+    }
+    // 4. Bare `ldecod` on PATH (system install).
     if let Ok(path) = which::which("ldecod") {
         return Ok(path);
     }
+    // 5. Last-ditch: a few well-known fixed locations.
+    for fallback in [
+        "/usr/local/bin/ldecod",
+        "/opt/jm/bin/ldecod",
+        "/home/rob/3rdparty/JM/bin/umake/gcc-15.2/x86_64/release/ldecod",
+    ] {
+        let p = PathBuf::from(fallback);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
     Err(anyhow!(
         "ldecod not found. Set RIPSAW_LDECOD=/path/to/ldecod, install the \
-         scripts/ldecod wrapper, or put ldecod on PATH. \
+         scripts/ldecod wrapper next to the binary, or put ldecod on PATH. \
          Build instructions are in docs/mvc3d.md § 'Build / tooling state'."
     ))
 }

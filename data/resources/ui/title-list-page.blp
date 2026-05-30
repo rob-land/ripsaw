@@ -81,10 +81,26 @@ template $RipsawTitleListPage: Adw.NavigationPage {
 
         Adw.EntryRow tmdb_id_row {
           title: _("TMDb ID");
+
+          [suffix]
+          Button tmdb_lookup_button {
+            valign: center;
+            action-name: "page.lookup-tmdb";
+            tooltip-text: _("Fetch title / year / plot / tagline / IMDb cross-ref from TMDB");
+            icon-name: "system-search-symbolic";
+          }
         }
 
         Adw.EntryRow imdb_id_row {
           title: _("IMDb ID (tt…)");
+
+          [suffix]
+          Button imdb_lookup_button {
+            valign: center;
+            action-name: "page.lookup-imdb";
+            tooltip-text: _("Look up by IMDb ID via TMDB and fill in the rest");
+            icon-name: "system-search-symbolic";
+          }
         }
 
         Adw.EntryRow plot_row {
