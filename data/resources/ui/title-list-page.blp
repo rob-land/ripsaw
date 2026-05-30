@@ -8,26 +8,14 @@ template $RipsawTitleListPage: Adw.NavigationPage {
     [top]
     Adw.HeaderBar {
       [end]
-      Button rip_button {
-        action-name: "page.rip-selected";
+      Button process_button {
+        action-name: "page.process-selected";
         sensitive: false;
         styles ["suggested-action"]
 
         child: Adw.ButtonContent {
-          icon-name: "document-save-symbolic";
-          label: _("Rip Selected");
-        };
-      }
-
-      Button convert_button {
-        action-name: "page.convert-to-fsbs";
-        visible: false;
-        styles ["suggested-action"]
-        tooltip-text: _("Convert this 3D source to full side-by-side");
-
-        child: Adw.ButtonContent {
-          icon-name: "view-paged-symbolic";
-          label: _("Convert to FSBS");
+          icon-name: "media-playback-start-symbolic";
+          label: _("Process Selected");
         };
       }
     }
@@ -66,9 +54,30 @@ template $RipsawTitleListPage: Adw.NavigationPage {
         }
       }
 
+      Adw.PreferencesGroup output_group {
+        title: _("Output");
+        description: _("Choose how the selected titles are produced.");
+        visible: false;
+
+        Adw.ComboRow output_format_row {
+          title: _("3D output format");
+          subtitle: _("Pack the dependent view next to the base view in the output MKV.");
+          model: StringList {
+            strings [
+              _("Off — leave the source untouched"),
+              _("Full side-by-side (3840×1080)"),
+              _("Half side-by-side (1920×1080)"),
+              _("Full over/under (1920×2160)"),
+              _("Half over/under (1920×1080)"),
+              _("Frame-sequential (2× fps)"),
+            ]
+          };
+        }
+      }
+
       Adw.PreferencesGroup title_group {
         title: _("Titles found");
-        description: _("Tick the titles you want to rip, then press the Rip button.");
+        description: _("Tick the titles you want to process, then press the Process button.");
       }
     };
   }

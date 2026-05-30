@@ -30,11 +30,12 @@ mod imp {
     #[template(resource = "/land/rob/ripsaw/ui/title-list-page.ui")]
     pub struct TitleListPage {
         #[template_child] pub title_group: TemplateChild<adw::PreferencesGroup>,
-        #[template_child] pub rip_button: TemplateChild<gtk::Button>,
-        #[template_child] pub convert_button: TemplateChild<gtk::Button>,
+        #[template_child] pub process_button: TemplateChild<gtk::Button>,
         #[template_child] pub series_toggle: TemplateChild<adw::SwitchRow>,
         #[template_child] pub title_override: TemplateChild<adw::EntryRow>,
         #[template_child] pub season_override: TemplateChild<adw::SpinRow>,
+        #[template_child] pub output_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child] pub output_format_row: TemplateChild<adw::ComboRow>,
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
         pub episode_entries: RefCell<Vec<gtk::Entry>>,
@@ -112,8 +113,11 @@ impl TitleListPage {
         };
         page.imp().source_kind.replace(source_kind);
         page.populate_with_identity(result);
-        page.imp().convert_button.set_visible(result.has_mvc);
-        page.imp().rip_button.set_visible(result.source_file.is_none());
+        // Show the 3D output options only when we detected MVC.
+        page.imp().output_group.set_visible(result.has_mvc);
+        // Default the format combo to "Off" so a regular rip is a single
+        // click; user opts in by changing it.
+        page.imp().output_format_row.set_selected(0);
         page
     }
 
@@ -252,21 +256,15 @@ impl TitleListPage {
             .borrow()
             .iter()
             .any(|c| c.is_active());
-        self.imp().rip_button.set_sensitive(any_checked);
+        self.imp().process_button.set_sensitive(any_checked);
     }
 
     fn setup_actions(&self) {
-        let rip_action = gio::SimpleAction::new("rip-selected", None);
-        rip_action.connect_activate(clone!(
+        let process_action = gio::SimpleAction::new("process-selected", None);
+        process_action.connect_activate(clone!(
             #[weak(rename_to = page)]
             self,
-            move |_, _| page.start_rip()
-        ));
-        let convert_action = gio::SimpleAction::new("convert-to-fsbs", None);
-        convert_action.connect_activate(clone!(
-            #[weak(rename_to = page)]
-            self,
-            move |_, _| page.start_conversion(OutputFormat::FullSbs)
+            move |_, _| page.start_processing()
         ));
         let sonarr_action = gio::SimpleAction::new("sonarr-lookup", None);
         sonarr_action.connect_activate(clone!(
@@ -276,10 +274,72 @@ impl TitleListPage {
         ));
 
         let group = gio::SimpleActionGroup::new();
-        group.add_action(&rip_action);
-        group.add_action(&convert_action);
+        group.add_action(&process_action);
         group.add_action(&sonarr_action);
         self.insert_action_group("page", Some(&group));
+    }
+
+    /// Map the output-format ComboRow selection to an OutputFormat.
+    /// Returns `None` when the user picked "Off" (or the row is hidden).
+    fn selected_output_format(&self) -> Option<OutputFormat> {
+        // Row order must mirror the StringList in title-list-page.blp.
+        match self.imp().output_format_row.selected() {
+            1 => Some(OutputFormat::FullSbs),
+            2 => Some(OutputFormat::HalfSbs),
+            3 => Some(OutputFormat::FullTab),
+            4 => Some(OutputFormat::HalfTab),
+            5 => Some(OutputFormat::FrameSequential),
+            _ => None,
+        }
+    }
+
+    /// Single entry point for the header's `Process Selected` button.
+    /// Dispatches based on input type: physical disc / ISO go through
+    /// the rip pipeline (the orchestrator); a standalone MKV with a
+    /// selected 3D output format goes through the convert pipeline.
+    fn start_processing(&self) {
+        let is_already_extracted = self.imp().iso_path.borrow().is_some()
+            && self.imp().source.borrow().as_ref().map_or(false, |s| {
+                matches!(s, crate::rip::makemkv::ScanSource::Iso(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mkv")))
+            });
+        let format = self.selected_output_format();
+
+        if is_already_extracted {
+            // MKV input: there's nothing to "rip"; processing means
+            // running the 3D conversion. If the user left the format
+            // on "Off" there's no work to do.
+            match format {
+                Some(fmt) => self.start_conversion(fmt),
+                None => {
+                    if let Some(window) = self.parent_window() {
+                        window.add_toast(
+                            adw::Toast::builder()
+                                .title("Pick a 3D output format to convert this MKV.")
+                                .timeout(4)
+                                .build(),
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
+        // Physical disc / ISO: run the rip pipeline. The selected
+        // conversion format is recorded in the warning below for now;
+        // chaining "rip then convert" in a single Process click is
+        // tracked separately and will fold into the same start_rip
+        // path once the orchestrator gains a post-rip convert hook.
+        if format.is_some() {
+            if let Some(window) = self.parent_window() {
+                window.add_toast(
+                    adw::Toast::builder()
+                        .title("Ripping first; re-open the produced MKV to convert it for now.")
+                        .timeout(6)
+                        .build(),
+                );
+            }
+        }
+        self.start_rip();
     }
 
     fn start_sonarr_lookup(&self) {
