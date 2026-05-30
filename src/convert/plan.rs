@@ -61,6 +61,27 @@ impl ConversionPlan {
     }
 }
 
+/// Detect the StereoSource flavour of an MKV at `path`. Returns
+/// `None` when the file isn't an MKV we can read, has no 3D info,
+/// or carries already-packed stereo modes only (modes 1/2/3 → an
+/// `AlreadyPacked` variant could be returned by a richer detector,
+/// but for now MakeMKV-produced MVC sources are the only thing this
+/// helper is used for).
+pub fn detect_stereo_source(path: &Path) -> Option<StereoSource> {
+    use crate::mvc::ebml::EbmlReader;
+    use crate::mvc::mvcc::scan_3d_info;
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = EbmlReader::new(file);
+    let info = scan_3d_info(&mut reader).ok()?;
+    if info.mvcc_bytes.is_some() {
+        Some(StereoSource::MvcWithBlockAdditions)
+    } else if matches!(info.stereo_mode, Some(13) | Some(14)) {
+        Some(StereoSource::MvcInlineLaced)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

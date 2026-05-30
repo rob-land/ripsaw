@@ -125,6 +125,9 @@ pub struct NamingOpts {
     /// Only used when content_kind is Series. First selected title gets
     /// `episode_start`, subsequent titles get `episode_start + 1` etc.
     pub episode_start: u32,
+    /// When set, every ripped title is post-processed into this 3D
+    /// output layout via the convert pipeline after rip + rename land.
+    pub conversion_format: Option<crate::convert::format::OutputFormat>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +150,10 @@ pub struct PlannedTitle {
     /// Value to write to the MKV's Segment.Title via
     /// `mkvpropedit --edit info --set title=...`. `None` skips the set.
     pub segment_title: Option<String>,
+    /// When set, the orchestrator auto-runs the 3D conversion pipeline
+    /// on the produced MKV after rename + metadata. Carried forward
+    /// from NamingOpts.conversion_format on the source page.
+    pub conversion_format: Option<crate::convert::format::OutputFormat>,
 }
 
 /// Build per-title rip targets. Roles are inferred from
@@ -284,6 +291,7 @@ fn plan_one_title(
         final_path,
         chapter_titles,
         segment_title,
+        conversion_format: naming.and_then(|n| n.conversion_format),
     }
 }
 
@@ -441,6 +449,7 @@ pub fn naming_opts_for_unidentified(
         imdb_id: None,
         season,
         episode_start: 1,
+        conversion_format: None,
     }
 }
 

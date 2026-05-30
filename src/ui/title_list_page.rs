@@ -324,21 +324,11 @@ impl TitleListPage {
             return;
         }
 
-        // Physical disc / ISO: run the rip pipeline. The selected
-        // conversion format is recorded in the warning below for now;
-        // chaining "rip then convert" in a single Process click is
-        // tracked separately and will fold into the same start_rip
-        // path once the orchestrator gains a post-rip convert hook.
-        if format.is_some() {
-            if let Some(window) = self.parent_window() {
-                window.add_toast(
-                    adw::Toast::builder()
-                        .title("Ripping first; re-open the produced MKV to convert it for now.")
-                        .timeout(6)
-                        .build(),
-                );
-            }
-        }
+        // Physical disc / ISO: run the rip pipeline. The orchestrator
+        // chains a post-rip 3D conversion when conversion_format is
+        // set on the queue item (we plumb it via NamingOpts ->
+        // PlannedTitle -> RipQueueItem), so a single Process click
+        // produces both the raw MVC MKV and the FSBS/HSBS/etc. output.
         self.start_rip();
     }
 
@@ -674,6 +664,9 @@ impl TitleListPage {
         if content_kind == DiscContentKind::Series {
             naming_opts.season = chosen_season.max(1);
         }
+        // Carry the 3D-output-format selection so the orchestrator
+        // chains a convert after each successful rip.
+        naming_opts.conversion_format = self.selected_output_format();
         let episode_titles = self.collect_episode_titles();
         let plan = plan_rip(
             &identification_for_plan,

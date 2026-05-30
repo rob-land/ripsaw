@@ -121,6 +121,86 @@ pub fn run_rip_queue(
                 }
             }
 
+            // If the user requested a 3D conversion alongside the rip,
+            // detect the MKV's StereoSource flavour and run the convert
+            // pipeline now. We deliberately keep this as a separate phase
+            // -- the rip's "Finished" message refers only to the rip; a
+            // convert failure is surfaced through the rip log expander
+            // rather than failing the rip retroactively.
+            if let (Ok(landed), Some(format)) =
+                (&final_result, item.conversion_format)
+            {
+                match crate::convert::plan::detect_stereo_source(landed) {
+                    Some(source) => {
+                        let output = crate::convert::plan::ConversionPlan::default_output_path(
+                            landed, format,
+                        );
+                        let plan = crate::convert::plan::ConversionPlan {
+                            input: landed.clone(),
+                            output: output.clone(),
+                            format,
+                            source,
+                        };
+                        let _ = rip_tx
+                            .send(RipMessage::Event(
+                                crate::rip::makemkv::ExtractEvent::Message(
+                                    crate::rip::makemkv_parse::MsgRecord {
+                                        code: 0,
+                                        priority: 0,
+                                        text: format!(
+                                            "Converting → {} ({})",
+                                            format.label(),
+                                            output.display()
+                                        ),
+                                    },
+                                ),
+                            ))
+                            .await;
+                        match crate::convert::runner::run_conversion(plan, None).await {
+                            Ok(p) => {
+                                let _ = rip_tx
+                                    .send(RipMessage::Event(
+                                        crate::rip::makemkv::ExtractEvent::Message(
+                                            crate::rip::makemkv_parse::MsgRecord {
+                                                code: 0,
+                                                priority: 0,
+                                                text: format!(
+                                                    "Converted: {}",
+                                                    p.display()
+                                                ),
+                                            },
+                                        ),
+                                    ))
+                                    .await;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "post-rip convert for {} failed: {e:#}",
+                                    landed.display()
+                                );
+                                let _ = rip_tx
+                                    .send(RipMessage::Event(
+                                        crate::rip::makemkv::ExtractEvent::Message(
+                                            crate::rip::makemkv_parse::MsgRecord {
+                                                code: 0,
+                                                priority: 0,
+                                                text: format!("Convert failed: {e}"),
+                                            },
+                                        ),
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::info!(
+                            "no MVC/stereo info in {}; skipping post-rip convert",
+                            landed.display()
+                        );
+                    }
+                }
+            }
+
             let _ = rip_tx
                 .send(RipMessage::Finished(index_in_queue, final_result))
                 .await;

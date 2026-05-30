@@ -19,6 +19,7 @@ pub struct RipQueueItem {
     pub final_path: Option<PathBuf>,
     pub chapter_titles: Vec<String>,
     pub segment_title: Option<String>,
+    pub conversion_format: Option<crate::convert::format::OutputFormat>,
 }
 
 impl From<PlannedTitle> for RipQueueItem {
@@ -31,6 +32,7 @@ impl From<PlannedTitle> for RipQueueItem {
             final_path: p.final_path,
             chapter_titles: p.chapter_titles,
             segment_title: p.segment_title,
+            conversion_format: p.conversion_format,
         }
     }
 }
