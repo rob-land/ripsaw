@@ -174,6 +174,36 @@ Given the recommendation defers actual libmvc implementation:
 4. **Save the strategic decision as a memory** so future sessions
    don't re-litigate it.
 
+## Helpful crates found during the survey
+
+- [`h264-reader` 0.8.0](https://crates.io/crates/h264-reader) -- a
+  Rust H.264 bitstream parser. When libmvc work resumes the base
+  SPS / PPS / slice-header parse can be delegated here rather than
+  reimplemented; our `src/mvc/sps.rs` (Subset SPS MVC extension)
+  layers on top.
+- [`openh264` 0.9.3](https://crates.io/crates/openh264) -- idiomatic
+  bindings to Cisco's BSD-licensed H.264 decoder. Same DPB-injection
+  problem as libavcodec; not a magic bullet but a cleaner C API
+  surface if the Option B JM-derived approach proves too brittle.
+- [`mp4parse` 0.17.0](https://crates.io/crates/mp4parse) -- ISO BMFF
+  parser. Useful for the Apple Vision Pro atom injection step
+  (`vexu`/`hfov`/`lhvC`/`tapt`) in Phase E of `docs/xreal.md`.
+
+## FFmpeg 7.1 MV-HEVC support verified on this host (2026-05-30)
+
+`ffmpeg -h decoder=hevc` on the developer's Fedora system reports:
+
+  -view_ids          Array of view IDs that should be decoded and output;
+                     a single -1 to decode all views
+  -view_ids_available  Array of available view IDs
+  -view_pos_available  Array of view positions, as AVStereo3DView
+
+Confirms Anton Khirnov's MV-HEVC patchset (FFmpeg 7.1, Sept 2024)
+is present in the distro build. The Phase D sister player can
+rely on FFmpeg's native MV-HEVC decoder without depending on a
+pinned ffmpeg fork. Test corpus needed when prototyping: Apple's
+published spatial-video samples or iPhone 15/16 Pro recordings.
+
 ## Open questions for whenever libmvc resumes
 
 - Does libavcodec's H.264 `AVCodecContext` expose enough through its
