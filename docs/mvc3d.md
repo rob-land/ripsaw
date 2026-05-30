@@ -29,6 +29,31 @@ port target; both are dead ends (see § "Britz fork build spike" and
 code, written from the H.264 spec, reusing an off-the-shelf base-view
 H.264 decoder for everything that isn't MVC-specific.
 
+### Role of libmvc after the 2026-05-29 strategic shift
+
+`libmvc` is no longer correctness-required for any downstream
+target -- the existing JM ldecod + ffmpeg compose chain produces
+FSBS today (see `docs/xreal.md` § Phase A), and the planned
+MV-HEVC archival format (see `docs/xreal.md` § Phase C) routes
+through the same ldecod tail. What `libmvc` enables is **realtime
+playback**:
+
+- JM ldecod runs at ~21 fps on 1080p both-views on this hardware
+  -- 6x too slow for 24p live playback. So any "play an MVC file
+  without transcoding first" workflow (e.g. a sister-player MVC
+  fast-path) is blocked on a real decoder.
+- It also speeds up the MV-HEVC archival path, which is currently
+  bottlenecked by ldecod rather than by x265.
+- It unlocks the stream-direct-from-disc-no-rip-file workflow
+  where Ripsaw plays a 3D BD without ever extracting an MKV.
+
+So the priority of `libmvc` shifts: it's no longer "blocks correct
+3D output", it's "unlocks live MVC playback and 5-10x faster
+MV-HEVC archival". Treat it as a Phase F item (per
+`docs/xreal.md`) -- valuable, multi-week, sequenced after the
+MV-HEVC archival pipeline and sister player are working with the
+existing ldecod backend.
+
 ### Why a standalone library instead of patching FFmpeg
 
 FFmpeg has no runtime plugin API for decoders — every supported codec

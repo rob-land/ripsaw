@@ -124,6 +124,163 @@ can be remuxed to FSBS once), not as a *delivery* path.
    compose to FSBS like the current MVC path, just skipping
    ldecod entirely.
 
+## Strategic shift: MV-HEVC as the canonical archival format (2026-05-29 update)
+
+After the initial "FSBS is the right output" finding above, a
+follow-up discussion reframed the storage question.
+
+The Xreal-only world says: "the glasses only take a split
+framebuffer, archive FSBS once, done." That's true for the
+delivery format. But for the **archive** format, FSBS is wasteful:
+it doubles the canvas, locks you to the SBS-split delivery layout,
+and forces a re-encode if you ever want the same content on a
+Vision Pro or any other 3D target.
+
+A cleaner model: **archive MV-HEVC, compose FSBS at playback time
+for the Xreal**. The sister player owns the realtime stitching;
+the library only holds one copy per movie; other 3D targets
+(Vision Pro, future hardware) can consume the same archive with
+trivial container repackaging.
+
+### Why MV-HEVC archival beats FSBS archival
+
+| Property                       | FSBS (current today)                    | MV-HEVC (target)                                  |
+| ---                            | ---                                     | ---                                               |
+| Storage cost                   | 2x pixel canvas; HEVC across SBS halves | ~30% smaller; native inter-view prediction        |
+| Apple Vision Pro target        | Re-encode required                      | Apple-atom inject; no recompress                  |
+| Plex/Jellyfin compatibility    | Plays as 2D ultrawide on non-3D players | Plays as 2D 1080p (base view) on non-3D players   |
+| Xreal target via sister player | Already FSBS-ready, trivial passthrough | Decode + hstack at playback time                  |
+| Future-proofing                | SBS is a 2010s-era hack                 | MV-HEVC is the current spec; HEVC v2 Annex G      |
+
+### Decode-speed reality check
+
+What gates the "compose at playback" idea is the realtime decode
+budget. Numbers from the LR_Pattern test:
+
+- **H.264 MVC live decode via JM ldecod**: ~21 fps on 1920x1080
+  both-views. That's ~6x too slow for 24p playback. Not realtime.
+  Live MVC playback is gated on `libmvc` (the long-term decoder
+  scoped in `docs/mvc3d.md`).
+- **HEVC MV-HEVC live decode via FFmpeg 7.1+**: realtime on any
+  modern CPU. Anton Khirnov's `view_ids` patchset is software-
+  decoding both layers; HEVC at 1080p doubled is well within
+  software-decode budget on any laptop chip from the last 5
+  years. **Not measured yet on this hardware** -- worth a 30-line
+  proof-of-concept before committing to the architecture.
+- **Encode side**: x265 has `--multiview-config` for MV-HEVC
+  output, 8-bit only as of this writing. NVIDIA Video Codec SDK
+  13.0 also encodes MV-HEVC if the user has an Ada-or-newer GPU.
+
+The implication: archive MV-HEVC, decode in realtime in the
+sister player, no `libmvc` needed for the Xreal flow.
+
+### Phased rollout
+
+**Phase A (landed 2026-05-29).** FSBS-from-MVC pipeline works
+end-to-end. `MvcWithBlockAdditions` and `MvcInlineLaced` both
+route through `extract_to_annex_b` (or `mkvextract`) → JM ldecod
+→ ffmpeg hstack → libx264. Output is a Xreal-ready FSBS MKV
+today. This stays as the default until Phase C ships.
+
+**Phase B.** Add HEVC encode option to the FSBS output. Same
+compose chain, swap libx264 for libx265. Add to title list
+page's Output Options group as `Encoder: H.264 / H.265`.
+~30% smaller files for the same quality on the FSBS canvas;
+no change to the rest of the pipeline.
+
+**Phase C.** Add MV-HEVC as a fourth Output Format. The two-view
+YUV pipeline already produces ldecod's `output_ViewId0000.yuv`
+and `output_ViewId0001.yuv` per-frame. Replace the final ffmpeg
+hstack step with x265 `--multiview-config <yaml>` plus the
+appropriate input wiring (probably needs the YAML to list both
+view files as inputs). Output is an MKV/MOV with one base +
+one enhancement layer; standard players still see a 2D 1080p
+base view. Validation: re-decode the resulting file with
+FFmpeg 7.1+ `view_ids=0,1` and confirm both views come back.
+
+**Phase D.** Build the sister player (working name: `ripplay`,
+parallel to `ripsaw`). Tiny GTK4 + Adwaita app:
+
+- Library browser (reuses Ripsaw's `library_root` setting -- so
+  the sister project depends on `ripsaw` the library, not the
+  binary).
+- Per-file 3D format detection: MV-HEVC vs FSBS-already-packed
+  vs MVC vs 2D.
+- "Watch on Xreal" button picks the right playback mode.
+- For MV-HEVC: invoke mpv with a `--lavfi-complex` graph that
+  decodes both views and hstacks to 3840x1080, or shell ffmpeg
+  → fifo → mpv if `--lavfi-complex` doesn't expose `view_ids`.
+- For FSBS files: trivial passthrough, mpv fullscreen on the
+  Xreal output.
+- For MVC files: error message until libmvc exists ("re-archive
+  as MV-HEVC for live playback").
+- On-screen reminder of the Xreal OSD path (double-X →
+  Spatial Screen → 3D Mode → Full SBS) on first launch.
+
+Probable size: 500-1500 lines depending on whether the player
+shells to mpv or uses `libmpv` via the [mpv-rs](https://crates.io/crates/libmpv) bindings.
+
+**Phase E.** Apple Vision Pro atom injection. For each MV-HEVC
+archive, generate a `.mov` variant with the `vexu`/`hfov`/
+`lhvC`/`tapt` atoms set for direct Vision Pro consumption. No
+recompress. Bento4 `mp4edit` is the off-the-shelf option; a
+small Rust impl is also realistic (the atoms are well-documented
+in ISOBMFF terms).
+
+**Phase F (long-term).** `libmvc`. With MV-HEVC archival in
+place, libmvc is no longer correctness-required for any
+downstream target -- but it enables three things that are
+otherwise blocked:
+
+1. Live MVC playback in the sister player (no archive
+   transcode needed; just point at the rip).
+2. Faster MV-HEVC archival (libmvc + x265 vs ldecod + x265 --
+   ldecod is the throughput bottleneck today, running at maybe
+   5-10x slower than the encoder).
+3. Stream-direct-from-disc-no-rip-file workflow: Ripsaw could
+   skip the makemkvcon rip phase entirely for transient
+   "watch this disc" playback.
+
+### Sister-player technical hooks to verify
+
+Before committing to Phase D, prototype these:
+
+1. **Does `mpv --lavfi-complex` actually expose FFmpeg's HEVC
+   `view_ids` option?** If yes, the player is a one-liner mpv
+   invocation. If no, we need to pipe ffmpeg's decode output
+   through a fifo to mpv. Use one of Apple's published spatial
+   video samples (the iPhone 15 Pro spatial recordings or the
+   Vision Pro sample reels) as the test corpus.
+
+2. **Realtime MV-HEVC decode on the user's hardware**: confirm
+   24p playback runs without dropped frames at 1080p doubled.
+
+3. **Xreal OSD interaction with `mpv --fs`**: confirm that
+   fullscreen on the Xreal output puts a 3840x1080 framebuffer
+   on the glasses pixel-for-pixel, and that the user's
+   double-X-button → 3D Mode flow then splits correctly.
+
+### Open questions for future sessions
+
+- Whether mpv's `--lavfi-complex` supports the `view_ids`
+  selector. Strong "uncertain" -- not in the docs I read.
+- Whether x265 MV-HEVC base+enhancement encode is robust enough
+  in practice (vs the reference HM/HTM encoder) for our typical
+  3D BD source bitrate budget (~16-22 Mbps total).
+- Whether the Apple Vision Pro atom set is stable / documented
+  enough to write our own injector vs vendoring Bento4. brilly.tv's
+  guide says it works; SpatialMediaKit's source on macOS is a
+  reference.
+- 8-bit MV-HEVC encode in x265 is the current state of the art --
+  3D BD source is 8-bit so this is fine for our flow, but it
+  forecloses HDR delivery to Vision Pro if/when that becomes
+  interesting.
+- Whether the sister player should also handle the Vision-Pro-
+  atom injection or whether that's a separate Ripsaw export step.
+  Suggest: keep it in Ripsaw as another Output Options choice
+  ("Output: Apple Vision Pro spatial video"), since it's a
+  one-time transformation per archive.
+
 ## Sources
 
 - [Xreal One Series tutorial — 3D Mode](https://tutorials.xreal.com/docs/glasses/one-series/osd/3d-mode/)
