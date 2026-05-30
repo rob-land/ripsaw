@@ -165,11 +165,16 @@ fn nonempty(text: &str) -> Option<String> {
     }
 }
 
+/// Bind an AdwEntryRow so any text change immediately persists to
+/// disk. We previously used `connect_apply`, which only fires when
+/// the user presses Enter or clicks an apply-icon -- and we never
+/// surface that icon -- so users who typed an API key and just
+/// closed the dialog saw their input silently dropped.
 fn connect_entry_apply(
     row: &adw::EntryRow,
     update: impl Fn(&mut crate::settings::UserSettings, &str) + 'static,
 ) {
-    row.connect_apply(move |row| {
+    row.connect_changed(move |row| {
         let text = row.text().to_string();
         let mut guard = settings().lock().expect("settings mutex");
         update(&mut guard, &text);
@@ -183,7 +188,7 @@ fn connect_password_apply(
     row: &adw::PasswordEntryRow,
     update: impl Fn(&mut crate::settings::UserSettings, &str) + 'static,
 ) {
-    row.connect_apply(move |row| {
+    row.connect_changed(move |row| {
         let text = row.text().to_string();
         let mut guard = settings().lock().expect("settings mutex");
         update(&mut guard, &text);
