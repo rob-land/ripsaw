@@ -72,6 +72,10 @@ mod imp {
         /// Pre-fills disc title + per-title display titles when
         /// TheDiscDB has no match.
         pub bdmt: RefCell<Option<crate::identify::bdmt::BdmtMetadata>>,
+        /// Full-resolution bytes of the cover image the user picked
+        /// via the cover-art picker. `Some` means submit_corrections
+        /// should ship this as `cover.jpg` next to metadata.json.
+        pub picked_cover_jpg: RefCell<Option<Vec<u8>>>,
     }
 
     #[glib::object_subclass]
@@ -509,6 +513,12 @@ impl TitleListPage {
             self,
             move |_, _| page.start_upc_lookup()
         ));
+        let cover_action = gio::SimpleAction::new("pick-cover-art", None);
+        cover_action.connect_activate(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_, _| page.start_cover_art_pick()
+        ));
 
         let group = gio::SimpleActionGroup::new();
         group.add_action(&process_action);
@@ -517,6 +527,7 @@ impl TitleListPage {
         group.add_action(&tmdb_action);
         group.add_action(&imdb_action);
         group.add_action(&upc_action);
+        group.add_action(&cover_action);
         self.insert_action_group("page", Some(&group));
     }
 
@@ -587,8 +598,8 @@ impl TitleListPage {
     /// per-title edits from the title-detail page state.
     fn submit_corrections(&self) {
         use crate::identify::submission::{
-            github_repo_url, open_in_browser, stage_full_submission, stage_submission,
-            DiscSubmission,
+            github_repo_url, open_in_browser, stage_full_submission_with, stage_submission,
+            DiscSubmission, SubmissionArtifacts,
         };
         let disc_name = self
             .imp()
@@ -634,12 +645,18 @@ impl TitleListPage {
         // (metadata.json + release.json + disc0N.json) rather than
         // just the per-disc corrections file.
         let (movie, release) = self.read_submission_metadata();
+        let artifacts = SubmissionArtifacts {
+            cover_jpg: self.imp().picked_cover_jpg.borrow().clone(),
+            ..SubmissionArtifacts::default()
+        };
         let staged = if !movie.title.is_empty()
             && (movie.year.is_some()
                 || movie.tmdb_id.is_some()
                 || movie.imdb_id.is_some())
         {
-            stage_full_submission(&movie, &release, &disc, &scan_snapshot, identity, &edits)
+            stage_full_submission_with(
+                &movie, &release, &disc, &scan_snapshot, identity, &edits, &artifacts,
+            )
         } else {
             stage_submission(&disc, &scan_snapshot, identity, &edits)
         };
@@ -919,6 +936,124 @@ impl TitleListPage {
         if let Some(window) = self.parent_window() {
             window.add_toast(adw::Toast::builder().title(&summary).timeout(4).build());
         }
+    }
+
+    /// Open the cover-art picker. Requires a TMDB ID + a TMDB API
+    /// key; toasts when either is missing. The picker presents the
+    /// highest-voted posters; on confirm we download the full-res
+    /// JPEG and stash its bytes for the submission stager to attach
+    /// as cover.jpg.
+    fn start_cover_art_pick(&self) {
+        let id_text = self.imp().tmdb_id_row.text().trim().to_string();
+        let Ok(tmdb_id) = id_text.parse::<u64>() else {
+            self.toast_in_window("Enter a numeric TMDb ID first.");
+            return;
+        };
+        let key = crate::settings::settings()
+            .lock()
+            .expect("settings mutex")
+            .tmdb_api_key
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if key.is_empty() {
+            self.toast_in_window(
+                "Set the TMDB API key in Preferences first (free, from themoviedb.org).",
+            );
+            return;
+        }
+        let kind = if self.imp().series_toggle.is_active() { "tv" } else { "movie" };
+        let dialog = crate::ui::cover_art_picker_dialog::CoverArtPickerDialog::default();
+
+        // Wire the confirm callback before the network request so a
+        // very fast response doesn't fire before we're listening.
+        dialog.on_confirm(clone!(
+            #[weak(rename_to = page)] self,
+            move |picked| page.download_picked_cover(picked, &key)
+        ));
+
+        if let Some(root) = self.root() {
+            if let Some(window) = root.downcast::<gtk::Window>().ok() {
+                dialog.present(Some(&window));
+            } else {
+                dialog.present(None::<&gtk::Widget>);
+            }
+        } else {
+            dialog.present(None::<&gtk::Widget>);
+        }
+
+        // Fetch the image list and hand it to the dialog. We don't
+        // chain `load_posters` into the dialog's own ctor because
+        // tmdb fetch is async and the dialog should already be open
+        // showing its spinner state.
+        let key2 = crate::settings::settings()
+            .lock()
+            .expect("settings mutex")
+            .tmdb_api_key
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let (tx, rx) =
+            async_channel::bounded::<anyhow::Result<crate::identify::tmdb::TmdbImageSet>>(1);
+        let kind = kind.to_string();
+        crate::runtime::tokio_runtime().spawn(async move {
+            let client = crate::identify::tmdb::TmdbClient::new(key2);
+            let _ = tx.send(client.fetch_images(&kind, tmdb_id).await).await;
+        });
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak] dialog,
+            #[weak(rename_to = page)] self,
+            async move {
+                match rx.recv().await {
+                    Ok(Ok(set)) => dialog.load_posters(set.posters),
+                    Ok(Err(e)) => {
+                        tracing::warn!("TMDB images fetch failed: {e:#}");
+                        page.toast_in_window(&format!("Could not fetch posters: {e}"));
+                        let _ = dialog.close();
+                    }
+                    Err(_) => {
+                        let _ = dialog.close();
+                    }
+                }
+            }
+        ));
+    }
+
+    fn download_picked_cover(
+        &self,
+        picked: crate::identify::tmdb::TmdbImage,
+        api_key: &str,
+    ) {
+        let key = api_key.to_string();
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<Vec<u8>>>(1);
+        crate::runtime::tokio_runtime().spawn(async move {
+            let client = crate::identify::tmdb::TmdbClient::new(key);
+            let _ = tx
+                .send(client.download_image(&picked.file_path, "original").await)
+                .await;
+        });
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak(rename_to = page)] self,
+            async move {
+                match rx.recv().await {
+                    Ok(Ok(bytes)) => {
+                        let summary = format!(
+                            "Cover art picked ({} KB) — will ship as cover.jpg",
+                            bytes.len() / 1024
+                        );
+                        page.imp().picked_cover_jpg.replace(Some(bytes));
+                        page.toast_in_window(&summary);
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("download cover failed: {e:#}");
+                        page.toast_in_window(&format!("Cover download failed: {e}"));
+                    }
+                    Err(_) => {}
+                }
+            }
+        ));
     }
 
     fn start_sonarr_lookup(&self) {

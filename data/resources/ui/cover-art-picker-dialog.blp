@@ -1,0 +1,84 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $RipsawCoverArtPickerDialog: Adw.Dialog {
+  title: _("Pick cover art");
+  content-width: 760;
+  content-height: 620;
+
+  Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar header {
+      title-widget: Adw.WindowTitle {
+        title: _("Pick cover art");
+        subtitle: _("Highest-voted TMDB posters");
+      };
+
+      [end]
+      Button confirm_button {
+        label: _("Use selected");
+        action-name: "picker.confirm";
+        sensitive: false;
+        styles ["suggested-action"]
+      }
+    }
+
+    content: Adw.Bin status_bin {
+      child: Stack stack {
+        transition-type: crossfade;
+
+        StackPage {
+          name: "loading";
+          child: Box {
+            orientation: vertical;
+            valign: center;
+            halign: center;
+            spacing: 14;
+
+            Adw.Spinner {
+              width-request: 48;
+              height-request: 48;
+            }
+
+            Label {
+              label: _("Fetching posters…");
+              styles ["title-3"]
+            }
+          };
+        }
+
+        StackPage {
+          name: "empty";
+          child: Adw.StatusPage {
+            icon-name: "image-missing-symbolic";
+            title: _("No posters returned by TMDB");
+            description: _("You can still submit without cover art -- it's recommended, not required.");
+          };
+        }
+
+        StackPage {
+          name: "grid";
+          child: ScrolledWindow {
+            hscrollbar-policy: never;
+            vscrollbar-policy: automatic;
+            propagate-natural-height: true;
+
+            FlowBox flowbox {
+              orientation: horizontal;
+              homogeneous: true;
+              min-children-per-line: 2;
+              max-children-per-line: 3;
+              column-spacing: 12;
+              row-spacing: 12;
+              margin-top: 12;
+              margin-bottom: 12;
+              margin-start: 12;
+              margin-end: 12;
+              selection-mode: single;
+            }
+          };
+        }
+      };
+    };
+  }
+}

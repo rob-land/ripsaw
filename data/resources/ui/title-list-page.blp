@@ -89,6 +89,14 @@ template $RipsawTitleListPage: Adw.NavigationPage {
             tooltip-text: _("Fetch title / year / plot / tagline / IMDb cross-ref from TMDB");
             icon-name: "system-search-symbolic";
           }
+
+          [suffix]
+          Button cover_art_button {
+            valign: center;
+            action-name: "page.pick-cover-art";
+            tooltip-text: _("Pick a TMDB poster to ship as cover.jpg with the TheDiscDB submission");
+            icon-name: "image-x-generic-symbolic";
+          }
         }
 
         Adw.EntryRow imdb_id_row {

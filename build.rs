@@ -16,6 +16,7 @@ const BLUEPRINTS: &[&str] = &[
     "data/resources/ui/title-detail-page.blp",
     "data/resources/ui/rip-progress-page.blp",
     "data/resources/ui/preferences-dialog.blp",
+    "data/resources/ui/cover-art-picker-dialog.blp",
     "data/resources/ui/help-overlay.blp",
 ];
 
