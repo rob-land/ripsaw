@@ -573,6 +573,10 @@ impl TitleListPage {
             region_code: opt(&self.imp().region_code_row),
             upc: opt(&self.imp().upc_row),
             asin: opt(&self.imp().asin_row),
+            image_url: None,
+            release_date: None,
+            contributors: Vec::new(),
+            groups: Vec::new(),
         };
         (movie, release)
     }

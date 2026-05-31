@@ -314,6 +314,18 @@ pub struct ReleaseMetadata {
     pub region_code: Option<String>,
     pub upc: Option<String>,
     pub asin: Option<String>,
+    /// Relative path to the front-cover image, e.g.
+    /// `Series/the-many-loves-of-dobie-gillis-1959/complete-series-boxset.jpg`.
+    /// Format matches TheDiscDB convention: `<Type>/<slug>/<release-slug>.jpg`.
+    pub image_url: Option<String>,
+    /// ISO-8601 release date, e.g. `"2013-04-02T00:00:00+00:00"`.
+    pub release_date: Option<String>,
+    /// GitHub usernames credited with this submission. Renderered as
+    /// `[{Name, Source: "github"}, ...]`. Empty `Vec` skips the field.
+    pub contributors: Vec<String>,
+    /// Publisher / studio identifiers (e.g. "Criterion", "Shout
+    /// Factory"). Empty `Vec` renders `[]` (matches existing records).
+    pub groups: Vec<String>,
 }
 
 /// Render the movie-level `metadata.json` per TheDiscDB/data shape.
@@ -380,7 +392,72 @@ pub fn render_release_json(release: &ReleaseMetadata) -> String {
     if let Some(a) = &release.asin {
         obj["Asin"] = serde_json::Value::String(a.clone());
     }
+    if let Some(u) = &release.image_url {
+        obj["ImageUrl"] = serde_json::Value::String(u.clone());
+    }
+    if let Some(d) = &release.release_date {
+        obj["ReleaseDate"] = serde_json::Value::String(d.clone());
+    }
+    // DateAdded is always stamped at staging time; the submitter
+    // doesn't supply it. Use the local timezone offset for
+    // consistency with existing entries in the catalog.
+    obj["DateAdded"] = serde_json::Value::String(now_iso8601_local());
+    // Contributors: skip the field entirely when empty rather than
+    // emit an empty array. Existing records always include at least
+    // one contributor.
+    if !release.contributors.is_empty() {
+        let contributors: Vec<serde_json::Value> = release
+            .contributors
+            .iter()
+            .map(|name| serde_json::json!({"Name": name, "Source": "github"}))
+            .collect();
+        obj["Contributors"] = serde_json::Value::Array(contributors);
+    }
+    obj["Groups"] = serde_json::Value::Array(
+        release
+            .groups
+            .iter()
+            .cloned()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
     serde_json::to_string_pretty(&obj).expect("serde_json never fails on owned data")
+}
+
+/// UTC ISO-8601 timestamp used as the `DateAdded` stamp on staged
+/// release.json files. Existing entries in the catalog use the
+/// submitter's local timezone, but UTC is valid ISO-8601 and avoids
+/// pulling in a chrono/libc dependency just for the offset.
+fn now_iso8601_local() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (y, mo, d, h, mi, s) = epoch_to_ymdhms(secs);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}+00:00")
+}
+
+fn epoch_to_ymdhms(epoch: i64) -> (i64, u32, u32, u32, u32, u32) {
+    // Days/seconds since unix epoch. Computes calendar date in the
+    // Gregorian proleptic calendar; correct for all sane future
+    // timestamps. Algorithm: Howard Hinnant's `civil_from_days`.
+    let days = epoch.div_euclid(86_400);
+    let seconds = epoch.rem_euclid(86_400);
+    let h = (seconds / 3600) as u32;
+    let mi = ((seconds % 3600) / 60) as u32;
+    let s = (seconds % 60) as u32;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as i64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let mo = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let yy = y + if mo <= 2 { 1 } else { 0 };
+    (yy, mo, d, h, mi, s)
 }
 
 /// Turn a movie title + year into the slug TheDiscDB uses (lowercase,
@@ -424,6 +501,23 @@ fn sort_title(title: &str) -> String {
     trimmed.to_string()
 }
 
+/// Optional artifacts that go alongside the JSON in the staged
+/// submission: movie-level cover image, movie-level raw TMDB JSON
+/// dump, release-level front-cover image. All optional -- bytes
+/// missing means the file isn't written.
+#[derive(Debug, Default, Clone)]
+pub struct SubmissionArtifacts {
+    /// Movie-level cover image (`cover.jpg` next to metadata.json).
+    /// Typically a TMDB poster.
+    pub cover_jpg: Option<Vec<u8>>,
+    /// Movie-level raw TMDB JSON dump (`tmdb.json`).
+    pub tmdb_json: Option<String>,
+    /// Release-level front cover image (`front.jpg` in the release
+    /// folder). Photograph of the physical packaging when the user
+    /// can supply one; otherwise skipped.
+    pub front_jpg: Option<Vec<u8>>,
+}
+
 /// Stage a full new-disc submission: movie metadata.json,
 /// release.json, and the per-disc disc0N.json under the staging
 /// root mirroring TheDiscDB's data tree layout. Returns the
@@ -436,22 +530,57 @@ pub fn stage_full_submission(
     identity: Option<&Identity>,
     edits: &HashMap<u32, TitleEdit>,
 ) -> anyhow::Result<std::path::PathBuf> {
+    stage_full_submission_with(
+        movie,
+        release,
+        disc,
+        scan,
+        identity,
+        edits,
+        &SubmissionArtifacts::default(),
+    )
+}
+
+/// Same as `stage_full_submission` plus optional artifacts (cover
+/// image, raw TMDB dump, front-cover photo). Callers that have
+/// already fetched these from TMDB pass them here so the staging
+/// tree matches the shape of existing TheDiscDB records.
+pub fn stage_full_submission_with(
+    movie: &MovieMetadata,
+    release: &ReleaseMetadata,
+    disc: &DiscSubmission,
+    scan: &MakemkvScan,
+    identity: Option<&Identity>,
+    edits: &HashMap<u32, TitleEdit>,
+    artifacts: &SubmissionArtifacts,
+) -> anyhow::Result<std::path::PathBuf> {
     let folder_name = match movie.year {
         Some(y) => format!("{} ({y})", movie.title),
         None => movie.title.clone(),
     };
-    let dir = staging_root()
+    let movie_dir = staging_root()
         .join("data")
         .join(movie.content_type.dir_segment())
-        .join(sanitize_dir(&folder_name))
-        .join(sanitize_dir(&release.slug));
+        .join(sanitize_dir(&folder_name));
+    let dir = movie_dir.join(sanitize_dir(&release.slug));
     std::fs::create_dir_all(&dir)?;
 
-    let metadata_path = dir.parent().unwrap().join("metadata.json");
+    let metadata_path = movie_dir.join("metadata.json");
     std::fs::write(&metadata_path, render_metadata_json(movie))?;
+
+    if let Some(bytes) = &artifacts.cover_jpg {
+        std::fs::write(movie_dir.join("cover.jpg"), bytes)?;
+    }
+    if let Some(json) = &artifacts.tmdb_json {
+        std::fs::write(movie_dir.join("tmdb.json"), json)?;
+    }
 
     let release_path = dir.join("release.json");
     std::fs::write(&release_path, render_release_json(release))?;
+
+    if let Some(bytes) = &artifacts.front_jpg {
+        std::fs::write(dir.join("front.jpg"), bytes)?;
+    }
 
     let disc_filename = format!("disc{:02}.json", disc.disc_index.max(1));
     let disc_path = dir.join(&disc_filename);
@@ -735,6 +864,7 @@ mod tests {
             region_code: Some("1".into()),
             upc: Some("883904346708".into()),
             asin: None,
+            ..Default::default()
         };
         let j: serde_json::Value = serde_json::from_str(&render_release_json(&r)).unwrap();
         assert_eq!(j["Slug"], "2020-james-bond-collection-blu-ray");

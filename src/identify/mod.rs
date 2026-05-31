@@ -11,6 +11,7 @@ pub mod submission;
 pub mod thediscdb;
 pub mod tmdb;
 pub mod submit;
+pub mod submit_pr;
 pub mod upc;
 
 use std::path::PathBuf;

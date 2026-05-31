@@ -104,6 +104,76 @@ impl TmdbClient {
         })
     }
 
+    /// Fetch the raw JSON for a movie/series so the submission tree
+    /// can drop it next to metadata.json as `tmdb.json`. Returns the
+    /// parsed serde_json Value so callers can serialize with
+    /// `to_string_pretty`. Use `kind = "movie"` or `"tv"`.
+    pub async fn fetch_raw(&self, kind: &str, tmdb_id: u64) -> Result<serde_json::Value> {
+        let url = format!("{BASE_URL}/{kind}/{tmdb_id}?api_key={}", self.api_key);
+        let body: serde_json::Value = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .context("GET TMDB raw")?
+            .error_for_status()
+            .context("TMDB raw HTTP status")?
+            .json()
+            .await
+            .context("parse TMDB raw JSON")?;
+        Ok(body)
+    }
+
+    /// Fetch the images list for a movie/series. Returns posters,
+    /// backdrops, and logos sorted by `vote_average` descending so
+    /// the caller can pick the top entry (or surface a picker).
+    pub async fn fetch_images(&self, kind: &str, tmdb_id: u64) -> Result<TmdbImageSet> {
+        let url = format!("{BASE_URL}/{kind}/{tmdb_id}/images?api_key={}", self.api_key);
+        let body: ImagesResponse = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .context("GET TMDB images")?
+            .error_for_status()
+            .context("TMDB images HTTP status")?
+            .json()
+            .await
+            .context("parse TMDB images JSON")?;
+        let sort_by_vote = |mut v: Vec<TmdbImage>| {
+            v.sort_by(|a, b| {
+                b.vote_average
+                    .partial_cmp(&a.vote_average)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            v
+        };
+        Ok(TmdbImageSet {
+            posters: sort_by_vote(body.posters),
+            backdrops: sort_by_vote(body.backdrops),
+            logos: sort_by_vote(body.logos),
+        })
+    }
+
+    /// Download a TMDB image by its `file_path` (the leading-slash
+    /// path from the images endpoint) at the supplied size token
+    /// (e.g. "original", "w500"). Returns the bytes.
+    pub async fn download_image(&self, file_path: &str, size: &str) -> Result<Vec<u8>> {
+        let url = format!("https://image.tmdb.org/t/p/{size}{file_path}");
+        let bytes = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .context("GET TMDB image")?
+            .error_for_status()
+            .context("TMDB image HTTP status")?
+            .bytes()
+            .await
+            .context("read TMDB image bytes")?;
+        Ok(bytes.to_vec())
+    }
+
     /// Resolve an IMDb ID ("tt0…") to TMDB details. Uses TMDB's
     /// `/find/{imdb}?external_source=imdb_id` endpoint, which returns
     /// matches across movie / tv / person; we take the first hit in
@@ -185,6 +255,40 @@ struct FindResponse {
 #[derive(Debug, Deserialize)]
 struct FindRef {
     id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TmdbImageSet {
+    pub posters: Vec<TmdbImage>,
+    pub backdrops: Vec<TmdbImage>,
+    pub logos: Vec<TmdbImage>,
+}
+
+/// One image entry from TMDB's `/images` endpoint. We expose just the
+/// fields callers actually use; everything else is dropped.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TmdbImage {
+    pub file_path: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub iso_639_1: Option<String>,
+    #[serde(default)]
+    pub vote_average: f64,
+    #[serde(default)]
+    pub vote_count: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImagesResponse {
+    #[serde(default)]
+    posters: Vec<TmdbImage>,
+    #[serde(default)]
+    backdrops: Vec<TmdbImage>,
+    #[serde(default)]
+    logos: Vec<TmdbImage>,
 }
 
 #[cfg(test)]
