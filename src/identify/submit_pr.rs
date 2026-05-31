@@ -36,6 +36,12 @@ pub struct PrPushRequest<'a> {
     /// Absolute path to the staged submission's `data/` root (the
     /// directory that contains `movie/` or `series/` subfolders).
     pub staged_data_root: &'a Path,
+    /// Subpath under `staged_data_root` that contains *just this
+    /// submission's* tree (e.g. `series/The Many Loves of Dobie
+    /// Gillis (1959)`). Required because the staging tree
+    /// accumulates older submissions; without scoping, an earlier
+    /// staged record would silently land in this PR.
+    pub staged_subpath: &'a Path,
     /// Title slug used to build the branch name + PR title.
     pub slug: &'a str,
     /// Human-readable title for the PR (e.g. "The Many Loves of
@@ -56,7 +62,7 @@ pub fn push_pr(req: &PrPushRequest<'_>) -> Result<PrPushResult> {
 
     let branch = build_branch_name(req.slug);
     create_branch(&checkout, &branch)?;
-    copy_staged_data(req.staged_data_root, &checkout)?;
+    copy_staged_data(req.staged_data_root, req.staged_subpath, &checkout)?;
     commit_and_push(&checkout, &branch, req.pr_title)?;
     let pr_url = open_pr(&fork_repo, &branch, req.pr_title, req.pr_body)?;
 
@@ -92,14 +98,14 @@ fn ensure_fork(user: &str) -> Result<String> {
     if probe.status.success() {
         return Ok(candidate);
     }
-    // Not found -- create.
+    // Not found -- create. `gh repo fork <repo>` defaults to no
+    // remote-add and no clone; we manage our own clone explicitly.
+    // `--default-branch-only` keeps the fork lean.
     let status = Command::new("gh")
         .args([
             "repo",
             "fork",
             UPSTREAM_REPO,
-            "--remote=false",
-            "--clone=false",
             "--default-branch-only",
         ])
         .status()
@@ -229,13 +235,25 @@ fn create_branch(checkout: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn copy_staged_data(staged_data_root: &Path, checkout: &Path) -> Result<()> {
-    // We copy the entire `data/` tree as a unit. `cp -r src/. dst/`
-    // merges src into dst's data/ directory without nesting an extra
-    // level. The trailing `.` is what makes cp behave that way.
-    let dst = checkout.join("data");
+fn copy_staged_data(
+    staged_data_root: &Path,
+    staged_subpath: &Path,
+    checkout: &Path,
+) -> Result<()> {
+    // Scope the copy to a single submission's subtree so an older
+    // staged record from a previous session doesn't get swept into
+    // this PR. `cp -r src/. dst/` merges src into dst without an
+    // extra nesting level; the trailing `.` is what makes cp do that.
+    let dst = checkout.join("data").join(staged_subpath);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::create_dir_all(&dst)?;
-    let src_arg = format!("{}/.", staged_data_root.display());
+    let src = staged_data_root.join(staged_subpath);
+    if !src.is_dir() {
+        bail!("staged subpath {} is not a directory", src.display());
+    }
+    let src_arg = format!("{}/.", src.display());
     let status = Command::new("cp")
         .args(["-r", &src_arg, dst.to_str().unwrap()])
         .status()?;

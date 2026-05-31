@@ -76,7 +76,8 @@ async fn main() -> Result<()> {
         upc: Some(UPC.to_string()),
         asin: Some(ASIN.to_string()),
         image_url: Some(image_url),
-        release_date: Some("2013-04-02T00:00:00+00:00".to_string()),
+        // Source: blu-ray.com listing for the Shout! Factory complete-series boxset.
+        release_date: Some("2013-07-02T00:00:00+00:00".to_string()),
         contributors: vec![gh_user.clone()],
         groups: vec!["Shout Factory".to_string()],
     };
@@ -119,6 +120,7 @@ async fn main() -> Result<()> {
 
     // 4. Open the PR.
     let data_root = staging_root().join("data");
+    let subpath = std::path::PathBuf::from("series").join(&folder_name);
     let body = format!(
         "Adds {SERIES_TITLE} ({SERIES_YEAR}) S1 D1 + D2 (Shout Factory complete-series boxset).\n\n\
          - Source: real disc scans ({}) via Ripsaw\n\
@@ -133,6 +135,7 @@ async fn main() -> Result<()> {
     println!("\nOpening PR against TheDiscDb/data...");
     let result = push_pr(&PrPushRequest {
         staged_data_root: &data_root,
+        staged_subpath: &subpath,
         slug: &movie_slug,
         pr_title: &pr_title,
         pr_body: &body,
