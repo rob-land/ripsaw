@@ -48,6 +48,7 @@ mod imp {
         #[template_child] pub locale_row: TemplateChild<adw::EntryRow>,
         #[template_child] pub region_code_row: TemplateChild<adw::EntryRow>,
         #[template_child] pub upc_row: TemplateChild<adw::EntryRow>,
+        #[template_child] pub asin_row: TemplateChild<adw::EntryRow>,
         #[allow(dead_code)]
         #[template_child] pub submission_group: TemplateChild<adw::PreferencesGroup>,
 
@@ -502,6 +503,12 @@ impl TitleListPage {
             self,
             move |_, _| page.start_imdb_lookup()
         ));
+        let upc_action = gio::SimpleAction::new("lookup-upc", None);
+        upc_action.connect_activate(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_, _| page.start_upc_lookup()
+        ));
 
         let group = gio::SimpleActionGroup::new();
         group.add_action(&process_action);
@@ -509,6 +516,7 @@ impl TitleListPage {
         group.add_action(&submit_action);
         group.add_action(&tmdb_action);
         group.add_action(&imdb_action);
+        group.add_action(&upc_action);
         self.insert_action_group("page", Some(&group));
     }
 
@@ -564,7 +572,7 @@ impl TitleListPage {
             locale: opt(&self.imp().locale_row),
             region_code: opt(&self.imp().region_code_row),
             upc: opt(&self.imp().upc_row),
-            asin: None,
+            asin: opt(&self.imp().asin_row),
         };
         (movie, release)
     }
@@ -853,6 +861,59 @@ impl TitleListPage {
                     .timeout(3)
                     .build(),
             );
+        }
+    }
+
+    /// Look up the value currently in `upc_row` via UPCitemDB. Pre-
+    /// fills the ASIN and `release_title` rows when both are empty so
+    /// a user edit isn't clobbered. Free trial tier -- no API key.
+    fn start_upc_lookup(&self) {
+        let upc = self.imp().upc_row.text().trim().to_string();
+        if upc.is_empty() {
+            self.toast_in_window("Enter the UPC printed on the disc packaging first.");
+            return;
+        }
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<crate::identify::upc::UpcDetails>>(1);
+        crate::runtime::tokio_runtime().spawn(async move {
+            let client = crate::identify::upc::UpcClient::new();
+            let _ = tx.send(client.lookup(&upc).await).await;
+        });
+
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak(rename_to = page)]
+            self,
+            async move {
+                match rx.recv().await {
+                    Ok(Ok(d)) => page.apply_upc_details(&d),
+                    Ok(Err(e)) => {
+                        tracing::error!("UPC lookup failed: {e:#}");
+                        page.toast_in_window(&format!("UPC lookup failed: {e}"));
+                    }
+                    Err(e) => tracing::error!("UPC channel closed: {e}"),
+                }
+            }
+        ));
+    }
+
+    fn apply_upc_details(&self, d: &crate::identify::upc::UpcDetails) {
+        if let Some(asin) = &d.asin {
+            if self.imp().asin_row.text().trim().is_empty() {
+                self.imp().asin_row.set_text(asin);
+            }
+        }
+        if let Some(title) = &d.title {
+            if self.imp().release_title_row.text().trim().is_empty() {
+                self.imp().release_title_row.set_text(title);
+            }
+        }
+        let summary = match (&d.asin, &d.brand) {
+            (Some(a), Some(b)) => format!("UPC matched: {b} (ASIN {a})"),
+            (Some(a), None) => format!("UPC matched (ASIN {a})"),
+            (None, Some(b)) => format!("UPC matched: {b}"),
+            (None, None) => "UPC matched (no ASIN or brand on file)".to_string(),
+        };
+        if let Some(window) = self.parent_window() {
+            window.add_toast(adw::Toast::builder().title(&summary).timeout(4).build());
         }
     }
 

@@ -11,6 +11,7 @@ pub mod submission;
 pub mod thediscdb;
 pub mod tmdb;
 pub mod submit;
+pub mod upc;
 
 use std::path::PathBuf;
 use std::time::SystemTime;

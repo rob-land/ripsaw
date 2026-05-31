@@ -129,6 +129,18 @@ template $RipsawTitleListPage: Adw.NavigationPage {
 
         Adw.EntryRow upc_row {
           title: _("UPC / barcode");
+
+          [suffix]
+          Button upc_lookup_button {
+            valign: center;
+            action-name: "page.lookup-upc";
+            tooltip-text: _("Look up the UPC on UPCitemDB to fill in ASIN + release title");
+            icon-name: "system-search-symbolic";
+          }
+        }
+
+        Adw.EntryRow asin_row {
+          title: _("Amazon ASIN");
         }
       }
 
