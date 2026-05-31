@@ -55,6 +55,12 @@ pub struct IdentificationResult {
     /// pre-fill data on the title list page when TheDiscDB has no
     /// match for the disc.
     pub bdmt: Option<crate::identify::bdmt::BdmtMetadata>,
+    /// TheDiscDB-style region code derived from the DVD VMG when the
+    /// source is a DVD-Video disc. `"0"` for region-free, `"1"`..`"8"`
+    /// for region-locked discs. `None` for Blu-ray / UHD (region info
+    /// lives in AACS, which is stripped on rip) and when the disc isn't
+    /// mounted.
+    pub dvd_region_code: Option<String>,
 }
 
 impl IdentificationResult {
@@ -88,6 +94,10 @@ pub async fn identify_physical_disc(
     let bdmt = crate::identify::bdmt::read_from_mount(&mount_path)
         .ok()
         .flatten();
+    let dvd_region_code = crate::identify::dvd::read_region_code(&mount_path)
+        .ok()
+        .flatten()
+        .map(|s| s.to_string());
 
     Ok(IdentificationResult {
         scan: scan_data,
@@ -99,6 +109,7 @@ pub async fn identify_physical_disc(
         source_file: None,
         has_mvc,
         bdmt,
+        dvd_region_code,
     })
 }
 
@@ -143,6 +154,7 @@ pub async fn identify_mkv(mkv_path: PathBuf) -> Result<IdentificationResult> {
         source_file: Some(mkv_path),
         has_mvc,
         bdmt: None,
+        dvd_region_code: None,
     })
 }
 
@@ -294,6 +306,10 @@ pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
     let bdmt = mount
         .as_ref()
         .and_then(|m| crate::identify::bdmt::read_from_mount(&m.mount_point).ok().flatten());
+    let dvd_region_code = mount
+        .as_ref()
+        .and_then(|m| crate::identify::dvd::read_region_code(&m.mount_point).ok().flatten())
+        .map(|s| s.to_string());
     Ok(IdentificationResult {
         scan: scan_data,
         mount,
@@ -304,5 +320,6 @@ pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
         source_file: Some(iso_path),
         has_mvc,
         bdmt,
+        dvd_region_code,
     })
 }

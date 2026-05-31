@@ -223,6 +223,14 @@ impl TitleListPage {
                 .release_slug_row
                 .set_text(&identity.release_slug);
         }
+        // DVD region pre-fill. Pulled from VIDEO_TS.IFO byte 0x23 via
+        // identify::dvd. Only fires when the editor row is still empty
+        // so a user edit isn't clobbered on re-population.
+        if let Some(region) = &result.dvd_region_code {
+            if self.imp().region_code_row.text().trim().is_empty() {
+                self.imp().region_code_row.set_text(region);
+            }
+        }
         if let Some(name) = &result.scan.disc.name {
             self.set_title(name);
         }
@@ -1268,6 +1276,7 @@ fn build_pseudo_identification(
         source_file: None,
         has_mvc: false,
         bdmt: None,
+        dvd_region_code: None,
     }
 }
 

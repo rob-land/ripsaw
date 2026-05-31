@@ -3,6 +3,7 @@
 pub mod bdmt;
 pub mod composite;
 pub mod disc_hash;
+pub mod dvd;
 pub mod ffprobe;
 pub mod from_scan;
 pub mod pipeline;

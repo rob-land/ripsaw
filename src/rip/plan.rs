@@ -531,6 +531,7 @@ mod tests {
             source_file: None,
             has_mvc: false,
             bdmt: None,
+            dvd_region_code: None,
         }
     }
 

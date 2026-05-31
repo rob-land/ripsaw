@@ -91,10 +91,59 @@ impl RipsawWindow {
                 return;
             }
         };
-        // For now, just pick the first mounted disc. A picker UI for
-        // multi-drive systems can come later.
-        let disc = discs.into_iter().next().expect("non-empty discs");
-        self.scan_physical_disc(disc);
+        if discs.len() == 1 {
+            let disc = discs.into_iter().next().expect("non-empty discs");
+            self.scan_physical_disc(disc);
+            return;
+        }
+        self.present_drive_picker(discs);
+    }
+
+    /// Pop an AlertDialog with one response per mounted optical drive
+    /// when more than one is present. Each row shows the volume label
+    /// and the underlying `/dev/srN` device so the user can tell two
+    /// identically-labelled discs (e.g. seasons of the same boxset)
+    /// apart.
+    fn present_drive_picker(&self, discs: Vec<DetectedDisc>) {
+        let dialog = adw::AlertDialog::new(
+            Some("Choose a disc"),
+            Some(&format!(
+                "{} optical drives have a disc mounted. Pick which one to scan.",
+                discs.len()
+            )),
+        );
+        dialog.add_response("cancel", "_Cancel");
+        for (i, disc) in discs.iter().enumerate() {
+            let id = format!("drive-{i}");
+            let label = format_drive_choice(disc);
+            dialog.add_response(&id, &label);
+        }
+        dialog.set_default_response(Some("drive-0"));
+        dialog.set_close_response("cancel");
+
+        let discs_for_response = discs;
+        dialog.connect_response(
+            None,
+            clone!(
+                #[weak(rename_to = window)]
+                self,
+                move |_dialog, resp| {
+                    if resp == "cancel" {
+                        return;
+                    }
+                    let Some(idx) = resp
+                        .strip_prefix("drive-")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    else {
+                        return;
+                    };
+                    if let Some(disc) = discs_for_response.get(idx).cloned() {
+                        window.scan_physical_disc(disc);
+                    }
+                }
+            ),
+        );
+        dialog.present(Some(self));
     }
 
     fn scan_physical_disc(&self, disc: DetectedDisc) {
@@ -494,6 +543,15 @@ mod tests {
         assert!(!is_iso_like(Path::new("foo.mkv")));
         assert!(!is_iso_like(Path::new("foo")));
     }
+}
+
+fn format_drive_choice(disc: &DetectedDisc) -> String {
+    let label = disc
+        .label
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(no label)");
+    format!("{label}  ({})", disc.device.display())
 }
 
 fn describe_disc_type(t: crate::identify::DiscType) -> &'static str {
