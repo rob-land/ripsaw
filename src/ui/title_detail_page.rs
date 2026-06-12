@@ -8,7 +8,7 @@ use std::cell::RefCell;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::glib::{self, clone};
+use gtk::glib::{self};
 use gtk::CompositeTemplate;
 
 use crate::identify::TitleRole;
