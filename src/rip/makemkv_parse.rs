@@ -319,6 +319,23 @@ pub struct TitleAttributes {
     pub streams: Vec<StreamAttributes>,
 }
 
+impl TitleAttributes {
+    /// True when this title carries an MVC (Multiview Video Coding)
+    /// video stream — i.e. it's the 3D version of the feature. MakeMKV
+    /// reports the dependent view with a codec name containing "MVC"
+    /// (e.g. short "MVC", long "Mpeg4-MVC-3D"). Used both to tag the
+    /// output with a 3D variant suffix and to decide whether a 3D
+    /// conversion has anything to work with.
+    pub fn has_mvc_stream(&self) -> bool {
+        self.streams.iter().any(|s| {
+            let short = s.codec_short.as_deref().unwrap_or("");
+            let long = s.codec_long.as_deref().unwrap_or("");
+            short.to_ascii_uppercase().contains("MVC")
+                || long.to_ascii_uppercase().contains("MVC")
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StreamAttributes {
     pub stream: u32,

@@ -7,9 +7,10 @@
 // 2. `MvcInlineLaced` source: mkvextract -> JM ldecod -> ffmpeg compose.
 //    Real MVC decode end-to-end. Slow because ldecod is the JVT
 //    reference implementation, not an optimised decoder.
-// 3. `MvcWithBlockAdditions` source: not yet implemented -- needs an
-//    extractor that interleaves base-track NALs with the per-frame
-//    BlockAdditions before feeding ldecod.
+// 3. `MvcWithBlockAdditions` source: our EBML walker
+//    (src/mvc/mkv_extract.rs) interleaves base-track NALs with the
+//    per-frame BlockAdditions into an Annex B stream, then feeds the
+//    same ldecod -> ffmpeg compose tail as path 2.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

@@ -195,10 +195,47 @@ pub fn run_rip_queue(
                         }
                     }
                     None => {
-                        tracing::info!(
-                            "no MVC/stereo info in {}; skipping post-rip convert",
-                            landed.display()
+                        // The user asked for a 3D output, but the ripped
+                        // MKV has no MVC/stereo track to convert. Surface
+                        // this in the rip log (not just tracing) so the
+                        // missing SBS file isn't a silent no-op. The most
+                        // common cause is a MakeMKV older than v1.18, which
+                        // drops the dependent-view track even with our
+                        // keep-MVC profile -- probe and say so when that's
+                        // the case so the fix is actionable.
+                        let detail = match crate::rip::makemkv::probe().await {
+                            crate::rip::makemkv::ProbeOutcome::Outdated(v)
+                            | crate::rip::makemkv::ProbeOutcome::Ok(v)
+                                if !v.supports_mvc() =>
+                            {
+                                format!(
+                                    "MakeMKV v{}.{}.{} drops the MVC dependent-view \
+                                     track on 3D Blu-rays — upgrade to v1.18+ and \
+                                     re-rip to get a 3D source.",
+                                    v.major, v.minor, v.patch
+                                )
+                            }
+                            _ => "The title is likely 2D-only, or the MVC track \
+                                  was not retained during the rip."
+                                .to_string(),
+                        };
+                        let text = format!(
+                            "Skipped 3D conversion: no MVC/stereo track found in {}. {}",
+                            landed.display(),
+                            detail
                         );
+                        tracing::warn!("{text}");
+                        let _ = rip_tx
+                            .send(RipMessage::Event(
+                                crate::rip::makemkv::ExtractEvent::Message(
+                                    crate::rip::makemkv_parse::MsgRecord {
+                                        code: 0,
+                                        priority: 0,
+                                        text,
+                                    },
+                                ),
+                            ))
+                            .await;
                     }
                 }
             }

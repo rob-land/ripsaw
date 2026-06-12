@@ -12,7 +12,7 @@ use crate::identify::pipeline::IdentificationResult;
 use crate::identify::{TitleIdentity, TitleRole};
 use crate::naming::{
     self, jellyfin::Jellyfin, kodi::Kodi, plex::Plex, EpisodeContext, ExtraContext, MovieContext,
-    Scheme,
+    MovieVariant, Scheme,
 };
 use crate::rip::makemkv_parse::TitleAttributes;
 use crate::settings::SchemeKind;
@@ -377,13 +377,24 @@ fn scheme_path(
     }
 
     let movies_root = opts.library_root.join("Movies");
+    // A 3D Blu-ray often carries both a flat 2D and an MVC 3D version of
+    // the same feature. Both are Main titles, so without a distinguishing
+    // suffix they collide on the same output path and one clobbers the
+    // other. Tag the MVC title with the Jellyfin/Plex/Kodi "3D" variant
+    // (e.g. "Movie (2021) [imdbid-X] - 3D.mkv") so the two land side by
+    // side. See docs/naming.md § "multiple versions".
+    let variant = if t.has_mvc_stream() {
+        Some(MovieVariant::Stereo3d)
+    } else {
+        None
+    };
     let movie_ctx = MovieContext {
         root: &movies_root,
         title: &opts.disc_title,
         year: opts.disc_year,
         tmdb_id: opts.tmdb_id,
         imdb_id: opts.imdb_id.as_deref(),
-        variant: None,
+        variant,
     };
     match role {
         TitleRole::Main => scheme.movie_path(&movie_ctx),
@@ -514,7 +525,7 @@ pub fn naming_opts_for_unidentified(
 mod tests {
     use super::*;
     use crate::identify::DiscType;
-    use crate::rip::makemkv_parse::{DiscAttributes, MakemkvScan, TitleAttributes};
+    use crate::rip::makemkv_parse::{DiscAttributes, MakemkvScan, StreamAttributes, TitleAttributes};
 
     fn scan_with(titles: Vec<TitleAttributes>, name: Option<&str>) -> IdentificationResult {
         IdentificationResult {
@@ -586,6 +597,47 @@ mod tests {
         assert_eq!(
             plan[1].final_path.as_deref().unwrap(),
             std::path::Path::new("/lib/Movies/Some Disc/extras/Trailer.mkv")
+        );
+    }
+
+    #[test]
+    fn jellyfin_3d_and_2d_mains_get_distinct_variant_paths() {
+        // A 3D Blu-ray that also carries a flat 2D copy of the feature:
+        // both titles are Main. The MVC (3D) one must pick up the " - 3D"
+        // suffix so the two don't resolve to the same path and clobber
+        // each other.
+        let mut three_d = title(0, "Movie 3D", 7200, "X_t00.mkv");
+        three_d.streams = vec![StreamAttributes {
+            stream: 0,
+            kind: Some("Video".into()),
+            codec_short: Some("MVC".into()),
+            codec_long: Some("Mpeg4-MVC-3D".into()),
+            ..Default::default()
+        }];
+        let two_d = title(1, "Movie", 7200, "X_t01.mkv");
+        let id = scan_with(vec![three_d, two_d], Some("Movie"));
+
+        let opts = naming_opts_for_unidentified(
+            PathBuf::from("/lib"),
+            SchemeKind::Jellyfin,
+            DiscContentKind::Movie,
+            "Movie",
+        );
+        // Force both titles to Main so we exercise the variant logic
+        // rather than the longest-is-Main / extras fallback.
+        let mut roles = HashMap::new();
+        roles.insert(0u32, TitleRole::Main);
+        roles.insert(1u32, TitleRole::Main);
+
+        let plan =
+            plan_rip(&id, &[0, 1], Some(&opts), &HashMap::new(), &HashMap::new(), &roles);
+        assert_eq!(
+            plan[0].final_path.as_deref().unwrap(),
+            std::path::Path::new("/lib/Movies/Movie/Movie - 3D.mkv")
+        );
+        assert_eq!(
+            plan[1].final_path.as_deref().unwrap(),
+            std::path::Path::new("/lib/Movies/Movie/Movie.mkv")
         );
     }
 
