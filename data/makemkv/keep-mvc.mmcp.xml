@@ -2,26 +2,74 @@
 <!--
   MakeMKV conversion profile used by Ripsaw.
 
-  Identical to MakeMKV's built-in default selector except for the MVC
-  dependent-view track. The built-in default has `-sel:mvcvideo`
-  which silently drops the second view; we flip that to
-  `+sel:mvcvideo` so the produced MKV carries everything we need to
-  convert the title into FSBS / HSBS / etc. downstream.
+  Structurally a copy of MakeMKV's built-in "default" profile
+  (extracted from MakeMKV's appdata.tar / default.mmcp.xml), with one
+  change: the track-selection string flips `-sel:mvcvideo` to
+  `+sel:mvcvideo` so the MVC dependent-view track is RETAINED instead
+  of dropped. That second view is what the downstream 3D convert
+  pipeline packs into FSBS / HSBS / etc.
 
-  Selector grammar (per makemkvcon's compiled-in help string):
-    -sel:all                   start with nothing
-    +sel:(favlang|nolang)      include preferred-language + no-lang tracks
-    +sel:mvcvideo              include MVC dependent-view tracks (the fix)
-    =100:all                   profile priority 100 (irrelevant for us)
-    -10:favlang                deprio non-favlang by 10
+  Two things matter for this file to actually take effect — both were
+  wrong in an earlier revision and made MakeMKV reject the profile
+  ("Profile parsing error: output config invalid") and silently fall
+  back to its default, which drops MVC:
+
+    1. The `<outputSettings name="copy" .../>` element MUST be defined
+       before `<trackSettings>` references it via outputSettingsName.
+    2. The selection string lives in the `defaultSelection` attribute of
+       `<output>`, not in a nested `<default selected="..."/>` element.
+
+  We also write the selection string literally (rather than the
+  `$app_DefaultSelectionString` variable the stock profile uses),
+  because that variable resolves from MakeMKV preferences and would
+  otherwise carry the stock `-sel:mvcvideo` and undo the fix.
+
+  Selection string is MakeMKV's stock default with only mvcvideo flipped:
+    stock:  ...,-sel:(havemulti|havecore),-sel:mvcvideo,=100:all,...
+    ours:   ...,-sel:(havemulti|havecore),+sel:mvcvideo,=100:all,...
 -->
 <profile>
-  <name lang="eng">Ripsaw — keep MVC</name>
-  <description lang="eng">Ripsaw default. Identical to MakeMKV's built-in default profile except MVC dependent-view tracks are retained instead of dropped, so 3D conversion has both views to work with.</description>
+    <name lang="eng">Ripsaw — keep MVC</name>
 
-  <trackSettings input="default">
-    <output outputSettingsName="copy">
-      <default selected="-sel:all,+sel:(favlang|nolang),+sel:mvcvideo,=100:all,-10:favlang"/>
-    </output>
-  </trackSettings>
+    <mkvSettings
+        ignoreForcedSubtitlesFlag="true"
+        useISO639Type2T="false"
+        setFirstAudioTrackAsDefault="true"
+        setFirstSubtitleTrackAsDefault="true"
+        setFirstForcedSubtitleTrackAsDefault="true"
+        insertFirstChapter00IfMissing="true"
+    />
+
+    <outputSettings name="copy" outputFormat="directCopy">
+        <description lang="eng">Copy track as is</description>
+    </outputSettings>
+
+    <outputSettings name="lpcm" outputFormat="LPCM-raw">
+        <description lang="eng">Save as raw LPCM</description>
+    </outputSettings>
+
+    <outputSettings name="wavex" outputFormat="LPCM-wavex">
+        <description lang="eng">Save as LPCM in WAV container</description>
+    </outputSettings>
+
+    <!-- Default rule - copy as is, but keep the MVC dependent view. -->
+    <trackSettings input="default">
+        <output outputSettingsName="copy"
+                defaultSelection="-sel:all,+sel:(favlang|nolang|single),-sel:(havemulti|havecore),+sel:mvcvideo,=100:all,-10:favlang">
+        </output>
+    </trackSettings>
+
+    <!-- Save LPCM mono or stereo as raw LPCM (mirrors the stock default). -->
+    <trackSettings input="LPCM-stereo">
+        <output outputSettingsName="lpcm"
+                defaultSelection="$app_DefaultSelectionString">
+        </output>
+    </trackSettings>
+
+    <!-- Put multi-channel LPCM into a WAVEX container (mirrors stock default). -->
+    <trackSettings input="LPCM-multi">
+        <output outputSettingsName="wavex"
+                defaultSelection="$app_DefaultSelectionString">
+        </output>
+    </trackSettings>
 </profile>

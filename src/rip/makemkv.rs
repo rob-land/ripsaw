@@ -371,6 +371,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keep_mvc_profile_is_well_formed_and_keeps_mvc() {
+        // Regression guard. An earlier revision of this profile
+        // referenced an outputSettings ("copy") it never defined and put
+        // the selection string in a nested `<default selected=..>`
+        // element instead of the `defaultSelection` attribute. MakeMKV
+        // rejected it ("Profile parsing error: output config invalid")
+        // and silently fell back to its built-in default -- which DROPS
+        // the MVC dependent-view track, so every 3D rip came out flat 2D.
+        let xml = KEEP_MVC_PROFILE_XML;
+
+        // 1. It must be valid XML.
+        let mut reader = quick_xml::Reader::from_str(xml);
+        loop {
+            match reader.read_event() {
+                Ok(quick_xml::events::Event::Eof) => break,
+                Ok(_) => {}
+                Err(e) => panic!("keep-mvc profile is not valid XML: {e}"),
+            }
+        }
+
+        // 2. The active track-selection strings must retain MVC, not drop
+        //    it. Inspect the `defaultSelection` attribute values only --
+        //    the surrounding comment documents the stock `-sel:mvcvideo`
+        //    for contrast, so a naive whole-file substring check would
+        //    give a false positive.
+        let selections: Vec<&str> = xml
+            .match_indices("defaultSelection=\"")
+            .map(|(i, m)| {
+                let start = i + m.len();
+                let end = xml[start..].find('"').map(|e| start + e).unwrap_or(xml.len());
+                &xml[start..end]
+            })
+            .collect();
+        assert!(!selections.is_empty(), "profile defines no track selection");
+        assert!(
+            selections.iter().any(|s| s.contains("+sel:mvcvideo")),
+            "the default track selection must keep the MVC track"
+        );
+        assert!(
+            selections.iter().all(|s| !s.contains("-sel:mvcvideo")),
+            "no track selection may drop the MVC track"
+        );
+
+        // 3. The outputSettings referenced by trackSettings must be
+        //    defined in-file, and the selection must live in the
+        //    `defaultSelection` attribute -- the two things whose absence
+        //    made MakeMKV reject the old profile.
+        assert!(
+            xml.contains(r#"<outputSettings name="copy""#),
+            "the \"copy\" outputSettings must be defined or MakeMKV errors"
+        );
+        assert!(xml.contains(r#"outputSettingsName="copy""#));
+        assert!(xml.contains("defaultSelection="));
+    }
+
+    #[test]
     fn version_ordering() {
         let a = Version { major: 1, minor: 17, patch: 0 };
         let b = Version { major: 1, minor: 17, patch: 8 };
