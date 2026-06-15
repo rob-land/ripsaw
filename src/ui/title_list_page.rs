@@ -361,6 +361,20 @@ impl TitleListPage {
             row.add_prefix(&check);
             row.set_activatable_widget(Some(&check));
 
+            // 3D marker: titles carrying an MVC dependent-view track are
+            // the stereoscopic-3D version of the feature. Surface this as
+            // a prominent accent pill so it's obvious at a glance which
+            // titles are 3D versus the flat 2D copies.
+            if t.has_mvc_stream() {
+                let badge = gtk::Label::builder()
+                    .label("3D")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["pill", "accent"])
+                    .tooltip_text("Contains an MVC stereoscopic-3D video track")
+                    .build();
+                row.add_suffix(&badge);
+            }
+
             let episode_entry = gtk::Entry::builder()
                 .placeholder_text("Episode title (optional)")
                 .valign(gtk::Align::Center)
