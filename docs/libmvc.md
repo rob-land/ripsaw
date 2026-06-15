@@ -4,10 +4,21 @@ Research-mode notes for the eventual MVC decoder. The earlier
 `docs/mvc3d.md` argued for "implement Annex G on top of a base H.264
 decoder" without committing to which decoder. This doc picks one.
 
+## Progress log
+
+- **2026-06-15.** Added the base H.264 SPS parser
+  (`parse_seq_parameter_set_data`) — scaling lists, POC, full VUI + HRD
+  consumption, and derived cropped luma dimensions — plus
+  `parse_subset_sps_rbsp` chaining it with the MVC extension. This
+  removes the last "delegate to libavcodec" gap in the front-end parser:
+  libmvc can now learn a stream's full geometry on its own. Verified
+  against the real-world mvcC fixture (Stereo High, level 4.1,
+  1920×1080, 2 views) in `tests/mvcc_real_world.rs`. Next front-end
+  pieces: PPS (`pic_parameter_set_rbsp`) and the slice header.
+
 ## What's already built
 
-`src/mvc/` is **2,536 lines of Rust** and 51 unit tests, covering
-all the bitstream parsing we'll need:
+`src/mvc/` covers all the bitstream parsing we'll need:
 
 | File | Purpose | Status |
 |---|---|---|
@@ -15,7 +26,7 @@ all the bitstream parsing we'll need:
 | `annexb.rs` | Annex B byte stream splitter | done |
 | `nal.rs` | NAL unit header (incl. MVC extension types 14, 15, 20) | done |
 | `rbsp.rs` | Emulation-prevention-byte removal | done |
-| `sps.rs` | `seq_parameter_set_mvc_extension()` (Annex G § 7.3.2.1.4) | done |
+| `sps.rs` | base `seq_parameter_set_data()` (§ 7.3.2.1.1, incl. scaling lists / VUI / HRD, derived cropped dims) + `seq_parameter_set_mvc_extension()` + `parse_subset_sps_rbsp()` | done |
 | `ref_pic_list_modification.rs` | MVC inter-view IDCs 4 and 5 | done |
 | `sei.rs` | Frame-packing-arrangement SEI parser | done |
 | `mvcc.rs` | mvcC config record (ISO/IEC 14496-15 § 7.4) | done |

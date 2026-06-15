@@ -11,19 +11,18 @@
 //     samples/3D_LR_Pattern.mkv /tmp/lrpat.h264
 //   cargo run --release --example probe_subset_sps -- /tmp/lrpat.h264
 //
-// Note on coverage: the MVC extension within a Subset SPS sits AFTER
-// the base seq_parameter_set_data() in the same RBSP. We don't yet
-// have a base-SPS parser (it'd be a ~200-line port of H.264 § 7.3.2.1);
-// until that exists this example can only verify NAL discovery + RBSP
-// extraction + the first byte (profile_idc), not the MVC extension
-// payload itself. That's the next concrete libmvc TODO -- see
-// `docs/libmvc.md` § "What to do *now*".
+// The Subset SPS RBSP is decoded in full: the base
+// seq_parameter_set_data() (geometry, POC, VUI/HRD) followed by the MVC
+// extension (view count, inter-view reference lists, level/operating
+// points). This is the real-bitstream check that src/mvc/sps.rs +
+// nal.rs + rbsp.rs agree with what a 3D Blu-ray actually emits.
 
 use std::fs;
 
 use ripsaw::mvc::annexb::NalSplitter;
 use ripsaw::mvc::nal::{parse_nal_unit_header, NAL_SUBSET_SPS};
 use ripsaw::mvc::rbsp::extract_rbsp;
+use ripsaw::mvc::sps::parse_subset_sps_rbsp;
 
 fn main() -> anyhow::Result<()> {
     let path = std::env::args()
@@ -65,12 +64,30 @@ fn main() -> anyhow::Result<()> {
             }
         };
         eprintln!("  profile_idc        = {profile_idc} ({profile_name})");
-        if rbsp.len() >= 4 {
-            eprintln!(
-                "  constraint flags   = 0x{:02X}",
-                rbsp[1]
-            );
-            eprintln!("  level_idc          = {} (encoded as 0x{:02X})", rbsp[3], rbsp[3]);
+        match parse_subset_sps_rbsp(&rbsp) {
+            Ok(subset) => {
+                let s = &subset.sps;
+                eprintln!("  level_idc          = {}", s.level_idc);
+                eprintln!(
+                    "  dimensions         = {}x{} (chroma_format_idc {})",
+                    s.width, s.height, s.chroma_format_idc
+                );
+                eprintln!("  max_num_ref_frames = {}", s.max_num_ref_frames);
+                if let Some(t) = &s.vui_timing {
+                    eprintln!(
+                        "  vui timing         = {}/{} ({:.3} fps)",
+                        t.num_units_in_tick,
+                        t.time_scale,
+                        t.time_scale as f64 / (2.0 * t.num_units_in_tick as f64)
+                    );
+                }
+                eprintln!("  views              = {}", subset.mvc.num_views_minus1 + 1);
+                eprintln!("  view_ids           = {:?}", subset.mvc.view_id);
+                eprintln!("  anchor refs (v1)   = l0:{:?} l1:{:?}",
+                    subset.mvc.anchor_refs.get(1).map(|r| &r.l0),
+                    subset.mvc.anchor_refs.get(1).map(|r| &r.l1));
+            }
+            Err(e) => eprintln!("  subset SPS decode FAILED: {e:?}"),
         }
         if count >= 5 {
             break;

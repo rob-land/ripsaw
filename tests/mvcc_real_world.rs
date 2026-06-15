@@ -16,6 +16,7 @@ use ripsaw::mvc::ebml::EbmlReader;
 use ripsaw::mvc::mvcc::{find_mvcc_bytes, parse, MvcDecoderConfigurationRecord};
 use ripsaw::mvc::nal::{parse_nal_unit_header, NAL_SUBSET_SPS};
 use ripsaw::mvc::rbsp::extract_rbsp;
+use ripsaw::mvc::sps::parse_subset_sps_rbsp;
 
 fn sample_mkv() -> Option<PathBuf> {
     let path =
@@ -120,4 +121,52 @@ fn at_least_one_sps_nal_in_real_world_mvcc_is_a_subset_sps() {
         "no NAL of type {} (Subset SPS) found in the SPS list",
         NAL_SUBSET_SPS
     );
+}
+
+#[test]
+fn real_world_subset_sps_fully_decodes_to_two_view_1080p() {
+    // The strongest end-to-end parser check: take the real mvcC's Subset
+    // SPS and decode the *whole* RBSP -- base seq_parameter_set_data()
+    // (geometry, POC, VUI/HRD) plus the MVC extension (view count / refs)
+    // -- not just the first byte. Validates the new base-SPS parser
+    // against a bitstream a real 3D Blu-ray produced.
+    let Some(bytes) = extract_or_load_mvcc_bytes() else {
+        eprintln!("sample/fixture not available; skipping");
+        return;
+    };
+    let record = parse(&bytes).expect("mvcC parse");
+
+    let mut decoded = false;
+    for nal_bytes in &record.sps_nals {
+        let (header, consumed) =
+            parse_nal_unit_header(nal_bytes).expect("NAL header parse");
+        if header.nal_unit_type != NAL_SUBSET_SPS {
+            continue;
+        }
+        let rbsp = extract_rbsp(&nal_bytes[consumed..]);
+        let subset = parse_subset_sps_rbsp(&rbsp).expect("subset SPS decode");
+        eprintln!(
+            "decoded subset SPS: profile={} level={} {}x{} views={} view_ids={:?}",
+            subset.sps.profile_idc,
+            subset.sps.level_idc,
+            subset.sps.width,
+            subset.sps.height,
+            subset.mvc.num_views_minus1 + 1,
+            subset.mvc.view_id,
+        );
+
+        // Multiview/Stereo High family.
+        assert!(matches!(subset.sps.profile_idc, 118 | 128 | 134));
+        // 1080p Blu-ray 3D: 1920x1080, level 4.1.
+        assert_eq!((subset.sps.width, subset.sps.height), (1920, 1080));
+        assert_eq!(subset.sps.level_idc, 41);
+        assert_eq!(subset.sps.chroma_format_idc, 1); // 4:2:0
+        // Two views, dependent view references the base view inter-view.
+        assert_eq!(subset.mvc.num_views_minus1, 1);
+        assert_eq!(subset.mvc.view_id.len(), 2);
+        assert_eq!(subset.mvc.anchor_refs[1].l0, vec![subset.mvc.view_id[0]]);
+        decoded = true;
+        break;
+    }
+    assert!(decoded, "no Subset SPS decoded from the real-world mvcC");
 }
