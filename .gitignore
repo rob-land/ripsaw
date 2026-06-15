@@ -36,3 +36,8 @@ repo/
 
 # Reference spec PDFs (e.g. ITU-T H.264) — copyrighted, kept locally only
 /docs/*.pdf
+
+# JM ldecod default-output files, if it's ever run with cwd in the repo
+/log.dec
+/dataDec.txt
+/test_dec.yuv

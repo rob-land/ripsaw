@@ -378,14 +378,28 @@ the long-term performance fix (JM is single-threaded, no SIMD;
 minutes-per-minute-of-source-content) but is no longer a
 correctness requirement.
 
-### Build / tooling state (2026-05-28)
+### Build / tooling state (2026-05-28, updated 2026-06-15)
 
-- **`ldecod`** built from `https://vcgit.hhi.fraunhofer.de/jvet/JM` at
-  `/home/rob/3rdparty/JM` with `cmake -B build` + relaxed `-Werror`
-  (modern GCC's `-Werror=maybe-uninitialized` etc. trip the legacy
-  source; warnings are dropped to non-fatal via `CMAKE_C_FLAGS`).
-  Binary at `bin/umake/gcc-15.2/x86_64/release/ldecod`. Wrapper at
-  `scripts/ldecod` for convenience.
+- **`ldecod`** is built from `https://vcgit.hhi.fraunhofer.de/jvet/JM`
+  by **`scripts/build-ldecod.sh`** (idempotent: clone → patch → build →
+  symlink onto `~/.local/bin`). Two patches are required and applied by
+  that script:
+    1. JM's `-Werror` vs modern GCC -- flipped to `-Wno-error` in
+       `cmake/.../BBuildEnv.cmake`.
+    2. **MVC DPB abort.** Stock ldecod calls
+       `error("max_dec_frame_buffering larger than MaxDpbSize")` and
+       quits on real MakeMKV MVC streams (the per-view DPB math in
+       `get_dpb_size` yields a MaxDpbSize smaller than the stream's VUI
+       `max_dec_frame_buffering`). The function already returns the
+       stream's own larger value, so the guard is pure refusal -- the
+       script drops it and both views decode.
+  The umake output path encodes the compiler version
+  (`bin/umake/gcc-<ver>/x86_64/release/ldecod`), so `scripts/ldecod`
+  resolves the binary dynamically (newest umake build, `$RIPSAW_LDECOD`,
+  or `ldecod` on `PATH`) rather than hardcoding a toolchain version.
+  Verified end-to-end 2026-06-15: Friday the 13th Part 3 (3D BD) MVC
+  title → `extract_to_annex_b` → patched ldecod (both views) → ffmpeg
+  compose → 3840x1080 FSBS.
 - **JVT MVC conformance bitstreams** are not staged. The samples in
   `samples/` (modern MakeMKV-produced 3D MKVs + several 3D BD ISOs)
   are real MVC content from production discs and cover the cases

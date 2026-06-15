@@ -1,11 +1,27 @@
 #!/usr/bin/env bash
-# Wrapper around the JM ldecod binary built from
-# https://vcgit.hhi.fraunhofer.de/jvet/JM at /home/rob/3rdparty/JM.
-# Symlinking would work too; the wrapper makes path failures explicit.
-LDECOD=/home/rob/3rdparty/JM/bin/umake/gcc-15.2/x86_64/release/ldecod
-if [ ! -x "$LDECOD" ]; then
-  echo "ldecod missing -- rebuild with:" >&2
-  echo "  cd /home/rob/3rdparty/JM && cmake -S . -B build && cmake --build build --target ldecod" >&2
-  exit 1
-fi
-exec "$LDECOD" "$@"
+# Wrapper around the JM ldecod binary (the JVT H.264/MVC reference
+# decoder, built from https://vcgit.hhi.fraunhofer.de/jvet/JM).
+#
+# The JM "umake" build drops the binary under a path that encodes the
+# compiler version (.../bin/umake/gcc-<ver>/x86_64/release/ldecod), so a
+# hardcoded path breaks the moment the toolchain version changes. Resolve
+# it dynamically instead:
+#   1. $RIPSAW_LDECOD, if set and executable.
+#   2. The newest umake build under $JM_ROOT (default ~/3rdparty/JM).
+#   3. A plain `ldecod` on PATH.
+JM_ROOT="${JM_ROOT:-$HOME/3rdparty/JM}"
+
+try() { [ -n "$1" ] && [ -x "$1" ] && exec "$1" "${@:2}"; }
+
+try "$RIPSAW_LDECOD" "$@"
+
+# Pick the most recently built umake binary (handles any gcc-* dir).
+candidate="$(ls -t "$JM_ROOT"/bin/umake/*/x86_64/release/ldecod 2>/dev/null | head -n1)"
+try "$candidate" "$@"
+
+try "$(command -v ldecod 2>/dev/null)" "$@"
+
+echo "ldecod not found. Build it with:" >&2
+echo "  cd $JM_ROOT && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target ldecod" >&2
+echo "or set RIPSAW_LDECOD=/path/to/ldecod." >&2
+exit 1

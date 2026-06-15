@@ -233,8 +233,10 @@ fn walk_cluster<R: Read + Seek, W: Write>(
                 let block_bytes = reader.read_bytes(size as usize)?;
                 if let Some(frame_data) = block_frame_data(&block_bytes, track_number)? {
                     write_length_prefixed(out, frame_data, length_size)?;
+                    let (base, dep) = classify_length_prefixed(frame_data, length_size)?;
                     stats.frames += 1;
-                    stats.base_nals += count_length_prefixed(frame_data, length_size)?;
+                    stats.base_nals += base;
+                    stats.dep_nals += dep;
                 }
                 let _ = block_end;
             }
@@ -279,8 +281,13 @@ fn walk_block_group<R: Read + Seek, W: Write>(
     }
     if let Some(base) = base_frame {
         write_length_prefixed(out, &base, length_size)?;
+        // The "base" block may itself carry inline dependent-view NALs
+        // (MakeMKV interleaves both views in one block), so classify by
+        // NAL type rather than assuming everything here is base view.
+        let (base_count, dep_inline) = classify_length_prefixed(&base, length_size)?;
         stats.frames += 1;
-        stats.base_nals += count_length_prefixed(&base, length_size)?;
+        stats.base_nals += base_count;
+        stats.dep_nals += dep_inline;
         if let Some(dep) = dep_frame {
             write_length_prefixed(out, &dep, length_size)?;
             stats.dep_nals += count_length_prefixed(&dep, length_size)?;
@@ -393,6 +400,33 @@ fn write_length_prefixed<W: Write>(out: &mut W, data: &[u8], length_size: usize)
     Ok(())
 }
 
+/// Count length-prefixed NALs in `data`, split into
+/// `(base_view, dependent_view)`. The dependent view is identified by NAL
+/// unit type -- 14 (prefix NAL), 15 (subset SPS), 20 (coded slice
+/// extension) -- so inline MVC (both views in one block) is tallied
+/// correctly instead of being lumped entirely into the base count.
+fn classify_length_prefixed(data: &[u8], length_size: usize) -> Result<(u64, u64)> {
+    let mut cursor = 0usize;
+    let (mut base, mut dep) = (0u64, 0u64);
+    while cursor + length_size <= data.len() {
+        let mut nal_len = 0u64;
+        for i in 0..length_size {
+            nal_len = (nal_len << 8) | (data[cursor + i] as u64);
+        }
+        cursor += length_size;
+        let nal_len = nal_len as usize;
+        if nal_len == 0 || cursor + nal_len > data.len() {
+            break;
+        }
+        match data[cursor] & 0x1F {
+            14 | 15 | 20 => dep += 1,
+            _ => base += 1,
+        }
+        cursor += nal_len;
+    }
+    Ok((base, dep))
+}
+
 fn count_length_prefixed(data: &[u8], length_size: usize) -> Result<u64> {
     let mut cursor = 0usize;
     let mut count = 0u64;
@@ -463,6 +497,16 @@ mod tests {
         let mut out = Vec::new();
         write_length_prefixed(&mut out, &data, 4).unwrap();
         assert_eq!(out, vec![0, 0, 0, 1, 0x67, 0x42, 0x00]);
+    }
+
+    #[test]
+    fn classify_length_prefixed_splits_base_and_dependent() {
+        // base slice (type 1) + MVC coded-slice-extension (type 20),
+        // each 2 bytes, with 4-byte length prefixes.
+        let mut data = vec![];
+        data.extend_from_slice(&[0, 0, 0, 2, 0x01, 0x00]); // nal_type 1  -> base
+        data.extend_from_slice(&[0, 0, 0, 2, 0x14, 0x00]); // nal_type 20 -> dep
+        assert_eq!(classify_length_prefixed(&data, 4).unwrap(), (1, 1));
     }
 
     #[test]
