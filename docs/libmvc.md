@@ -6,15 +6,28 @@ decoder" without committing to which decoder. This doc picks one.
 
 ## Progress log
 
-- **2026-06-15.** Added the base H.264 SPS parser
+- **2026-06-15 (a).** Added the base H.264 SPS parser
   (`parse_seq_parameter_set_data`) — scaling lists, POC, full VUI + HRD
   consumption, and derived cropped luma dimensions — plus
-  `parse_subset_sps_rbsp` chaining it with the MVC extension. This
-  removes the last "delegate to libavcodec" gap in the front-end parser:
-  libmvc can now learn a stream's full geometry on its own. Verified
-  against the real-world mvcC fixture (Stereo High, level 4.1,
-  1920×1080, 2 views) in `tests/mvcc_real_world.rs`. Next front-end
-  pieces: PPS (`pic_parameter_set_rbsp`) and the slice header.
+  `parse_subset_sps_rbsp` chaining it with the MVC extension. Removes the
+  last "delegate to libavcodec" gap for geometry. Verified against the
+  real-world mvcC fixture in `tests/mvcc_real_world.rs`.
+- **2026-06-15 (b).** Added the PPS parser (`pps.rs`,
+  `pic_parameter_set_rbsp` incl. the FMO slice-group map and the
+  transform_8x8 / scaling-matrix extension behind `more_rbsp_data()`) and
+  the slice-header parser (`slice_header.rs`, `slice_header()` for base
+  *and* MVC dependent-view slices, walking pred_weight_table and
+  dec_ref_pic_marking, reusing `ref_pic_list_modification` for the
+  inter-view IDCs). Added `BitReader::more_rbsp_data()`. **The whole
+  front-end parser now runs end-to-end on a real 3D BD** — `examples/
+  parse_slices.rs` decodes 576 base I-slices + 576 MVC P-slices
+  (view_id=1) from a Friday-the-13th-Part-3 MVC rip with zero errors.
+  The pure-Rust front end (NAL → RBSP → SPS/PPS → slice header) is now
+  **complete**. What remains is the decode core: CAVLC/CABAC residual
+  parsing, inverse transform, intra/inter prediction, deblocking, DPB,
+  and the inter-view reference injection (Annex G § 8.2/8.4) — the
+  Option-B-vs-C decision in this doc applies to that core, not the
+  front end.
 
 ## What's already built
 

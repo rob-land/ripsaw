@@ -35,6 +35,28 @@ impl<'a> BitReader<'a> {
         self.bit_pos == 0
     }
 
+    /// `more_rbsp_data()` per H.264 § 7.2. Returns true if there is RBSP
+    /// payload remaining before the `rbsp_stop_one_bit`. The stop bit is
+    /// the last set bit in the whole buffer (everything after it is
+    /// alignment zero-padding), so we compare the current position to it.
+    pub fn more_rbsp_data(&self) -> bool {
+        if self.byte_pos >= self.data.len() {
+            return false;
+        }
+        // Absolute bit index (MSB-first) of the last set bit in the buffer.
+        let mut last_byte = self.data.len();
+        while last_byte > 0 && self.data[last_byte - 1] == 0 {
+            last_byte -= 1;
+        }
+        if last_byte == 0 {
+            return false; // no set bits at all — not a valid RBSP tail
+        }
+        let stop_in_byte = 7 - self.data[last_byte - 1].trailing_zeros() as usize;
+        let stop_abs = (last_byte - 1) * 8 + stop_in_byte;
+        let cur_abs = self.byte_pos * 8 + self.bit_pos as usize;
+        cur_abs < stop_abs
+    }
+
     /// Read a single bit. Returns `Ok(true)` if the bit was 1.
     pub fn read_bit(&mut self) -> Result<bool, ReadError> {
         if self.byte_pos >= self.data.len() {
@@ -169,6 +191,29 @@ mod tests {
         // which doesn't fit in u32 anyway. Five all-zero bytes is plenty.
         let mut r = BitReader::new(&[0, 0, 0, 0, 0, 0x80]);
         assert_eq!(r.read_ue().unwrap_err(), ReadError::ExpGolombOverflow);
+    }
+
+    #[test]
+    fn more_rbsp_data_detects_stop_bit() {
+        // One byte: 0b1100_1000. The rbsp_stop_one_bit is the lowest set
+        // bit (bit index 4, MSB-first), so payload bits are indices 0..4.
+        let mut r = BitReader::new(&[0b1100_1000]);
+        assert!(r.more_rbsp_data()); // at 0, stop at 4
+        r.read_u(3).unwrap(); // -> index 3
+        assert!(r.more_rbsp_data()); // 3 < 4
+        r.read_bit().unwrap(); // -> index 4 (the stop bit itself)
+        assert!(!r.more_rbsp_data()); // at the stop bit: nothing more
+    }
+
+    #[test]
+    fn more_rbsp_data_false_when_exhausted_or_all_zero() {
+        let mut r = BitReader::new(&[0x80]);
+        assert!(!r.more_rbsp_data()); // only the stop bit, at index 0
+        let r2 = BitReader::new(&[0x00, 0x00]);
+        assert!(!r2.more_rbsp_data()); // no set bits anywhere
+        let mut r3 = BitReader::new(&[0xFF]);
+        r3.read_u(8).unwrap();
+        assert!(!r3.more_rbsp_data()); // past the end
     }
 
     #[test]

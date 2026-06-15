@@ -215,8 +215,8 @@ fn derive_dimensions(sps: &Sps) -> (u32, u32) {
 
 /// `scaling_list()` (§ 7.3.2.1.1.1). We don't keep the coefficients —
 /// just consume the exact number of `se(v)` codes so the reader stays
-/// aligned for everything that follows.
-fn skip_scaling_list(reader: &mut BitReader<'_>, size: usize) -> Result<(), ReadError> {
+/// aligned for everything that follows. Shared with the PPS parser.
+pub(crate) fn skip_scaling_list(reader: &mut BitReader<'_>, size: usize) -> Result<(), ReadError> {
     let mut last_scale: i32 = 8;
     let mut next_scale: i32 = 8;
     for _ in 0..size {
