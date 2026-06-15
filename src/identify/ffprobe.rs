@@ -62,7 +62,11 @@ pub struct FfprobeStream {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FfprobeChapter {
-    pub id: u64,
+    // ffprobe emits the chapter id as a signed int64. For Matroska it's
+    // derived from the (64-bit) ChapterUID, so large UIDs come through as
+    // negative numbers -- a u64 here rejects the whole report with
+    // "invalid value: integer `-2206971460243292344`, expected u64".
+    pub id: i64,
     #[serde(default)]
     pub start_time: Option<String>,
     #[serde(default)]
@@ -160,6 +164,24 @@ mod tests {
          "tags": { "title": "Act 1" }}
       ]
     }"#;
+
+    #[test]
+    fn parses_negative_matroska_chapter_id() {
+        // Matroska ChapterUIDs are 64-bit; ffprobe prints the chapter id
+        // as a signed int, so big UIDs surface as negative numbers. The
+        // report must still parse (regression: a u64 field rejected it).
+        let json = r#"{
+            "streams": [],
+            "format": {},
+            "chapters": [
+                {"id": -2206971460243292344, "start_time": "0.0",
+                 "end_time": "10.0", "tags": {"title": "Reel 1"}}
+            ]
+        }"#;
+        let report = parse(json.as_bytes()).unwrap();
+        assert_eq!(report.chapters.len(), 1);
+        assert_eq!(report.chapters[0].id, -2206971460243292344);
+    }
 
     #[test]
     fn parses_basic_report() {
