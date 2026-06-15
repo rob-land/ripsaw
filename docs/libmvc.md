@@ -28,6 +28,15 @@ decoder" without committing to which decoder. This doc picks one.
   and the inter-view reference injection (Annex G § 8.2/8.4) — the
   Option-B-vs-C decision in this doc applies to that core, not the
   front end.
+- **2026-06-15 (c).** Scoped the base-frame injection seam — the central
+  risk for any faster-than-ldecod decoder — in `docs/libmvc-injection.md`.
+  Key de-risking experiment: on a real 3D BD, **libavcodec's base view is
+  byte-identical to ldecod's internal inter-view reference** (25/25
+  frames, positional). So a fast decoder can supply exactly the reference
+  the dependent view needs; the hybrid is sound at the data level. The
+  remaining unknown is the *hook*, not the data — recommended next PoC is
+  to replace JM's base decode with the injected libavcodec frame and
+  confirm `ViewId0001` is unchanged.
 
 ## What's already built
 
