@@ -151,6 +151,7 @@ async fn main() -> Result<()> {
         locale: Some("en-us".to_string()),
         region_code: ident.dvd_region_code.clone().or_else(|| Some("1".to_string())),
         upc: Some(UPC.to_string()), asin: Some(ASIN.to_string()),
+        ..Default::default()
     };
     let disc_submission = DiscSubmission {
         disc_index: 2,
