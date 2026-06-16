@@ -37,6 +37,17 @@ decoder" without committing to which decoder. This doc picks one.
   remaining unknown is the *hook*, not the data — recommended next PoC is
   to replace JM's base decode with the injected libavcodec frame and
   confirm `ViewId0001` is unchanged.
+- **2026-06-16.** Ran that PoC (`scripts/ldecod-base-inject.patch`,
+  documented in `docs/libmvc-injection.md` § 2b). Patched JM ldecod to
+  overwrite the base view's reconstruction from a file in `exit_picture`.
+  Result: injecting **libavcodec's** base → dependent `ViewId0001`
+  **96/96 identical** to stock; injecting a **perturbed** base → 96/96
+  dependent frames changed. **The base-frame injection architecture is
+  empirically settled end-to-end** — libavcodec base + JM dependent
+  decode = correct stereo. No architectural unknowns remain for the
+  Option B hybrid; what's left is engineering (carve JM's dependent
+  decode into a library, or finish the Rust dependent decoder on the
+  completed front end).
 
 ## What's already built
 

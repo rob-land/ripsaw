@@ -1,0 +1,92 @@
+diff --git a/source/app/ldecod/image.c b/source/app/ldecod/image.c
+index 404e268..a5d76bd 100644
+--- a/source/app/ldecod/image.c
++++ b/source/app/ldecod/image.c
+@@ -1872,6 +1872,79 @@ void pad_dec_picture(VideoParameters *p_Vid, StorablePicture *dec_picture)
+  *    into the DPB
+  ************************************************************************
+  */
++/* ----------------------------------------------------------------------
++ * Ripsaw base-view injection hook (libmvc base-frame injection PoC).
++ *
++ * Env-gated, base view (view_id 0) only. Operates on the cropped/displayed
++ * region exactly as output.c does, so it lines up byte-for-byte with an
++ * ffmpeg `-pix_fmt yuv420p` decode of the base view.
++ *   RIPSAW_BASE_CAPTURE=<file>  append this base frame's cropped YUV (8-bit
++ *                               planar 4:2:0) in *decode* order.
++ *   RIPSAW_BASE_INJECT=<file>   overwrite this base frame's cropped pixels
++ *                               from the next frame of <file>, so the
++ *                               dependent view's inter-view reference
++ *                               becomes the externally supplied base.
++ * Assumes 8-bit content (sizeof(imgpel)==1), which Blu-ray 3D is.
++ * -------------------------------------------------------------------- */
++static void ripsaw_base_hook(StorablePicture *p)
++{
++  static const int SubW[4] = {1, 2, 2, 1};
++  static const int SubH[4] = {1, 2, 1, 1};
++  static FILE *cap_fp = NULL, *inj_fp = NULL;
++  static int resolved = 0;
++  int cl = 0, ct = 0, cb = 0, cr = 0;
++  int ccl = 0, cct = 0;
++  int lw, lh, cw, ch, i, j, c;
++
++  if (p->view_id != 0)
++    return;
++
++  if (!resolved)
++  {
++    const char *cap = getenv("RIPSAW_BASE_CAPTURE");
++    const char *inj = getenv("RIPSAW_BASE_INJECT");
++    if (cap) cap_fp = fopen(cap, "wb");
++    if (inj) inj_fp = fopen(inj, "rb");
++    resolved = 1;
++  }
++  if (!cap_fp && !inj_fp)
++    return;
++
++  if (p->frame_cropping_flag)
++  {
++    cl  = SubW[p->chroma_format_idc] * p->frame_crop_left_offset;
++    cr  = SubW[p->chroma_format_idc] * p->frame_crop_right_offset;
++    ct  = SubH[p->chroma_format_idc] * (2 - p->frame_mbs_only_flag) * p->frame_crop_top_offset;
++    cb  = SubH[p->chroma_format_idc] * (2 - p->frame_mbs_only_flag) * p->frame_crop_bottom_offset;
++    ccl = p->frame_crop_left_offset;
++    cct = (2 - p->frame_mbs_only_flag) * p->frame_crop_top_offset;
++  }
++  lw = p->size_x - cl - cr;
++  lh = p->size_y - ct - cb;
++  cw = p->size_x_cr - p->frame_crop_left_offset - p->frame_crop_right_offset;
++  ch = p->size_y_cr - (2 - p->frame_mbs_only_flag) * (p->frame_crop_top_offset + p->frame_crop_bottom_offset);
++
++  if (cap_fp)
++  {
++    unsigned char *row = malloc(lw);
++    for (i = 0; i < lh; i++) { for (j = 0; j < lw; j++) row[j] = (unsigned char)p->imgY[ct + i][cl + j]; fwrite(row, 1, lw, cap_fp); }
++    free(row);
++    row = malloc(cw);
++    for (c = 0; c < 2; c++) for (i = 0; i < ch; i++) { for (j = 0; j < cw; j++) row[j] = (unsigned char)p->imgUV[c][cct + i][ccl + j]; fwrite(row, 1, cw, cap_fp); }
++    free(row);
++    fflush(cap_fp);
++  }
++  if (inj_fp)
++  {
++    unsigned char *row = malloc(lw);
++    for (i = 0; i < lh; i++) { if (fread(row, 1, lw, inj_fp) != (size_t)lw) { free(row); return; } for (j = 0; j < lw; j++) p->imgY[ct + i][cl + j] = (imgpel)row[j]; }
++    free(row);
++    row = malloc(cw);
++    for (c = 0; c < 2; c++) for (i = 0; i < ch; i++) { if (fread(row, 1, cw, inj_fp) != (size_t)cw) { free(row); return; } for (j = 0; j < cw; j++) p->imgUV[c][cct + i][ccl + j] = (imgpel)row[j]; }
++    free(row);
++  }
++}
++
+ void exit_picture(VideoParameters *p_Vid, StorablePicture **dec_picture)
+ {
+   InputParameters *p_Inp = p_Vid->p_Inp;
+@@ -1984,6 +2057,7 @@ void exit_picture(VideoParameters *p_Vid, StorablePicture **dec_picture)
+     frame_postprocessing(p_Vid);
+   else
+     field_postprocessing(p_Vid);   // reset all interlaced variables
++  ripsaw_base_hook(*dec_picture); /* libmvc base-injection PoC: capture/replace base before it pads + becomes the inter-view ref */
+ #if (MVC_EXTENSION_ENABLE)
+   if((*dec_picture)->used_for_reference || ((*dec_picture)->inter_view_flag == 1))
+     pad_dec_picture(p_Vid, *dec_picture);

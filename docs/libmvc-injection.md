@@ -64,14 +64,46 @@ Interpretation:
   anyway, so this is a bookkeeping concern, not a correctness one.
 
 **Conclusion: the injection seam is sound at the data level.** The base
-view a fast decoder produces *is* the inter-view reference. What remains
-is plumbing it into a dependent-view decoder — not proving it's the
-right data.
+view a fast decoder produces *is* the inter-view reference.
 
 Reproduce: `examples/extract_mvcc_mkv` (annexb) + the ldecod cfg in
 `src/convert/runner.rs::build_decoder_cfg` with `DecFrmNum` set + an
 ffmpeg `rawvideo` decode + per-frame MD5. Needs an MVC source and
 `scripts/build-ldecod.sh`-built ldecod.
+
+### 2b. Injection hook proven end-to-end (2026-06-16)
+
+The "is it the right data" question above is necessary but not
+sufficient — we also have to show a dependent-view decoder *accepts an
+externally supplied base frame as its inter-view reference and decodes
+correctly*. Tested by patching JM ldecod (`scripts/ldecod-base-inject.patch`)
+with a hook in `exit_picture()` that, for the base view only, either
+captures or **overwrites** the cropped reconstruction from a file —
+exactly where the base picture is finalized and just before it pads and
+becomes the inter-view reference (`mbuffer_mvc.c` puts that very
+`StorablePicture` into the dependent slice's `listX`).
+
+On the same clip (96 frames), comparing dependent output (`ViewId0001`)
+of patched vs stock ldecod:
+
+| Run | Result |
+|---|---|
+| Inject JM's own captured base (decode order) | `ViewId0001` **96/96 identical** to stock |
+| Inject **libavcodec's** base directly | `ViewId0001` **96/96 identical** to stock |
+| Inject a **perturbed** base (+40 luma) | `ViewId0001` **96/96 frames changed** vs stock |
+
+Also confirmed: the base view here has decode order == display order
+(captured-decode-order base matched ffmpeg's display-order base 96/96),
+so no POC realignment was needed for this stream.
+
+The first two rows prove **libavcodec base → JM dependent decode →
+byte-identical correct dependent output**. The third row is the
+causality control: perturbing the injected base changes *every*
+dependent frame, so the dependent decoder genuinely consumes the
+injected pixels (the hook is not a no-op). The injection architecture is
+empirically settled end-to-end on real Blu-ray data; only base *pixels*
+are needed by the dependent view (no base MVs/modes), exactly as Annex G
+predicts.
 
 ## 3. The seam, concretely
 
@@ -124,14 +156,11 @@ SPS/PPS handling beyond what the front end already does.
 
 ## 5. Recommended path
 
-1. **Next PoC — prove the hook, not the whole decoder.** Take Option B's
-   lowest-effort wedge: build JM `ldecod` in a mode where the base view
-   is **replaced** by libavcodec's frame (stub out JM's base decode; load
-   `out_ViewId0000.yuv` frames as the base DPB) and confirm the dependent
-   view still decodes bit-identically to stock ldecod's `ViewId0001`.
-   That proves the injection hook end-to-end with ~a few days of C, no
-   new decoder. Success criterion: `ViewId0001` unchanged when the base
-   is injected from libavcodec instead of decoded by JM.
+1. **Prove the hook, not the whole decoder. — DONE (2026-06-16, § 2b).**
+   Patched JM ldecod to replace the base view's reconstruction with
+   externally supplied (libavcodec) frames; `ViewId0001` came back
+   96/96 identical to stock, and perturbing the injected base changed
+   96/96 dependent frames. The injection hook is proven end-to-end.
 2. If the hook holds, decide B vs C on the speed target: B ships a
    working hybrid fast (base at libavcodec speed, dep at JM speed →
    the ~3–5× the survey predicted); C is the long road to 10×+.
