@@ -409,7 +409,7 @@ fn resolve_encoder_args(
     plan: &ConversionPlan,
     event_tx: Option<&tokio::sync::mpsc::Sender<ConversionEvent>>,
 ) -> crate::convert::hw::EncoderArgs {
-    use crate::convert::hw::{encoder_args, probe_hw_support, HwBackend};
+    use crate::convert::hw::{encoder_args, encoder_smoke_test, probe_hw_support, HwBackend};
     let support = probe_hw_support();
     let chosen = match plan.hw_backend {
         HwBackend::Auto => support.resolve_auto(plan.codec),
@@ -429,6 +429,24 @@ fn resolve_encoder_args(
                 HwBackend::Software
             }
         }
+    };
+    // Pre-flight: device-presence checks can still mis-pick a HW encoder
+    // that fails to initialise (e.g. h264_qsv compiled in with no Intel
+    // GPU). Since the encoder is now the default, validate it with a tiny
+    // test encode and fall back to software rather than failing the whole
+    // convert minutes in.
+    let chosen = if chosen != HwBackend::Software
+        && !encoder_smoke_test(chosen, plan.codec, support.vaapi_device.as_deref())
+    {
+        if let Some(tx) = event_tx {
+            let _ = tx.try_send(ConversionEvent::Log(format!(
+                "{} failed a pre-flight encode test; falling back to software encode",
+                chosen.label()
+            )));
+        }
+        HwBackend::Software
+    } else {
+        chosen
     };
     if let Some(tx) = event_tx {
         let _ = tx.try_send(ConversionEvent::Log(format!(

@@ -239,6 +239,11 @@ Convert (serial decode→encode) per 400 AU, and Option B's value at each:
 Implications:
 - **The single cheapest win is defaulting to a HW encoder** (VAAPI here):
   98→68 min, no decoder surgery, and it makes convert **86 % decode-bound**.
+  **Landed 2026-06-16:** `ConversionPlan::default_hw_backend()` now returns
+  `Auto`, the UI encoder row defaults to "Auto", and the runner
+  smoke-tests the resolved HW encoder (1-frame encode) before committing,
+  falling back to software if it can't initialise. On this host the
+  convert now encodes via Intel Quick Sync end-to-end.
 - Once HW-encode-bound, Option B's decode speedup translates almost
   directly: **1.63×** end-to-end (vs 1.36× with x264). So HW encode and
   Option B are complementary, and Option B is clearly more valuable once

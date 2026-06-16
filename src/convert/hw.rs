@@ -338,6 +338,40 @@ pub fn encoder_args(
     out
 }
 
+/// Pre-flight check that a resolved HW encoder actually initialises on
+/// this host. `probe_hw_support`/`supports` only confirm ffmpeg has the
+/// encoder and a plausible device node; QSV and AMF in particular can be
+/// compiled into ffmpeg on a box with no matching GPU, so `resolve_auto`
+/// can hand back a backend that fails at `ffmpeg` startup. A 1-frame
+/// encode of a synthetic source to `null` catches that in ~0.1 s, before
+/// we commit a multi-minute convert to a dead encoder. `Software` is
+/// always usable and returns `true` without spawning anything.
+pub fn encoder_smoke_test(
+    backend: HwBackend,
+    codec: EncodeCodec,
+    vaapi_device: Option<&str>,
+) -> bool {
+    if backend == HwBackend::Software {
+        return true;
+    }
+    let args = encoder_args(backend, codec, 23, vaapi_device);
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.arg("-hide_banner").arg("-loglevel").arg("error").arg("-nostdin");
+    for a in &args.init {
+        cmd.arg(a);
+    }
+    cmd.arg("-f").arg("lavfi").arg("-i").arg("color=c=black:s=320x240:r=25:d=1");
+    if let Some(vf) = &args.pre_input_vf {
+        cmd.arg("-vf").arg(vf);
+    }
+    for a in &args.encoder_args {
+        cmd.arg(a);
+    }
+    cmd.arg("-frames:v").arg("1").arg("-f").arg("null").arg("-");
+    cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

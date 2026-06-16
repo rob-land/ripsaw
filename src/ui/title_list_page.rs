@@ -149,6 +149,12 @@ impl TitleListPage {
         // Default the format combo to "Off" so a regular rip is a single
         // click; user opts in by changing it.
         page.imp().output_format_row.set_selected(0);
+        // Default the encoder to "Auto" (row 1) so 3D conversion uses a
+        // hardware encoder when one is present (~3–4× faster than libx264;
+        // resolve_auto falls back to software when none is). Mirrors
+        // ConversionPlan::default_hw_backend(). Row 0 = Software stays one
+        // click away.
+        page.imp().encoder_backend_row.set_selected(1);
         // 3D-on-old-MakeMKV warning: probe makemkvcon's version and
         // warn (toast) if it's below the version that reliably writes
         // mvcC BlockAddition output. Without that, our keep-mvc

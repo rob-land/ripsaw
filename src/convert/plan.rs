@@ -25,8 +25,14 @@ impl ConversionPlan {
         EncodeCodec::H264
     }
 
+    /// Default to `Auto`: probe for a hardware encoder (NVENC/QSV/VAAPI/
+    /// …) and use it, falling back to software when none is present.
+    /// Measured ~3–4× faster encode than libx264 on an Intel iGPU
+    /// (docs/libmvc-injection.md § 5c), which is the dominant lever once
+    /// the 3D decode is the convert bottleneck. Software stays one click
+    /// away in the UI for users who want libx264's rate-distortion.
     pub fn default_hw_backend() -> HwBackend {
-        HwBackend::Software
+        HwBackend::Auto
     }
 }
 
