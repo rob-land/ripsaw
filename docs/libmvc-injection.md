@@ -206,9 +206,47 @@ decode / ~1.8× end-to-end (and only with HW encode; ~1.4× with x264).
 It is worth the ~2–3 week carve only if (a) HW encode is the default so
 decode is the bottleneck, or (b) it is a stepping stone to also
 accelerating the dependent view (SIMD / the Rust dependent decoder on the
-finished front end), which is where the 3–5×+ actually lives. If the
-near-term goal is "make convert faster for the least effort," pipelining
-decode↔encode + defaulting to NVENC beats the carve.
+finished front end), which is where the 3–5×+ actually lives.
+
+### 5c. HW-encode measurements (2026-06-16)
+
+This host has **no NVIDIA GPU** (`nvidia-smi` absent, `h264_nvenc` fails
+with "Cannot load libcuda.so.1") — it's an **Intel Iris Xe** iGPU, so the
+working HW encoders are **VAAPI** and **QSV** (Intel iHD driver). Encode
+of the same 400-frame FSBS content (base‖base proxy; x264 on the proxy
+was 6.92 s vs 6.68 s on real base‖dep, ~3 % — proxy validated):
+
+| Encoder | encode 400f | vs x264 |
+|---|---|---|
+| libx264 `-preset medium -crf 18` | 6.92 s (~58 fps) | 1.0× |
+| **h264_vaapi** `-qp 18` | **1.65 s** (~242 fps) | **4.2×** |
+| h264_qsv `-global_quality 18` | 2.34 s (~171 fps) | 3.0× |
+
+Convert (serial decode→encode) per 400 AU, and Option B's value at each:
+
+| Config | convert | decode share | Option B end-to-end |
+|---|---|---|---|
+| current decode + x264 | 17.17 s | 60 % | 1.36× |
+| current decode + **VAAPI** | **11.90 s** | **86 %** | **1.63×** |
+| current decode + QSV | 12.59 s | 81 % | 1.57× |
+
+95-min feature wall times: current+x264 **98 min** → +VAAPI **68 min**
+(1.44× from the encoder swap alone, zero decoder work) → Option B+VAAPI
+**42 min** (2.35× combined).
+
+Implications:
+- **The single cheapest win is defaulting to a HW encoder** (VAAPI here):
+  98→68 min, no decoder surgery, and it makes convert **86 % decode-bound**.
+- Once HW-encode-bound, Option B's decode speedup translates almost
+  directly: **1.63×** end-to-end (vs 1.36× with x264). So HW encode and
+  Option B are complementary, and Option B is clearly more valuable once
+  HW encode is the default.
+- Pipelining decode↔encode helps the *x264* case (encode is 40 %) but
+  barely helps the HW-encode case (encode is only ~14 %, hidden entirely
+  under decode), so it is **not** worth pursuing once HW encode is on.
+- NVENC numbers can't be taken here; on an NVIDIA host NVENC is typically
+  a touch faster than VAAPI, so it would land in the same "encode becomes
+  negligible, convert is decode-bound, Option B ≈ 1.6×" regime.
 
 ## 6. Open questions for the next session
 
