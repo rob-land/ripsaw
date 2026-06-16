@@ -167,6 +167,49 @@ SPS/PPS handling beyond what the front end already does.
 3. Either way, the finished front-end parsers (SPS/PPS/slice header) and
    the proven injection feed both.
 
+## 5b. Measured speedup ceiling (2026-06-16)
+
+Before committing to the Option B carve, measured what it actually buys
+on this host (20 cores), timing 400 access units of the real feature:
+
+| Stage | Current (ldecod) | Option B hybrid |
+|---|---|---|
+| base-view decode | 4.98 s (JM) | **0.39 s** (libavcodec, ~1025 fps) |
+| dependent-view decode | 5.27 s (JM) | 5.27 s (JM — unchanged) |
+| **decode total** | **10.25 s** | **5.66 s → 1.81×** |
+| encode (libx264 `-preset medium -crf 18`, FSBS) | 6.68 s | 6.68 s |
+| **convert total (serial decode→encode)** | **16.93 s** | **12.34 s → 1.37×** |
+
+Key findings:
+
+- **The dependent view is the floor.** It costs *more* than the base
+  (5.27 s vs 4.98 s) and Option B leaves it at JM reference speed. So the
+  decode-only ceiling is **~1.9×** (10.25/5.27), not the 3–5× the
+  original survey hoped for — offloading the base can at best halve
+  decode, and the base is slightly less than half.
+- **libavcodec base decode is ~13× faster than JM's** (0.39 s vs 4.98 s),
+  i.e. essentially free. The base offload itself is not the question;
+  the dependent view is.
+- **End-to-end depends on the encoder.** With software x264, encode is
+  ~39 % of convert, so Option B yields only **~1.37×** end-to-end
+  (a 95-min feature: ~97 min → ~71 min). With a ~free HW encoder
+  (NVENC), convert becomes decode-bound and Option B approaches its
+  **~1.8×** decode figure.
+- **Orthogonal win available without any decoder surgery:** decode and
+  encode currently run serially via YUV files. Pipelining them overlaps
+  ~6.7 s of encode under decode → ~max(decode, encode) instead of the
+  sum, ~1.65× on its own, and it stacks with HW encode. Cheaper than the
+  carve and independent of it.
+
+**Verdict.** Option B is a real but modest win, hard-capped near ~1.9×
+decode / ~1.8× end-to-end (and only with HW encode; ~1.4× with x264).
+It is worth the ~2–3 week carve only if (a) HW encode is the default so
+decode is the bottleneck, or (b) it is a stepping stone to also
+accelerating the dependent view (SIMD / the Rust dependent decoder on the
+finished front end), which is where the 3–5×+ actually lives. If the
+near-term goal is "make convert faster for the least effort," pipelining
+decode↔encode + defaulting to NVENC beats the carve.
+
 ## 6. Open questions for the next session
 
 - **Base-view reorder.** Confirm whether any disc in the corpus has a
