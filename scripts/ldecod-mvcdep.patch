@@ -1,11 +1,47 @@
 diff --git a/source/app/ldecod/image.c b/source/app/ldecod/image.c
-index 404e268..a5d76bd 100644
+index 404e268..0dfc99c 100644
 --- a/source/app/ldecod/image.c
 +++ b/source/app/ldecod/image.c
-@@ -1872,6 +1872,79 @@ void pad_dec_picture(VideoParameters *p_Vid, StorablePicture *dec_picture)
+@@ -728,8 +728,19 @@ void init_slice(VideoParameters *p_Vid, Slice *currSlice)
+   }
+ }
+ 
++static int ripsaw_inject_active(void); /* mvcdep: defined near exit_picture */
++
+ void decode_slice(Slice *currSlice, int current_header)
+ {
++  /* mvcdep: skip base-view MB decode; pixels come from the injected
++   * libavcodec frame. Mark the slice's MBs "decoded" so completeness /
++   * error-concealment checks treat the picture as whole. */
++  if (ripsaw_inject_active() && currSlice->view_id == 0)
++  {
++    currSlice->num_dec_mb = currSlice->end_mb_nr_plus1 - currSlice->start_mb_nr;
++    return;
++  }
++
+   if (currSlice->active_pps->entropy_coding_mode_flag)
+   {
+     init_contexts  (currSlice);
+@@ -1872,6 +1883,99 @@ void pad_dec_picture(VideoParameters *p_Vid, StorablePicture *dec_picture)
   *    into the DPB
   ************************************************************************
   */
++/* mvcdep mode: base view decode is replaced by injected libavcodec
++ * frames. Active iff RIPSAW_BASE_INJECT is set. When active, base-view
++ * (view_id 0) macroblock decode AND deblocking are skipped -- the base
++ * picture's samples come entirely from ripsaw_base_hook(). Slice-header
++ * parsing, init_picture (POC/frame_num) and reference marking still run,
++ * so the dependent view's inter-view + temporal ref lists stay correct.
++ * This is where the Option B speedup comes from (no base MB reconstruct).
++ */
++static int ripsaw_inject_active(void)
++{
++  static int v = -1;
++  if (v < 0)
++    v = getenv("RIPSAW_BASE_INJECT") ? 1 : 0;
++  return v;
++}
++
 +/* ----------------------------------------------------------------------
 + * Ripsaw base-view injection hook (libmvc base-frame injection PoC).
 + *
@@ -58,6 +94,10 @@ index 404e268..a5d76bd 100644
 +  cw = p->size_x_cr - p->frame_crop_left_offset - p->frame_crop_right_offset;
 +  ch = p->size_y_cr - (2 - p->frame_mbs_only_flag) * (p->frame_crop_top_offset + p->frame_crop_bottom_offset);
 +
++  /* The injected file is 8-bit planar 4:2:0; imgpel is 16-bit in this
++   * build, so each sample is read into a byte row buffer and widened
++   * (capture narrows the other way). The per-sample widen is unavoidable
++   * given the 16-bit picture store. */
 +  if (cap_fp)
 +  {
 +    unsigned char *row = malloc(lw);
@@ -82,7 +122,31 @@ index 404e268..a5d76bd 100644
  void exit_picture(VideoParameters *p_Vid, StorablePicture **dec_picture)
  {
    InputParameters *p_Inp = p_Vid->p_Inp;
-@@ -1984,6 +2057,7 @@ void exit_picture(VideoParameters *p_Vid, StorablePicture **dec_picture)
+@@ -1907,7 +2011,12 @@ void exit_picture(VideoParameters *p_Vid, StorablePicture **dec_picture)
+   ercSegment = 0;
+ 
+   //! mark the start of the first segment
+-  if (!(*dec_picture)->mb_aff_frame_flag)
++  /* mvcdep: the base view's per-MB error map (mb_data[].ei_flag) is
++   * never populated because its MB decode is skipped, so error
++   * concealment would read garbage and segfault in buildPredRegionYUV.
++   * The injected base is a complete, correct picture -- skip ERC. */
++  if (!(*dec_picture)->mb_aff_frame_flag
++      && !(ripsaw_inject_active() && (*dec_picture)->view_id == 0))
+   {
+     int i;
+     ercStartSegment(0, ercSegment, 0 , p_Vid->erc_errorVar);
+@@ -1948,7 +2057,8 @@ void exit_picture(VideoParameters *p_Vid, StorablePicture **dec_picture)
+   }
+ #endif
+ 
+-  if(!p_Vid->iDeblockMode && (p_Vid->bDeblockEnable & (1<<(*dec_picture)->used_for_reference)))
++  if(!p_Vid->iDeblockMode && (p_Vid->bDeblockEnable & (1<<(*dec_picture)->used_for_reference))
++     && !(ripsaw_inject_active() && (*dec_picture)->view_id == 0)) /* mvcdep: base is injected, already deblocked by libavcodec */
+   {
+     //deblocking for frame or field
+     if( (p_Vid->separate_colour_plane_flag != 0) )
+@@ -1984,6 +2094,7 @@ void exit_picture(VideoParameters *p_Vid, StorablePicture **dec_picture)
      frame_postprocessing(p_Vid);
    else
      field_postprocessing(p_Vid);   // reset all interlaced variables

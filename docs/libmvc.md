@@ -58,6 +58,17 @@ decoder" without committing to which decoder. This doc picks one.
   extraction but three localized edits to skip the base-view MB decode
   (the only source of the speedup) plus the proven injection hook, shipped
   as a `mvcdep` subprocess; ~1–1.5 wk, gated on HW encode landing first.
+- **2026-06-16 (mvcdep + HW default).** Landed HW-encode default (Auto +
+  pre-flight smoke test). Then implemented the mvcdep decoder surgery
+  (`scripts/ldecod-mvcdep.patch`): skip base MB decode / deblock / error
+  concealment, inject base from libavcodec. **Validated bit-exact**
+  (dependent ViewId0001 == stock: 96/96 clip, 400/400 feature incl.
+  B-frames) and **measured 1.54× decode** (6.80 s vs 10.48 s / 400 AU),
+  ~1.40–1.44× end-to-end with HW encode (a 95-min feature ~68→49 min).
+  Below the 1.9× ceiling because base header-parse/init/inject overhead
+  (~1.5 s) remains. Decoder half done + de-risked; the Ripsaw runner
+  integration (ffmpeg→fifo→mvcdep→compose) is the remaining plumbing.
+  Details in `docs/libmvc-optionb-carve.md` § Results.
 
 ## What's already built
 

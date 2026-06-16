@@ -135,6 +135,46 @@ base DPB/POC/marking state.* Test exactly as the PoC did:
   in the corpus — a B-frame base GOP (the order item above).
 - Re-time end-to-end to confirm the predicted ~1.6× (HW encode) lands.
 
+## Results — JM surgery implemented & validated (2026-06-16)
+
+The decoder half of the carve is done and measured
+(`scripts/ldecod-mvcdep.patch`, applied by `scripts/build-ldecod.sh`).
+Three localized edits in `image.c`, gated on `RIPSAW_BASE_INJECT`:
+
+1. `decode_slice`: early-return for `view_id == 0` (skip CABAC init +
+   `decode_one_slice`), marking the slice's MBs decoded.
+2. `exit_picture`: skip base deblocking **and** error concealment for the
+   injected base (its per-MB error map is never populated — ERC otherwise
+   segfaults in `buildPredRegionYUV`).
+3. `exit_picture`: fill the base picture's cropped samples from the
+   injected file (the PoC hook, now the sole base-pixel source). `imgpel`
+   is 16-bit in this build, so the 8-bit file samples are widened per
+   pixel — the copy can't be a raw `fread`.
+
+Correctness (dependent `ViewId0001` vs stock ldecod, bit-exact):
+**96/96** on the short clip, **400/400** on the feature's varied content
+(B-frames — the case that first exposed the ERC segfault). Base
+passthrough `ViewId0000` == the injected libavcodec base, 400/400.
+
+Speed (400 AU, this host):
+
+| | decode |
+|---|---|
+| stock ldecod, both views | 10.48 s |
+| **mvcdep** (skip base, inject) | **6.80 s → 1.54×** |
+
+This is below the ~1.9× arithmetic ceiling because mvcdep still parses
+base slice headers, runs `init_picture` (POC/DPB), and does the per-pixel
+injection copy (~1.5 s of irreducible base overhead). End-to-end with the
+now-default HW encoder: **~1.40× (QSV) / ~1.44× (VAAPI)**; with x264,
+~1.27×. A 95-min feature: convert ~68 min → ~49 min (QSV).
+
+**Remaining:** the Ripsaw integration — spawn ffmpeg base-decode → fifo,
+run mvcdep against it in `runner.rs`, compose from mvcdep's two view
+outputs, with resolution + fallback to stock both-views ldecod. The
+high-risk decoder surgery is done and bit-exact; the integration is
+plumbing.
+
 ## Effort & sequencing
 
 | Task | Est. |
