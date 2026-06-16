@@ -162,8 +162,10 @@ SPS/PPS handling beyond what the front end already does.
    96/96 identical to stock, and perturbing the injected base changed
    96/96 dependent frames. The injection hook is proven end-to-end.
 2. If the hook holds, decide B vs C on the speed target: B ships a
-   working hybrid fast (base at libavcodec speed, dep at JM speed →
-   the ~3–5× the survey predicted); C is the long road to 10×+.
+   working hybrid fast (base at libavcodec speed, dep at JM speed); C is
+   the long road to 10×+. **Option B is now scoped in detail in
+   `docs/libmvc-optionb-carve.md`** — subprocess `mvcdep`, ~1–1.5 wk,
+   gated on HW encode landing first.
 3. Either way, the finished front-end parsers (SPS/PPS/slice header) and
    the proven injection feed both.
 

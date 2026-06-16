@@ -48,6 +48,16 @@ decoder" without committing to which decoder. This doc picks one.
   Option B hybrid; what's left is engineering (carve JM's dependent
   decode into a library, or finish the Rust dependent decoder on the
   completed front end).
+- **2026-06-16 (perf + scope).** Measured the Option B ceiling
+  (`docs/libmvc-injection.md` § 5b/5c): decode ~1.8× (cap ~1.9×),
+  end-to-end ~1.4× with x264 / ~1.6× with HW encode (this host has no
+  NVIDIA GPU — Intel Iris Xe; VAAPI h264 is 4.2× x264, QSV 3.0×). The
+  cheapest win is defaulting to HW encode (1.44×, makes convert 86 %
+  decode-bound). Then scoped the carve itself in
+  `docs/libmvc-optionb-carve.md`: it is **not** an `mbuffer_mvc.c`
+  extraction but three localized edits to skip the base-view MB decode
+  (the only source of the speedup) plus the proven injection hook, shipped
+  as a `mvcdep` subprocess; ~1–1.5 wk, gated on HW encode landing first.
 
 ## What's already built
 
