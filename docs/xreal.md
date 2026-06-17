@@ -157,10 +157,13 @@ trivial container repackaging.
 What gates the "compose at playback" idea is the realtime decode
 budget. Numbers from the LR_Pattern test:
 
-- **H.264 MVC live decode via JM ldecod**: ~21 fps on 1920x1080
-  both-views. That's ~6x too slow for 24p playback. Not realtime.
-  Live MVC playback is gated on `libmvc` (the long-term decoder
-  scoped in `docs/mvc3d.md`).
+- **H.264 MVC live decode via JM ldecod**: an early note here put this
+  at ~21 fps ("6x too slow"). Remeasured 2026-06-17 on a Release build
+  (see "Live MVC->FSBS playback feasibility" below): **~38 fps both
+  views** single-threaded on a 2022 laptop chip, and **~59 fps** with the
+  mvcdep hybrid (libavcodec base + JM dependent). So on a *desktop* MVC
+  is already realtime; the 21 fps figure was a debug build / slower host.
+  The realtime gap is now an *ARM* problem, not a desktop one.
 - **HEVC MV-HEVC live decode via FFmpeg 7.1+**: realtime on any
   modern CPU. Anton Khirnov's `view_ids` patchset is software-
   decoding both layers; HEVC at 1080p doubled is well within
@@ -173,6 +176,69 @@ budget. Numbers from the LR_Pattern test:
 
 The implication: archive MV-HEVC, decode in realtime in the
 sister player, no `libmvc` needed for the Xreal flow.
+
+### Live MVC->FSBS playback feasibility — desktop vs ARM (2026-06-17)
+
+Could a media player take an MVC file and present it as Full-SBS in
+realtime (instead of transcoding to a file)? The player is the *same
+hybrid the mvcdep carve validated* (`docs/libmvc-optionb-carve.md`):
+
+```
+demux MKV -> extract MVC Annex B -> ┬ base view -> fast decoder ──┐
+                                    └ dep view  -> MVC sw decoder ─┴ hstack -> present
+```
+
+Reuses `mvc::mkv_extract`, the front-end parser, and the base-injection
+seam already built. Only the tail differs: present to a display instead
+of encode to a file.
+
+**Desktop: realtime today (measured).** 24 fps budget = 41.7 ms/pair at
+1080p. Single-threaded JM on a 2022 laptop chip:
+
+| Path | ms/pair | fps |
+|---|---|---|
+| ldecod both views | 26 | ~38 |
+| mvcdep (libavcodec base + JM dependent) | 17 | ~59 |
+
+Compose (hstack -> 3840x1080) is a trivial GPU/CPU op. A desktop MVC
+player works now, with headroom, via the mvcdep approach.
+
+**ARM phone: base trivial, dependent is the wall.**
+
+- *Base view -> hardware.* Plain H.264 High profile; every phone SoC
+  decodes it in its dedicated block (MediaCodec / VideoToolbox /
+  V4L2-m2m) at realtime, near-zero power. Perfect fit for the
+  "offload the base" half of mvcdep.
+- *Dependent view -> software only.* No mobile SoC has MVC hardware
+  decode (it died with 3D TVs). JM is the *reference* decoder — scalar
+  C, no NEON, no threading. ARM cores run this kind of code ~2-4x
+  slower than a desktop x86 core, so the desktop's ~59 fps dependent
+  decode falls to roughly **~15-29 fps on a flagship, single digits on
+  mid-range** — before thermal throttling and battery drain from
+  pegging a core. Marginal at best, poor UX even when it "works."
+
+Making the dependent view realtime on ARM needs a **NEON-optimised MVC
+decoder**: Option A (forward-port the Britz MVC patches onto libavcodec
+so the dependent view rides libavcodec's NEON H.264) or a hand-optimised
+libmvc. Neither is built; both are multi-week.
+
+**Pragmatic mobile answer: don't decode MVC live — archive MV-HEVC.**
+This is the strategy above. Transcode MVC -> MV-HEVC once on the desktop
+(decode is fine there), then on the phone play MV-HEVC with the HW
+decoder (Apple decodes MV-HEVC in hardware today for spatial video;
+Android/Qualcomm emerging) or FFmpeg 7.1 software. Realtime, low power,
+battery-friendly — no exotic decoder, MVC sidestepped entirely at
+playback time.
+
+| Target | Base | Dependent | Realtime FSBS? |
+|---|---|---|---|
+| Desktop (now) | libavcodec/HW | JM/mvcdep ~59 fps | **Yes (measured)** |
+| ARM phone, live MVC | HW H.264 | JM software ~15-29 fps, throttles | Marginal / no |
+| ARM phone, MV-HEVC archive | — | HW MV-HEVC | **Yes (the right path)** |
+
+Takeaway: a desktop MVC player is a small project on top of what exists;
+a *phone* MVC player is gated on an unbuilt NEON dependent decoder, and
+for mobile the MV-HEVC archive route is strictly better.
 
 ### Phased rollout
 
