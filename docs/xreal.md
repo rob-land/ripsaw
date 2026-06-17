@@ -168,14 +168,26 @@ budget. Numbers from the LR_Pattern test:
   modern CPU. Anton Khirnov's `view_ids` patchset is software-
   decoding both layers; HEVC at 1080p doubled is well within
   software-decode budget on any laptop chip from the last 5
-  years. **Not measured yet on this hardware** -- worth a 30-line
-  proof-of-concept before committing to the architecture.
-- **Encode side**: x265 has `--multiview-config` for MV-HEVC
-  output, 8-bit only as of this writing. NVIDIA Video Codec SDK
-  13.0 also encodes MV-HEVC if the user has an Ada-or-newer GPU.
+  years. **CORRECTION (2026-06-17):** the patchset's *option* exists
+  but a real MV-HEVC file does **not** decode on this host. A round-trip
+  PoC (see `docs/mvhevc-output.md`) — encode two views with x265
+  multiview, mux to MKV, decode with `ffmpeg -view_ids` (ffmpeg 8.1.1) —
+  recovers **only the base view** (`SPS 1 does not exist`). So "decode
+  in realtime in the sister player" is **unproven**; the earlier note
+  only confirmed the decoder *option* is present, never an actual decode.
+- **Encode side**: verified working — x265 built with
+  `-DENABLE_MULTIVIEW=ON` (the cmake default is OFF, so distro libx265
+  can't do it) produces a genuine 2-layer stream from our two views
+  (dependent layer ~33 kb/s vs base ~219 kb/s). Reachable only via the
+  standalone x265 binary + a `--multiview-config`, not ffmpeg's
+  single-input libx265. 8-bit only; NVENC MV-HEVC needs an Ada+ NVIDIA
+  GPU. Details + the parser gotchas in `docs/mvhevc-output.md`.
 
-The implication: archive MV-HEVC, decode in realtime in the
-sister player, no `libmvc` needed for the Xreal flow.
+The implication: archive MV-HEVC, decode in realtime in the sister
+player — **but** the decode half is now an open risk, not a given. We
+can *produce* MV-HEVC today; we have not *played* it anywhere. See
+`docs/mvhevc-output.md` for the scope and the gating decode-verification
+step.
 
 ### Live MVC->FSBS playback feasibility — desktop vs ARM (2026-06-17)
 
