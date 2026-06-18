@@ -24,7 +24,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use ripsaw::convert::format::OutputFormat;
 use ripsaw::identify::pipeline::{identify_physical_disc, IdentificationResult};
 use ripsaw::identify::submission::{
     stage_full_submission, ContentType, DiscSubmission, MovieMetadata, ReleaseMetadata,
@@ -144,7 +143,6 @@ async fn main() -> Result<()> {
             imdb_id: None,
             season: 1,
             episode_start,
-            conversion_format: None::<OutputFormat>,
             conversion_codec: ripsaw::convert::plan::ConversionPlan::default_codec(),
             conversion_hw_backend: ripsaw::convert::plan::ConversionPlan::default_hw_backend(),
         };
@@ -156,6 +154,7 @@ async fn main() -> Result<()> {
             &episode_titles_map,
             &display_overrides,
             &role_overrides,
+            &std::collections::HashMap::new(),
         );
         println!("\nPlanned {} episode rips:", plan.len());
         for p in &plan {

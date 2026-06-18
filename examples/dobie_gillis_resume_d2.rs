@@ -8,7 +8,6 @@ use std::time::Instant;
 
 use anyhow::Result;
 
-use ripsaw::convert::format::OutputFormat;
 use ripsaw::identify::pipeline::identify_physical_disc;
 use ripsaw::identify::submission::{
     stage_full_submission, ContentType, DiscSubmission, MovieMetadata, ReleaseMetadata,
@@ -69,13 +68,12 @@ async fn main() -> Result<()> {
         imdb_id: None,
         season: 1,
         episode_start: 9,
-        conversion_format: None::<OutputFormat>,
         conversion_codec: ripsaw::convert::plan::ConversionPlan::default_codec(),
         conversion_hw_backend: ripsaw::convert::plan::ConversionPlan::default_hw_backend(),
     };
     let plan = plan_rip(
         &ident, &selected, Some(&opts), &episode_titles_map,
-        &HashMap::new(), &role_overrides,
+        &HashMap::new(), &role_overrides, &HashMap::new(),
     );
     println!("Plan has {} titles; will skip the first (T{:02}, already ripped).",
         plan.len(), plan.first().map(|p| p.title_index).unwrap_or(0));

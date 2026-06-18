@@ -35,9 +35,6 @@ mod imp {
         #[template_child] pub series_toggle: TemplateChild<adw::SwitchRow>,
         #[template_child] pub title_override: TemplateChild<adw::EntryRow>,
         #[template_child] pub season_override: TemplateChild<adw::SpinRow>,
-        #[template_child] pub output_group: TemplateChild<adw::PreferencesGroup>,
-        #[template_child] pub output_format_row: TemplateChild<adw::ComboRow>,
-        #[template_child] pub encoder_backend_row: TemplateChild<adw::ComboRow>,
         #[template_child] pub year_row: TemplateChild<adw::SpinRow>,
         #[template_child] pub tmdb_id_row: TemplateChild<adw::EntryRow>,
         #[template_child] pub imdb_id_row: TemplateChild<adw::EntryRow>,
@@ -54,6 +51,10 @@ mod imp {
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
         pub episode_entries: RefCell<Vec<gtk::Entry>>,
+        /// Per-title 3D output-format dropdown, parallel to `checkboxes` /
+        /// `titles`. `Some` only for titles that carry an MVC track; `None`
+        /// for 2D titles (which can't be packed side-by-side).
+        pub format_dropdowns: RefCell<Vec<Option<gtk::DropDown>>>,
         pub titles: RefCell<Vec<TitleAttributes>>,
         pub iso_path: RefCell<Option<PathBuf>>,
         pub source: RefCell<Option<crate::rip::makemkv::ScanSource>>,
@@ -144,17 +145,9 @@ impl TitleListPage {
         };
         page.imp().source_kind.replace(source_kind);
         page.populate_with_identity(result);
-        // Show the 3D output options only when we detected MVC.
-        page.imp().output_group.set_visible(result.has_mvc);
-        // Default the format combo to "Off" so a regular rip is a single
-        // click; user opts in by changing it.
-        page.imp().output_format_row.set_selected(0);
-        // Default the encoder to "Auto" (row 1) so 3D conversion uses a
-        // hardware encoder when one is present (~3–4× faster than libx264;
-        // resolve_auto falls back to software when none is). Mirrors
-        // ConversionPlan::default_hw_backend(). Row 0 = Software stays one
-        // click away.
-        page.imp().encoder_backend_row.set_selected(1);
+        // The 3D output format is now chosen per title (a dropdown on each
+        // MVC title row, added in populate_rows); the encoder backend is a
+        // global preference. Nothing disc-level to initialise here.
         // 3D-on-old-MakeMKV warning: probe makemkvcon's version and
         // warn (toast) if it's below the version that reliably writes
         // mvcC BlockAddition output. Without that, our keep-mvc
@@ -283,6 +276,8 @@ impl TitleListPage {
         let group = self.imp().title_group.get();
         let mut checkboxes = Vec::with_capacity(scan.titles.len());
         let mut episode_entries = Vec::with_capacity(scan.titles.len());
+        let mut format_dropdowns: Vec<Option<gtk::DropDown>> =
+            Vec::with_capacity(scan.titles.len());
 
         let pairs: Vec<(u32, &str)> = scan
             .titles
@@ -367,11 +362,12 @@ impl TitleListPage {
             row.add_prefix(&check);
             row.set_activatable_widget(Some(&check));
 
-            // 3D marker: titles carrying an MVC dependent-view track are
-            // the stereoscopic-3D version of the feature. Surface this as
-            // a prominent accent pill so it's obvious at a glance which
-            // titles are 3D versus the flat 2D copies.
-            if t.has_mvc_stream() {
+            // 3D marker + per-title output-format picker. A title carrying
+            // an MVC dependent-view track is the stereoscopic-3D version of
+            // the feature: badge it, and give it its own 3D-output-format
+            // dropdown (the format used to be one disc-level combo). 2D
+            // titles get neither — there's nothing to pack side-by-side.
+            let format_dd = if t.has_mvc_stream() {
                 let badge = gtk::Label::builder()
                     .label("3D")
                     .valign(gtk::Align::Center)
@@ -379,7 +375,31 @@ impl TitleListPage {
                     .tooltip_text("Contains an MVC stereoscopic-3D video track")
                     .build();
                 row.add_suffix(&badge);
-            }
+
+                let dd = gtk::DropDown::from_strings(&[
+                    "2D (no 3D conversion)",
+                    "Full SBS",
+                    "Half SBS",
+                    "Full OU",
+                    "Half OU",
+                    "Frame-seq",
+                ]);
+                dd.set_valign(gtk::Align::Center);
+                dd.set_tooltip_text(Some(
+                    "3D output format for this title. \"2D\" keeps the MVC track but produces no side-by-side file.",
+                ));
+                // Only meaningful when the title is selected for ripping.
+                dd.set_sensitive(check.is_active());
+                check.connect_toggled(clone!(
+                    #[weak]
+                    dd,
+                    move |c| dd.set_sensitive(c.is_active())
+                ));
+                row.add_suffix(&dd);
+                Some(dd)
+            } else {
+                None
+            };
 
             let episode_entry = gtk::Entry::builder()
                 .placeholder_text("Episode title (optional)")
@@ -410,10 +430,12 @@ impl TitleListPage {
             group.add(&row);
             checkboxes.push(check);
             episode_entries.push(episode_entry);
+            format_dropdowns.push(format_dd);
         }
 
         self.imp().checkboxes.replace(checkboxes);
         self.imp().episode_entries.replace(episode_entries);
+        self.imp().format_dropdowns.replace(format_dropdowns);
         self.refresh_rip_sensitivity();
     }
 
@@ -720,11 +742,11 @@ impl TitleListPage {
         }
     }
 
-    /// Map the output-format ComboRow selection to an OutputFormat.
-    /// Returns `None` when the user picked "Off" (or the row is hidden).
-    fn selected_output_format(&self) -> Option<OutputFormat> {
-        // Row order must mirror the StringList in title-list-page.blp.
-        match self.imp().output_format_row.selected() {
+    /// Map a per-title format-dropdown selection to an OutputFormat.
+    /// Index order must mirror the strings passed to `DropDown::from_strings`
+    /// in `populate_rows`. Index 0 ("2D") → `None` (no conversion).
+    fn dropdown_format(dd: &gtk::DropDown) -> Option<OutputFormat> {
+        match dd.selected() {
             1 => Some(OutputFormat::FullSbs),
             2 => Some(OutputFormat::HalfSbs),
             3 => Some(OutputFormat::FullTab),
@@ -734,19 +756,44 @@ impl TitleListPage {
         }
     }
 
-    /// Map the encoder-backend ComboRow selection to a HwBackend.
-    /// Row order must mirror the StringList in title-list-page.blp.
-    fn selected_hw_backend(&self) -> crate::convert::hw::HwBackend {
-        use crate::convert::hw::HwBackend;
-        match self.imp().encoder_backend_row.selected() {
-            1 => HwBackend::Auto,
-            2 => HwBackend::Nvenc,
-            3 => HwBackend::Qsv,
-            4 => HwBackend::Vaapi,
-            5 => HwBackend::Amf,
-            6 => HwBackend::V4l2M2m,
-            _ => HwBackend::Software,
+    /// Per-title 3D output format for the *selected* MVC titles. Title
+    /// index → chosen layout; titles left on "2D" (or 2D titles) are
+    /// absent. Fed to `plan_rip` so each title converts independently.
+    fn format_by_index(&self) -> HashMap<u32, OutputFormat> {
+        let titles = self.imp().titles.borrow();
+        let checks = self.imp().checkboxes.borrow();
+        let dds = self.imp().format_dropdowns.borrow();
+        let mut map = HashMap::new();
+        for (i, t) in titles.iter().enumerate() {
+            if !checks.get(i).map_or(false, |c| c.is_active()) {
+                continue;
+            }
+            if let Some(Some(dd)) = dds.get(i) {
+                if let Some(fmt) = Self::dropdown_format(dd) {
+                    map.insert(t.index, fmt);
+                }
+            }
         }
+        map
+    }
+
+    /// The standalone-MKV convert path has a single MVC title and no rip
+    /// step; use the first MVC title's dropdown (regardless of checkbox).
+    fn mkv_convert_format(&self) -> Option<OutputFormat> {
+        self.imp()
+            .format_dropdowns
+            .borrow()
+            .iter()
+            .flatten()
+            .find_map(Self::dropdown_format)
+    }
+
+    /// Encoder backend — now a global preference (Settings), not per disc.
+    fn selected_hw_backend(&self) -> crate::convert::hw::HwBackend {
+        crate::settings::settings()
+            .lock()
+            .expect("settings mutex")
+            .conversion_hw_backend()
     }
 
     /// Single entry point for the header's `Process Selected` button.
@@ -758,7 +805,7 @@ impl TitleListPage {
             && self.imp().source.borrow().as_ref().map_or(false, |s| {
                 matches!(s, crate::rip::makemkv::ScanSource::Iso(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mkv")))
             });
-        let format = self.selected_output_format();
+        let format = self.mkv_convert_format();
 
         if is_already_extracted {
             // MKV input: there's nothing to "rip"; processing means
@@ -1415,9 +1462,8 @@ impl TitleListPage {
         if content_kind == DiscContentKind::Series {
             naming_opts.season = chosen_season.max(1);
         }
-        // Carry the 3D-output-format selection so the orchestrator
-        // chains a convert after each successful rip.
-        naming_opts.conversion_format = self.selected_output_format();
+        // 3D output format is now per-title (built below and passed to
+        // plan_rip); the encoder backend is a global preference.
         naming_opts.conversion_hw_backend = self.selected_hw_backend();
         // Codec stays at the default (H.264) until Phase B adds a
         // separate codec selector to the UI.
@@ -1442,6 +1488,7 @@ impl TitleListPage {
             .filter_map(|(idx, e)| e.role.map(|r| (*idx, r)))
             .collect();
         drop(title_edits);
+        let format_by_index = self.format_by_index();
         let plan = plan_rip(
             &identification_for_plan,
             &selected,
@@ -1449,6 +1496,7 @@ impl TitleListPage {
             &episode_titles,
             &display_overrides,
             &role_overrides,
+            &format_by_index,
         );
         let queue: Vec<RipQueueItem> = plan.into_iter().map(RipQueueItem::from).collect();
 

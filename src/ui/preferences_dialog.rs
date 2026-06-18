@@ -15,6 +15,7 @@ mod imp {
     pub struct PreferencesDialog {
         #[template_child] pub library_root_row: TemplateChild<adw::ActionRow>,
         #[template_child] pub scheme_combo: TemplateChild<adw::ComboRow>,
+        #[template_child] pub encoder_backend_combo: TemplateChild<adw::ComboRow>,
         #[template_child] pub sonarr_url_row: TemplateChild<adw::EntryRow>,
         #[template_child] pub sonarr_key_row: TemplateChild<adw::PasswordEntryRow>,
         #[template_child] pub radarr_url_row: TemplateChild<adw::EntryRow>,
@@ -66,6 +67,9 @@ impl PreferencesDialog {
         let current = settings().lock().expect("settings mutex").clone();
         self.imp().library_root_row.set_subtitle(&format_root(&current.library_root));
         self.imp().scheme_combo.set_selected(current.scheme.to_index());
+        self.imp()
+            .encoder_backend_combo
+            .set_selected(current.conversion_hw_backend().to_ui_index());
         self.imp().sonarr_url_row.set_text(current.sonarr.url.as_deref().unwrap_or(""));
         self.imp().sonarr_key_row.set_text(current.sonarr.api_key.as_deref().unwrap_or(""));
         self.imp().radarr_url_row.set_text(current.radarr.url.as_deref().unwrap_or(""));
@@ -95,6 +99,24 @@ impl PreferencesDialog {
                     }
                 }
                 let _ = dialog; // keep weak alive for the closure
+            }
+        ));
+
+        // Encoder backend -> persist the chosen HW backend.
+        self.imp().encoder_backend_combo.connect_selected_notify(clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |combo| {
+                let backend =
+                    crate::convert::hw::HwBackend::from_ui_index(combo.selected());
+                let mut guard = settings().lock().expect("settings mutex");
+                if guard.conversion_hw_backend != Some(backend) {
+                    guard.conversion_hw_backend = Some(backend);
+                    if let Err(e) = guard.save() {
+                        tracing::warn!("failed to save encoder backend preference: {e}");
+                    }
+                }
+                let _ = dialog;
             }
         ));
 

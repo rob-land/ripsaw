@@ -68,6 +68,32 @@ pub enum HwBackend {
 }
 
 impl HwBackend {
+    /// Map to/from the encoder-backend ComboRow index. Row order must
+    /// mirror the StringList in preferences-dialog.blp.
+    pub fn to_ui_index(self) -> u32 {
+        match self {
+            HwBackend::Software => 0,
+            HwBackend::Auto => 1,
+            HwBackend::Nvenc => 2,
+            HwBackend::Qsv => 3,
+            HwBackend::Vaapi => 4,
+            HwBackend::Amf => 5,
+            HwBackend::V4l2M2m => 6,
+        }
+    }
+
+    pub fn from_ui_index(idx: u32) -> Self {
+        match idx {
+            1 => HwBackend::Auto,
+            2 => HwBackend::Nvenc,
+            3 => HwBackend::Qsv,
+            4 => HwBackend::Vaapi,
+            5 => HwBackend::Amf,
+            6 => HwBackend::V4l2M2m,
+            _ => HwBackend::Software,
+        }
+    }
+
     /// Human-readable label for the UI.
     pub fn label(self) -> &'static str {
         match self {

@@ -26,6 +26,19 @@ pub struct UserSettings {
     /// the submission form.
     #[serde(default)]
     pub tmdb_api_key: Option<String>,
+    /// Encoder backend for the 3D convert step. Global preference (the
+    /// per-disc selector was removed). `None` means "Auto" — probe for a
+    /// hardware encoder, fall back to software.
+    #[serde(default)]
+    pub conversion_hw_backend: Option<crate::convert::hw::HwBackend>,
+}
+
+impl UserSettings {
+    /// Resolved encoder backend, defaulting to `Auto` when unset.
+    pub fn conversion_hw_backend(&self) -> crate::convert::hw::HwBackend {
+        self.conversion_hw_backend
+            .unwrap_or(crate::convert::hw::HwBackend::Auto)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

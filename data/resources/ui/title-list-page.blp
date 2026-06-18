@@ -152,43 +152,6 @@ template $RipsawTitleListPage: Adw.NavigationPage {
         }
       }
 
-      Adw.PreferencesGroup output_group {
-        title: _("Output");
-        description: _("Choose how the selected titles are produced.");
-        visible: false;
-
-        Adw.ComboRow output_format_row {
-          title: _("3D output format");
-          subtitle: _("Pack the dependent view next to the base view in the output MKV.");
-          model: StringList {
-            strings [
-              _("Off — leave the source untouched"),
-              _("Full side-by-side (3840×1080)"),
-              _("Half side-by-side (1920×1080)"),
-              _("Full over/under (1920×2160)"),
-              _("Half over/under (1920×1080)"),
-              _("Frame-sequential (2× fps)"),
-            ]
-          };
-        }
-
-        Adw.ComboRow encoder_backend_row {
-          title: _("Encoder backend");
-          subtitle: _("CPU vs GPU encode. \"Auto\" picks the best available hardware encoder.");
-          model: StringList {
-            strings [
-              _("Software (libx264, best quality)"),
-              _("Auto (any available hardware encoder)"),
-              _("NVIDIA NVENC"),
-              _("Intel Quick Sync"),
-              _("VAAPI (Intel iHD / AMD VCN)"),
-              _("AMD AMF"),
-              _("V4L2 m2m (ARM SoC)"),
-            ]
-          };
-        }
-      }
-
       Adw.PreferencesGroup title_group {
         title: _("Titles found");
         description: _("Tick the titles you want to process, then press the Process button.");

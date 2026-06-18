@@ -139,7 +139,7 @@ pub async fn identify_mkv(mkv_path: PathBuf) -> Result<IdentificationResult> {
         .with_context(|| format!("probing {}", mkv_path.display()))?;
 
     let (has_mvc, stereo_mode) = detect_3d(&mkv_path);
-    let scan_data = synthesise_scan(&mkv_path, &report);
+    let scan_data = synthesise_scan(&mkv_path, &report, has_mvc);
     let _ = stereo_mode; // surfaced through has_mvc; detailed mode UX is a TODO
     let _has_mvcc = has_mvc; // used below to discriminate the StereoSource variant
     let disc_type = if has_mvc { DiscType::BluRay3D } else { DiscType::BluRay };
@@ -172,11 +172,33 @@ fn detect_3d(mkv_path: &std::path::Path) -> (bool, Option<u64>) {
     }
 }
 
-fn synthesise_scan(mkv_path: &std::path::Path, report: &ffprobe::FfprobeReport) -> MakemkvScan {
+fn synthesise_scan(
+    mkv_path: &std::path::Path,
+    report: &ffprobe::FfprobeReport,
+    has_mvc: bool,
+) -> MakemkvScan {
     let name = mkv_path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned());
     let display_name = name.clone().unwrap_or_else(|| "MKV file".to_string());
+
+    let mut streams: Vec<StreamAttributes> =
+        report.streams.iter().map(stream_attributes_from).collect();
+    if has_mvc {
+        // ffprobe sees the MVC dependent view as mvcC BlockAdditions on
+        // the base track, not as a separate stream, so nothing above is
+        // tagged "MVC". Append a synthetic marker so per-title 3D
+        // detection (`TitleAttributes::has_mvc_stream`) treats this MKV
+        // title the same as a makemkvcon disc scan's 3D title — which is
+        // what drives the "3D" badge + per-title format dropdown.
+        streams.push(StreamAttributes {
+            stream: streams.len() as u32,
+            kind: Some("Video".to_string()),
+            codec_short: Some("Mpeg4-MVC-3D".to_string()),
+            codec_long: Some("Mpeg4 MVC".to_string()),
+            ..Default::default()
+        });
+    }
 
     let title = TitleAttributes {
         index: 0,
@@ -195,11 +217,7 @@ fn synthesise_scan(mkv_path: &std::path::Path, report: &ffprobe::FfprobeReport) 
         segment_map: Some("1".to_string()),
         output_file: Some(format!("{display_name}.mkv")),
         language_code: None,
-        streams: report
-            .streams
-            .iter()
-            .map(stream_attributes_from)
-            .collect(),
+        streams,
     };
 
     MakemkvScan {

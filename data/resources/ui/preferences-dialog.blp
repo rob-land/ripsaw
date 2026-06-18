@@ -37,6 +37,28 @@ template $RipsawPreferencesDialog: Adw.PreferencesDialog {
     }
 
     Adw.PreferencesGroup {
+      title: _("Encoding");
+      description: _("Applies to the 3D side-by-side / over-under conversion step.");
+
+      Adw.ComboRow encoder_backend_combo {
+        title: _("Encoder backend");
+        subtitle: _("CPU vs GPU encode. \"Auto\" picks the best available hardware encoder, falling back to software.");
+
+        model: StringList {
+          strings [
+            _("Software (libx264, best quality)"),
+            _("Auto (any available hardware encoder)"),
+            _("NVIDIA NVENC"),
+            _("Intel Quick Sync"),
+            _("VAAPI (Intel iHD / AMD VCN)"),
+            _("AMD AMF"),
+            _("V4L2 m2m (ARM SoC)"),
+          ]
+        };
+      }
+    }
+
+    Adw.PreferencesGroup {
       title: _("Sonarr");
       description: _("Look up canonical series names and episode titles for TV rips.");
 

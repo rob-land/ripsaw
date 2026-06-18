@@ -125,9 +125,6 @@ pub struct NamingOpts {
     /// Only used when content_kind is Series. First selected title gets
     /// `episode_start`, subsequent titles get `episode_start + 1` etc.
     pub episode_start: u32,
-    /// When set, every ripped title is post-processed into this 3D
-    /// output layout via the convert pipeline after rip + rename land.
-    pub conversion_format: Option<crate::convert::format::OutputFormat>,
     /// Codec for the post-rip 3D conversion. Carried through to the
     /// orchestrator's ConversionPlan build.
     pub conversion_codec: crate::convert::hw::EncodeCodec,
@@ -180,6 +177,7 @@ pub fn plan_rip(
     episode_titles_by_index: &HashMap<u32, String>,
     display_overrides_by_index: &HashMap<u32, String>,
     role_overrides_by_index: &HashMap<u32, TitleRole>,
+    format_by_index: &HashMap<u32, crate::convert::format::OutputFormat>,
 ) -> Vec<PlannedTitle> {
     let main_index = main_title_index(identification);
     let identity_titles: &[TitleIdentity] = identification
@@ -238,6 +236,7 @@ pub fn plan_rip(
                         naming,
                         episode_number,
                         episode_title,
+                        format_by_index.get(&t.index).copied(),
                     )
                 })
         })
@@ -271,6 +270,7 @@ fn plan_one_title(
     naming: Option<&NamingOpts>,
     episode_number: Option<u32>,
     episode_title: Option<&str>,
+    conversion_format: Option<crate::convert::format::OutputFormat>,
 ) -> PlannedTitle {
     // Display precedence: user override (from TitleDetailPage) >
     // TheDiscDB identity > MakeMKV scan name > "Title N".
@@ -334,7 +334,7 @@ fn plan_one_title(
         final_path,
         chapter_titles,
         segment_title,
-        conversion_format: naming.and_then(|n| n.conversion_format),
+        conversion_format,
         conversion_codec: naming
             .map(|n| n.conversion_codec)
             .unwrap_or_else(crate::convert::plan::ConversionPlan::default_codec),
@@ -515,7 +515,6 @@ pub fn naming_opts_for_unidentified(
         imdb_id: None,
         season,
         episode_start: 1,
-        conversion_format: None,
         conversion_codec: crate::convert::plan::ConversionPlan::default_codec(),
         conversion_hw_backend: crate::convert::plan::ConversionPlan::default_hw_backend(),
     }
@@ -587,7 +586,7 @@ mod tests {
             DiscContentKind::Movie,
             "Some Disc",
         );
-        let plan = plan_rip(&id, &[0, 1], Some(&opts), &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let plan = plan_rip(&id, &[0, 1], Some(&opts), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(plan.len(), 2);
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
@@ -630,7 +629,7 @@ mod tests {
         roles.insert(1u32, TitleRole::Main);
 
         let plan =
-            plan_rip(&id, &[0, 1], Some(&opts), &HashMap::new(), &HashMap::new(), &roles);
+            plan_rip(&id, &[0, 1], Some(&opts), &HashMap::new(), &HashMap::new(), &roles, &HashMap::new());
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
             std::path::Path::new("/lib/Movies/Movie/Movie - 3D.mkv")
@@ -724,7 +723,7 @@ mod tests {
         assert_eq!(opts.disc_title, "Dobiegillis");
         assert_eq!(opts.season, 1);
 
-        let plan = plan_rip(&id, &[0, 1, 2], Some(&opts), &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let plan = plan_rip(&id, &[0, 1, 2], Some(&opts), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(plan.len(), 3);
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
@@ -754,7 +753,7 @@ mod tests {
         );
         opts.episode_start = 7;
         opts.season = 2;
-        let plan = plan_rip(&id, &[0], Some(&opts), &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let plan = plan_rip(&id, &[0], Some(&opts), &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
             std::path::Path::new("/lib/Shows/Series Name/Season 02/Series Name S02E07.mkv")
@@ -780,7 +779,7 @@ mod tests {
         episode_titles.insert(0u32, "Pilot".to_string());
         episode_titles.insert(1u32, "The Sequel".to_string());
 
-        let plan = plan_rip(&id, &[0, 1], Some(&opts), &episode_titles, &HashMap::new(), &HashMap::new());
+        let plan = plan_rip(&id, &[0, 1], Some(&opts), &episode_titles, &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
             std::path::Path::new("/lib/Shows/Some Series/Season 01/Some Series S01E01 - Pilot.mkv")
@@ -810,7 +809,7 @@ mod tests {
         episode_titles.insert(0u32, "Pilot".to_string());
         // Title 1 is left out of the map.
 
-        let plan = plan_rip(&id, &[0, 1], Some(&opts), &episode_titles, &HashMap::new(), &HashMap::new());
+        let plan = plan_rip(&id, &[0, 1], Some(&opts), &episode_titles, &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(
             plan[0].final_path.as_deref().unwrap(),
             std::path::Path::new("/lib/Shows/Some Series/Season 01/Some Series S01E01 - Pilot.mkv")
@@ -824,7 +823,7 @@ mod tests {
     #[test]
     fn no_naming_opts_means_flat_output_with_no_final_path() {
         let id = scan_with(vec![title(0, "M", 60, "x_t00.mkv")], Some("d"));
-        let plan = plan_rip(&id, &[0], None, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let plan = plan_rip(&id, &[0], None, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new());
         assert_eq!(plan.len(), 1);
         assert!(plan[0].final_path.is_none());
         assert_eq!(plan[0].output_filename, "x_t00.mkv");
