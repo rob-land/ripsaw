@@ -409,6 +409,7 @@ impl RipsawWindow {
             .as_deref()
             .unwrap_or("(unnamed disc)");
 
+        use crate::identify::pipeline::LookupStatus;
         if result.is_identified() {
             let slug = result
                 .identities
@@ -416,11 +417,25 @@ impl RipsawWindow {
                 .map(|i| i.release_slug.as_str())
                 .unwrap_or("");
             self.toast(&format!("{disc_name}: identified as {slug}"));
+        } else if let LookupStatus::Failed(_) = &result.lookup_status {
+            // The lookup ERRORED — don't claim the disc isn't catalogued
+            // (TheDiscDB's hosted endpoint has been unreliable). Say the
+            // lookup failed so the user knows to retry / that it's not a
+            // missing-disc problem.
+            let hash_part = result
+                .content_hash
+                .as_deref()
+                .map(|h| format!(" (hash {})", &h[..h.len().min(12)]))
+                .unwrap_or_default();
+            self.toast(&format!(
+                "{disc_name}: {n} titles • {} • TheDiscDB lookup failed — service unreachable{hash_part}",
+                describe_disc_type(result.disc_type),
+            ));
         } else if let Some(h) = &result.content_hash {
             self.toast(&format!(
                 "{disc_name}: {n} titles • {} • not in catalog (hash {})",
                 describe_disc_type(result.disc_type),
-                &h[..12]
+                &h[..h.len().min(12)]
             ));
         } else {
             self.toast(&format!(

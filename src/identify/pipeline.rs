@@ -39,6 +39,13 @@ pub struct IdentificationResult {
     pub disc_type: DiscType,
     pub content_hash: Option<String>,
     pub identities: Vec<Identity>,
+    /// Outcome of the TheDiscDB lookup. Distinguishes a *service error*
+    /// (endpoint down, network failure) from a genuine *no match*, so the
+    /// UI doesn't tell the user "not in catalog" when the lookup actually
+    /// failed. TheDiscDB's hosted endpoint has been unreliable (observed
+    /// 403 "Web App - Unavailable"), which previously surfaced identically
+    /// to "disc not catalogued".
+    pub lookup_status: LookupStatus,
     /// What `makemkvcon` should be pointed at to extract titles from
     /// this source. `Disc(N)` for physical drives, `Iso(path)` for ISO
     /// images and (vacuously) for already-extracted MKVs where the
@@ -63,10 +70,47 @@ pub struct IdentificationResult {
     pub dvd_region_code: Option<String>,
 }
 
+/// Result of attempting a TheDiscDB content-hash lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LookupStatus {
+    /// No lookup was attempted (disc not mounted / no content hash).
+    #[default]
+    NotAttempted,
+    /// Lookup completed. An empty `identities` here means the disc is
+    /// genuinely not in the catalogue.
+    Ok,
+    /// Lookup failed (service down, network error, bad response). The
+    /// disc may well be catalogued — we just couldn't reach the data.
+    Failed(String),
+}
+
 impl IdentificationResult {
     /// `true` when at least one TheDiscDB match was returned.
     pub fn is_identified(&self) -> bool {
         !self.identities.is_empty()
+    }
+}
+
+/// Run a TheDiscDB lookup for the given optional content hash, capturing
+/// whether it succeeded, returned nothing, or errored. Centralises the
+/// "service error vs no match" distinction both disc paths need.
+async fn lookup_with_status(hash: Option<&str>) -> (Vec<Identity>, LookupStatus) {
+    let Some(h) = hash else {
+        return (Vec::new(), LookupStatus::NotAttempted);
+    };
+    let client = match TheDiscDbClient::with_default_endpoint() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("TheDiscDB client init failed: {e:#}");
+            return (Vec::new(), LookupStatus::Failed(format!("{e:#}")));
+        }
+    };
+    match client.lookup_by_hash(h).await {
+        Ok(ids) => (ids, LookupStatus::Ok),
+        Err(e) => {
+            tracing::warn!("TheDiscDB lookup failed for hash {h}: {e:#}");
+            (Vec::new(), LookupStatus::Failed(format!("{e:#}")))
+        }
     }
 }
 
@@ -85,10 +129,7 @@ pub async fn identify_physical_disc(
     let hash = enumerate_disc_files(&mount_path)
         .map(|files| content_hash(&files))
         .ok();
-    let identities = match (&hash, TheDiscDbClient::with_default_endpoint()) {
-        (Some(h), Ok(client)) => client.lookup_by_hash(h).await.unwrap_or_default(),
-        _ => Vec::new(),
-    };
+    let (identities, lookup_status) = lookup_with_status(hash.as_deref()).await;
     let disc_type = detect_disc_type_with_mount(&scan_data, &mount_path);
     let has_mvc = scan_has_mvc(&scan_data);
     let bdmt = crate::identify::bdmt::read_from_mount(&mount_path)
@@ -105,6 +146,7 @@ pub async fn identify_physical_disc(
         disc_type,
         content_hash: hash,
         identities,
+        lookup_status,
         source,
         source_file: None,
         has_mvc,
@@ -150,6 +192,7 @@ pub async fn identify_mkv(mkv_path: PathBuf) -> Result<IdentificationResult> {
         disc_type,
         content_hash: None,
         identities: Vec::new(),
+        lookup_status: LookupStatus::NotAttempted,
         source: ScanSource::Iso(mkv_path.clone()),
         source_file: Some(mkv_path),
         has_mvc,
@@ -303,21 +346,21 @@ pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
     let scan_data = scan_res.context("running makemkvcon scan")?;
     let mount = mount_res.ok();
 
-    let (disc_type, content_hash_value, identities) = match &mount {
+    let (disc_type, content_hash_value, identities, lookup_status) = match &mount {
         Some(m) => {
             let hash = enumerate_disc_files(&m.mount_point)
                 .map(|files| content_hash(&files))
                 .ok();
-            let identities = match (&hash, TheDiscDbClient::with_default_endpoint()) {
-                (Some(h), Ok(client)) => {
-                    client.lookup_by_hash(h).await.unwrap_or_default()
-                }
-                _ => Vec::new(),
-            };
+            let (identities, lookup_status) = lookup_with_status(hash.as_deref()).await;
             let disc_type = detect_disc_type_with_mount(&scan_data, &m.mount_point);
-            (disc_type, hash, identities)
+            (disc_type, hash, identities, lookup_status)
         }
-        None => (detect_disc_type(&scan_data), None, Vec::new()),
+        None => (
+            detect_disc_type(&scan_data),
+            None,
+            Vec::new(),
+            LookupStatus::NotAttempted,
+        ),
     };
 
     let has_mvc = scan_has_mvc(&scan_data);
@@ -334,6 +377,7 @@ pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
         disc_type,
         content_hash: content_hash_value,
         identities,
+        lookup_status,
         source,
         source_file: Some(iso_path),
         has_mvc,
