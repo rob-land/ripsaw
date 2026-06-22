@@ -13,6 +13,13 @@ behind-the-scenes featurettes — has effectively one open source:
 - **[TheDiscDB](https://thediscdb.com/)** is the only catalogue that
   records disc structure at title granularity. We query it as the
   primary identification.
+  - **Caveat (2026-06):** the hosted GraphQL endpoint has proven
+    unreliable (observed fully down, `403 "Web App - Unavailable"`).
+    Lookups now report a service error distinctly from "not catalogued"
+    (`LookupStatus`, commit `b02da5f`). The catalogue data is also
+    published openly at [`TheDiscDb/data`](https://github.com/TheDiscDb/data);
+    a local-mirror lookup path that survives the outage is scoped in
+    `docs/thediscdb-local.md`.
 
 Adjacent sources are useful as augmentation or fallback but do not
 replace TheDiscDB:
