@@ -31,10 +31,15 @@ template $RipsawTitleListPage: Adw.NavigationPage {
       }
     }
 
+    [top]
+    Adw.Banner status_banner {
+      revealed: false;
+    }
+
     content: Adw.PreferencesPage {
       Adw.PreferencesGroup classification_group {
-        title: _("Disc type");
-        description: _("Auto-detected from title durations. Toggle if it's wrong.");
+        title: _("Disc");
+        description: _("Auto-detected from title durations. Adjust if it's wrong.");
 
         Adw.EntryRow title_override {
           title: _("Series / Movie title");
@@ -65,96 +70,102 @@ template $RipsawTitleListPage: Adw.NavigationPage {
         }
       }
 
-      Adw.PreferencesGroup submission_group {
-        title: _("Submission metadata");
-        description: _("Fill in to submit a new entry to TheDiscDB. Optional for corrections to an existing disc.");
-
-        Adw.SpinRow year_row {
-          title: _("Year");
-          adjustment: Adjustment {
-            lower: 1900;
-            upper: 2100;
-            step-increment: 1;
-            value: 2025;
-          };
-        }
-
-        Adw.EntryRow tmdb_id_row {
-          title: _("TMDb ID");
-
-          [suffix]
-          Button tmdb_lookup_button {
-            valign: center;
-            action-name: "page.lookup-tmdb";
-            tooltip-text: _("Fetch title / year / plot / tagline / IMDb cross-ref from TMDB");
-            icon-name: "system-search-symbolic";
-          }
-
-          [suffix]
-          Button cover_art_button {
-            valign: center;
-            action-name: "page.pick-cover-art";
-            tooltip-text: _("Pick a TMDB poster to ship as cover.jpg with the TheDiscDB submission");
-            icon-name: "image-x-generic-symbolic";
-          }
-        }
-
-        Adw.EntryRow imdb_id_row {
-          title: _("IMDb ID (tt…)");
-
-          [suffix]
-          Button imdb_lookup_button {
-            valign: center;
-            action-name: "page.lookup-imdb";
-            tooltip-text: _("Look up by IMDb ID via TMDB and fill in the rest");
-            icon-name: "system-search-symbolic";
-          }
-        }
-
-        Adw.EntryRow plot_row {
-          title: _("Plot");
-        }
-
-        Adw.EntryRow tagline_row {
-          title: _("Tagline");
-        }
-
-        Adw.EntryRow release_slug_row {
-          title: _("Release slug");
-        }
-
-        Adw.EntryRow release_title_row {
-          title: _("Release title");
-        }
-
-        Adw.EntryRow locale_row {
-          title: _("Locale (e.g. en-us)");
-        }
-
-        Adw.EntryRow region_code_row {
-          title: _("Region code (1 / A / B / …)");
-        }
-
-        Adw.EntryRow upc_row {
-          title: _("UPC / barcode");
-
-          [suffix]
-          Button upc_lookup_button {
-            valign: center;
-            action-name: "page.lookup-upc";
-            tooltip-text: _("Look up the UPC on UPCitemDB to fill in ASIN + release title");
-            icon-name: "system-search-symbolic";
-          }
-        }
-
-        Adw.EntryRow asin_row {
-          title: _("Amazon ASIN");
-        }
-      }
-
       Adw.PreferencesGroup title_group {
         title: _("Titles found");
         description: _("Tick the titles you want to process, then press the Process button.");
+      }
+
+      Adw.PreferencesGroup submission_group {
+        title: _("Contribute to TheDiscDB");
+        description: _("Optional. Fill in to submit a new entry or corrections to the open disc catalogue.");
+
+        Adw.ExpanderRow submission_expander {
+          title: _("Submission metadata");
+          subtitle: _("Year, IDs, plot, release details");
+          expanded: false;
+
+          Adw.SpinRow year_row {
+            title: _("Year");
+            adjustment: Adjustment {
+              lower: 1900;
+              upper: 2100;
+              step-increment: 1;
+              value: 2025;
+            };
+          }
+
+          Adw.EntryRow tmdb_id_row {
+            title: _("TMDb ID");
+
+            [suffix]
+            Button tmdb_lookup_button {
+              valign: center;
+              action-name: "page.lookup-tmdb";
+              tooltip-text: _("Fetch title / year / plot / tagline / IMDb cross-ref from TMDB");
+              icon-name: "system-search-symbolic";
+            }
+
+            [suffix]
+            Button cover_art_button {
+              valign: center;
+              action-name: "page.pick-cover-art";
+              tooltip-text: _("Pick a TMDB poster to ship as cover.jpg with the TheDiscDB submission");
+              icon-name: "image-x-generic-symbolic";
+            }
+          }
+
+          Adw.EntryRow imdb_id_row {
+            title: _("IMDb ID (tt…)");
+
+            [suffix]
+            Button imdb_lookup_button {
+              valign: center;
+              action-name: "page.lookup-imdb";
+              tooltip-text: _("Look up by IMDb ID via TMDB and fill in the rest");
+              icon-name: "system-search-symbolic";
+            }
+          }
+
+          Adw.EntryRow plot_row {
+            title: _("Plot");
+          }
+
+          Adw.EntryRow tagline_row {
+            title: _("Tagline");
+          }
+
+          Adw.EntryRow release_slug_row {
+            title: _("Release slug");
+          }
+
+          Adw.EntryRow release_title_row {
+            title: _("Release title");
+          }
+
+          Adw.EntryRow locale_row {
+            title: _("Locale (e.g. en-us)");
+          }
+
+          Adw.EntryRow region_code_row {
+            title: _("Region code (1 / A / B / …)");
+          }
+
+          Adw.EntryRow upc_row {
+            title: _("UPC / barcode");
+
+            [suffix]
+            Button upc_lookup_button {
+              valign: center;
+              action-name: "page.lookup-upc";
+              tooltip-text: _("Look up the UPC on UPCitemDB to fill in ASIN + release title");
+              icon-name: "system-search-symbolic";
+            }
+          }
+
+          Adw.EntryRow asin_row {
+            title: _("Amazon ASIN");
+          }
+        }
       }
     };
   }

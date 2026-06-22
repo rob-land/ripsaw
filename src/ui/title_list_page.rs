@@ -48,6 +48,8 @@ mod imp {
         #[template_child] pub asin_row: TemplateChild<adw::EntryRow>,
         #[allow(dead_code)]
         #[template_child] pub submission_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child] pub submission_expander: TemplateChild<adw::ExpanderRow>,
+        #[template_child] pub status_banner: TemplateChild<adw::Banner>,
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
         pub episode_entries: RefCell<Vec<gtk::Entry>>,
@@ -199,7 +201,65 @@ impl TitleListPage {
         ));
     }
 
+    /// Set the persistent identification banner from the lookup outcome.
+    /// Replaces the old transient toast as the durable on-page status:
+    /// identified / catalogue-unreachable / not-catalogued. For the
+    /// not-catalogued case it also opens the submission form, since that's
+    /// the next thing the user would do.
+    fn update_status_banner(&self, result: &IdentificationResult) {
+        use crate::identify::pipeline::LookupStatus;
+        let banner = self.imp().status_banner.get();
+        banner.set_button_label(None);
+        let kind = crate::window::describe_disc_type(result.disc_type);
+
+        if let Some(identity) = result.identities.first() {
+            let year = identity.year.map(|y| format!(" ({y})")).unwrap_or_default();
+            let title = if identity.item_title.trim().is_empty() {
+                identity.release_slug.clone()
+            } else {
+                identity.item_title.clone()
+            };
+            banner.set_title(&format!("{kind} • Identified as {title}{year}"));
+            banner.set_revealed(true);
+            return;
+        }
+
+        match &result.lookup_status {
+            LookupStatus::Failed(_) => {
+                // Could not reach the catalogue — the disc may well be in
+                // it. Don't claim "not catalogued"; offer to add details.
+                banner.set_title(&format!(
+                    "{kind} • TheDiscDB unreachable — titles below are from the disc scan. \
+                     You can still rip; identification is just missing."
+                ));
+                banner.set_button_label(Some("Add details"));
+                banner.set_revealed(true);
+            }
+            LookupStatus::Ok => {
+                // Looked up successfully and genuinely not catalogued.
+                banner.set_title(&format!(
+                    "{kind} • Not in TheDiscDB. Ripping works; add the details to submit this disc."
+                ));
+                banner.set_button_label(Some("Add details"));
+                banner.set_revealed(true);
+                self.imp().submission_expander.set_expanded(true);
+            }
+            LookupStatus::NotAttempted => {
+                // No content hash (standalone MKV, or disc not mounted).
+                banner.set_revealed(false);
+            }
+        }
+
+        // The banner's action button reveals the submission form.
+        banner.connect_button_clicked(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_| page.imp().submission_expander.set_expanded(true)
+        ));
+    }
+
     fn populate_with_identity(&self, result: &IdentificationResult) {
+        self.update_status_banner(result);
         let group = self.imp().title_group.get();
         group.set_title(&format_group_title(result));
         group.set_description(Some(&format_group_description(result)));
