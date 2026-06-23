@@ -126,6 +126,14 @@ pub fn parse_lookup_response(json: &str, expected_hash: &str) -> Result<Vec<Iden
                     .and_then(|e| e.tvdb.clone())
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
+                // Cover art: prefer the media item's image, fall back to
+                // the matched release's. Both are relative paths upstream.
+                let image_url = media_item
+                    .image_url
+                    .clone()
+                    .or_else(|| release.image_url.clone())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
                 out.push(Identity {
                     media_item_id: media_item.id.to_string(),
                     release_slug: release.slug.clone(),
@@ -138,6 +146,7 @@ pub fn parse_lookup_response(json: &str, expected_hash: &str) -> Result<Vec<Iden
                     tmdb_id,
                     imdb_id,
                     tvdb_id,
+                    image_url,
                 });
             }
         }
@@ -225,7 +234,7 @@ struct MediaItemNode {
     title: Option<String>,
     year: Option<i32>,
     #[allow(dead_code)] slug: Option<String>,
-    #[allow(dead_code)] image_url: Option<String>,
+    image_url: Option<String>,
     #[allow(dead_code)]
     #[serde(rename = "type")]
     item_type: Option<String>,
@@ -255,7 +264,7 @@ struct ReleaseNode {
     #[allow(dead_code)] year: Option<i32>,
     #[allow(dead_code)] upc: Option<String>,
     #[allow(dead_code)] title: Option<String>,
-    #[allow(dead_code)] image_url: Option<String>,
+    image_url: Option<String>,
     #[serde(default)] discs: Vec<DiscNode>,
 }
 

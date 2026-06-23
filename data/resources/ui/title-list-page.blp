@@ -37,6 +37,45 @@ template $RipsawTitleListPage: Adw.NavigationPage {
     }
 
     content: Adw.PreferencesPage {
+      Adw.PreferencesGroup identity_group {
+        visible: false;
+
+        Box {
+          spacing: 16;
+          margin-top: 6;
+          margin-bottom: 6;
+
+          Picture poster_image {
+            width-request: 100;
+            height-request: 150;
+            content-fit: contain;
+            halign: start;
+            valign: start;
+            overflow: hidden;
+            styles ["card"]
+          }
+
+          Box {
+            orientation: vertical;
+            spacing: 4;
+            valign: center;
+            hexpand: true;
+
+            Label identity_title {
+              xalign: 0;
+              wrap: true;
+              styles ["title-2"]
+            }
+
+            Label identity_subtitle {
+              xalign: 0;
+              wrap: true;
+              styles ["dim-label"]
+            }
+          }
+        }
+      }
+
       Adw.PreferencesGroup classification_group {
         title: _("Disc");
         description: _("Auto-detected from title durations. Adjust if it's wrong.");

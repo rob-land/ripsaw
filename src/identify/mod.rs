@@ -146,6 +146,32 @@ pub struct Identity {
     pub imdb_id: Option<String>,
     #[serde(default)]
     pub tvdb_id: Option<String>,
+    /// Cover-art reference from TheDiscDB (`MediaItem.imageUrl`, falling
+    /// back to the release's). May be a relative path
+    /// (`Movie/<slug>/cover.jpg`) or an absolute URL; resolve with
+    /// `cover_art_url`. `None` when the record has no image.
+    #[serde(default)]
+    pub image_url: Option<String>,
+}
+
+impl Identity {
+    /// Resolve `image_url` to a downloadable URL. TheDiscDB stores it as a
+    /// slug-based path (`Movie/<slug>/cover.jpg`) served from its static
+    /// image host at `thediscdb.com/images/`. Notably that static path
+    /// stays up even when the GraphQL API is down (verified 2026-06), so a
+    /// successfully-identified disc can still show its cover. Absolute
+    /// URLs pass through unchanged.
+    pub fn cover_art_url(&self) -> Option<String> {
+        let raw = self.image_url.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        if raw.starts_with("http://") || raw.starts_with("https://") {
+            Some(raw.to_string())
+        } else {
+            Some(format!("https://thediscdb.com/images/{}", raw.trim_start_matches('/')))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,4 +211,48 @@ pub enum TitleRole {
     Scene,
     Short,
     Other,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity_with_image(image: Option<&str>) -> Identity {
+        Identity {
+            media_item_id: "1".into(),
+            release_slug: "r".into(),
+            disc_index: 0,
+            titles: Vec::new(),
+            item_title: "X".into(),
+            year: None,
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            image_url: image.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn cover_art_url_resolves_relative_path_to_image_host() {
+        let id = identity_with_image(Some("Movie/friday-the-13th-part-iii-1982/cover.jpg"));
+        assert_eq!(
+            id.cover_art_url().as_deref(),
+            Some("https://thediscdb.com/images/Movie/friday-the-13th-part-iii-1982/cover.jpg")
+        );
+    }
+
+    #[test]
+    fn cover_art_url_passes_absolute_url_through_and_handles_empty() {
+        assert_eq!(
+            identity_with_image(Some("https://cdn.example/poster.jpg")).cover_art_url().as_deref(),
+            Some("https://cdn.example/poster.jpg")
+        );
+        // Leading slash is trimmed so we don't get a double slash.
+        assert_eq!(
+            identity_with_image(Some("/Movie/x/cover.jpg")).cover_art_url().as_deref(),
+            Some("https://thediscdb.com/images/Movie/x/cover.jpg")
+        );
+        assert_eq!(identity_with_image(Some("  ")).cover_art_url(), None);
+        assert_eq!(identity_with_image(None).cover_art_url(), None);
+    }
 }

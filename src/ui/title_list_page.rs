@@ -50,6 +50,10 @@ mod imp {
         #[template_child] pub submission_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child] pub submission_expander: TemplateChild<adw::ExpanderRow>,
         #[template_child] pub status_banner: TemplateChild<adw::Banner>,
+        #[template_child] pub identity_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child] pub poster_image: TemplateChild<gtk::Picture>,
+        #[template_child] pub identity_title: TemplateChild<gtk::Label>,
+        #[template_child] pub identity_subtitle: TemplateChild<gtk::Label>,
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
         pub episode_entries: RefCell<Vec<gtk::Entry>>,
@@ -213,17 +217,30 @@ impl TitleListPage {
         let kind = crate::window::describe_disc_type(result.disc_type);
 
         if let Some(identity) = result.identities.first() {
+            // Identified: show the rich poster card, hide the banner.
             let year = identity.year.map(|y| format!(" ({y})")).unwrap_or_default();
             let title = if identity.item_title.trim().is_empty() {
                 identity.release_slug.clone()
             } else {
                 identity.item_title.clone()
             };
-            banner.set_title(&format!("{kind} • Identified as {title}{year}"));
-            banner.set_revealed(true);
+            self.imp().identity_title.set_label(&format!("{title}{year}"));
+            let mut sub = vec![kind.to_string()];
+            if !identity.release_slug.trim().is_empty() {
+                sub.push(identity.release_slug.clone());
+            }
+            self.imp().identity_subtitle.set_label(&sub.join("  •  "));
+            self.imp().identity_group.set_visible(true);
+            banner.set_revealed(false);
+            match identity.cover_art_url() {
+                Some(url) => self.load_poster(&url),
+                None => self.imp().poster_image.set_visible(false),
+            }
             return;
         }
 
+        // Not identified: no poster card, show the status banner.
+        self.imp().identity_group.set_visible(false);
         match &result.lookup_status {
             LookupStatus::Failed(_) => {
                 // Could not reach the catalogue — the disc may well be in
@@ -255,6 +272,43 @@ impl TitleListPage {
             #[weak(rename_to = page)]
             self,
             move |_| page.imp().submission_expander.set_expanded(true)
+        ));
+    }
+
+    /// Download the identified disc's cover art and paint it into the
+    /// poster Picture. Best-effort: on any failure the poster is hidden so
+    /// the card collapses to just the title text. Mirrors the async
+    /// download → gdk::Texture pattern used by the cover-art picker.
+    fn load_poster(&self, url: &str) {
+        let picture = self.imp().poster_image.get();
+        picture.set_visible(true);
+        picture.set_paintable(gtk::gdk::Paintable::NONE);
+        let url = url.to_string();
+        let (tx, rx) = async_channel::bounded::<Option<Vec<u8>>>(1);
+        crate::runtime::tokio_runtime().spawn(async move {
+            let bytes = async {
+                let resp = reqwest::get(&url).await.ok()?.error_for_status().ok()?;
+                resp.bytes().await.ok().map(|b| b.to_vec())
+            }
+            .await;
+            let _ = tx.send(bytes).await;
+        });
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak]
+            picture,
+            async move {
+                let Ok(Some(bytes)) = rx.recv().await else {
+                    picture.set_visible(false);
+                    return;
+                };
+                match gtk::gdk::Texture::from_bytes(&glib::Bytes::from(&bytes)) {
+                    Ok(tex) => picture.set_paintable(Some(&tex)),
+                    Err(e) => {
+                        tracing::warn!("decode cover art failed: {e}");
+                        picture.set_visible(false);
+                    }
+                }
+            }
         ));
     }
 

@@ -732,6 +732,7 @@ mod tests {
             tmdb_id: Some(37724),
             imdb_id: None,
             tvdb_id: None,
+            image_url: None,
         }
     }
 
