@@ -462,6 +462,7 @@ fn main_title_index(identification: &IdentificationResult) -> Option<u32> {
         .map(|t| t.index)
 }
 
+#[cfg(test)]
 fn role_for_title(
     idx: u32,
     identification: &IdentificationResult,

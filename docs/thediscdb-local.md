@@ -26,10 +26,15 @@ hosted endpoint outage that made every lookup fail. Companion to
 locally — title, year, TMDb 9728, IMDb tt0083972, cover URL, 13 titles
 with the feature tagged Main.
 
-Future optimisation (not yet done): persist the hash index to
-`$XDG_CACHE_HOME/ripsaw/thediscdb/hash-index.json` instead of rebuilding
-per lookup; the on-demand-GitHub-fetch alternative (Strategy 2) is also
-still open. The original scope follows.
+**Index persistence (done 2026-06-24).** The hash index is persisted to
+`<mirror>/hash-index.json`, keyed to the mirror's git HEAD (read straight
+from `.git`, no subprocess). A cache hit is one file read instead of
+walking ~4k disc files; measured **183 ms cold → 0.93 ms warm** on the
+real mirror (369 KB index). It rebuilds automatically when a sync moves
+HEAD, and falls back to an uncached walk for non-git mirrors.
+
+Still open (Strategy 2): the on-demand-GitHub-fetch alternative. The
+original scope follows.
 
 ---
 

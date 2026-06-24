@@ -62,16 +62,43 @@ impl LocalDiscDb {
         Ok(out)
     }
 
-    /// Walk the mirror and build `contentHash (upper) -> [discNN.json]`.
-    /// Reads each `disc*.json` for its `ContentHash`. Cheap enough to do
-    /// per lookup for now (a few thousand small files); persisting the
-    /// index is a future optimisation (docs/thediscdb-local.md).
+    /// Return `contentHash (upper) -> [discNN.json]` for the mirror.
+    ///
+    /// Uses a persisted `hash-index.json` keyed to the mirror's git HEAD:
+    /// on a cache hit (same HEAD) it's a single file read instead of
+    /// walking ~4k `disc*.json` files; on a miss (or first run, or after a
+    /// sync changes HEAD) it rebuilds and rewrites the cache. Falls back
+    /// to an uncached walk when the mirror isn't a git checkout (e.g. the
+    /// test fixtures) so behaviour is always correct, just not cached.
     pub fn build_index(&self) -> Result<HashMap<String, Vec<PathBuf>>> {
+        if !self.root.join("data").is_dir() {
+            return Ok(HashMap::new());
+        }
+        let signature = mirror_signature(&self.root);
+
+        // Try the persisted index when we have a signature to validate it.
+        if let Some(sig) = &signature {
+            if let Some(cached) = self.load_cached_index(sig) {
+                return Ok(cached);
+            }
+        }
+
+        let index = self.rebuild_index()?;
+
+        // Persist for next time (best-effort; only when we can key it to a
+        // signature so staleness is detectable).
+        if let Some(sig) = &signature {
+            if let Err(e) = self.save_cached_index(sig, &index) {
+                tracing::debug!("could not persist TheDiscDB hash index: {e:#}");
+            }
+        }
+        Ok(index)
+    }
+
+    /// Walk the mirror reading every `disc*.json`'s `ContentHash`.
+    fn rebuild_index(&self) -> Result<HashMap<String, Vec<PathBuf>>> {
         let mut index: HashMap<String, Vec<PathBuf>> = HashMap::new();
         let data_dir = self.root.join("data");
-        if !data_dir.is_dir() {
-            return Ok(index);
-        }
         for kind in ["movie", "series", "sets"] {
             let kind_dir = data_dir.join(kind);
             if kind_dir.is_dir() {
@@ -80,6 +107,103 @@ impl LocalDiscDb {
         }
         Ok(index)
     }
+
+    fn index_path(&self) -> PathBuf {
+        self.root.join("hash-index.json")
+    }
+
+    /// Load the persisted index if it exists and its stored signature
+    /// matches `signature`. Paths are stored relative to the mirror root.
+    fn load_cached_index(&self, signature: &str) -> Option<HashMap<String, Vec<PathBuf>>> {
+        let bytes = std::fs::read(self.index_path()).ok()?;
+        let persisted: PersistedIndex = serde_json::from_slice(&bytes).ok()?;
+        if persisted.version != INDEX_VERSION || persisted.signature != signature {
+            return None;
+        }
+        Some(
+            persisted
+                .entries
+                .into_iter()
+                .map(|(hash, rels)| {
+                    (hash, rels.into_iter().map(|r| self.root.join(r)).collect())
+                })
+                .collect(),
+        )
+    }
+
+    fn save_cached_index(
+        &self,
+        signature: &str,
+        index: &HashMap<String, Vec<PathBuf>>,
+    ) -> Result<()> {
+        let entries = index
+            .iter()
+            .map(|(hash, paths)| {
+                let rels = paths
+                    .iter()
+                    .map(|p| {
+                        p.strip_prefix(&self.root)
+                            .unwrap_or(p)
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect();
+                (hash.clone(), rels)
+            })
+            .collect();
+        let persisted = PersistedIndex {
+            version: INDEX_VERSION,
+            signature: signature.to_string(),
+            entries,
+        };
+        let json = serde_json::to_vec(&persisted).context("serialising hash index")?;
+        std::fs::write(self.index_path(), json)
+            .with_context(|| format!("writing {}", self.index_path().display()))?;
+        Ok(())
+    }
+}
+
+const INDEX_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedIndex {
+    version: u32,
+    /// The mirror's git HEAD commit when the index was built; the index is
+    /// invalidated (rebuilt) when this no longer matches.
+    signature: String,
+    /// `contentHash -> [disc.json paths relative to the mirror root]`.
+    entries: HashMap<String, Vec<String>>,
+}
+
+/// A signature that changes whenever the mirror's content does: the git
+/// HEAD commit. Reads `.git` directly (loose ref, then packed-refs, then
+/// detached HEAD) so no `git` subprocess is needed. `None` when the mirror
+/// isn't a git checkout — callers then skip caching.
+fn mirror_signature(root: &Path) -> Option<String> {
+    let git = root.join(".git");
+    let head = std::fs::read_to_string(git.join("HEAD")).ok()?;
+    let head = head.trim();
+    let Some(ref_name) = head.strip_prefix("ref: ") else {
+        // Detached HEAD: the line is the commit sha itself.
+        return (!head.is_empty()).then(|| head.to_string());
+    };
+    // Loose ref.
+    if let Ok(sha) = std::fs::read_to_string(git.join(ref_name)) {
+        let sha = sha.trim();
+        if !sha.is_empty() {
+            return Some(sha.to_string());
+        }
+    }
+    // packed-refs fallback.
+    let packed = std::fs::read_to_string(git.join("packed-refs")).ok()?;
+    packed.lines().find_map(|line| {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with('^') {
+            return None;
+        }
+        let (sha, name) = line.split_once(' ')?;
+        (name == ref_name).then(|| sha.to_string())
+    })
 }
 
 /// Count the disc records currently in the mirror (`disc*.json` files).
@@ -421,5 +545,74 @@ mod tests {
         let db = LocalDiscDb::new(Path::new("/nonexistent/ripsaw/mirror"));
         assert!(!db.is_present());
         assert!(db.lookup_by_hash("0F7341A7F10CC1B5B9FFE2D220245509").unwrap().is_empty());
+    }
+
+    /// Build a minimal git-like mirror: one disc record + a loose HEAD ref
+    /// so `mirror_signature` returns a value and the index is cacheable.
+    fn make_mirror(root: &Path, sha: &str) {
+        let git = root.join(".git/refs/heads");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git.join("main"), format!("{sha}\n")).unwrap();
+        let rel = root.join("data/movie/Foo (2020)/us-bd");
+        std::fs::create_dir_all(&rel).unwrap();
+        std::fs::write(
+            root.join("data/movie/Foo (2020)/metadata.json"),
+            r#"{"Title":"Foo","Year":2020,"Slug":"foo-2020"}"#,
+        )
+        .unwrap();
+        std::fs::write(rel.join("release.json"), r#"{"Slug":"us-bd"}"#).unwrap();
+        std::fs::write(
+            rel.join("disc01.json"),
+            r#"{"Index":0,"ContentHash":"AAAA","Titles":[]}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn index_persists_and_invalidates_on_signature_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        make_mirror(root, "sha-one");
+        let db = LocalDiscDb::new(root);
+
+        // First build writes the cache.
+        let idx = db.build_index().unwrap();
+        assert!(idx.contains_key("AAAA"));
+        let index_file = root.join("hash-index.json");
+        assert!(index_file.exists(), "index should be persisted");
+
+        // Second build loads the cache and still resolves.
+        assert!(db.build_index().unwrap().contains_key("AAAA"));
+        assert_eq!(db.lookup_by_hash("AAAA").unwrap().len(), 1);
+
+        // A stale cache (signature mismatch) is ignored and rebuilt: tamper
+        // the persisted signature, then confirm a fresh build overwrites it.
+        let persisted: PersistedIndex =
+            serde_json::from_slice(&std::fs::read(&index_file).unwrap()).unwrap();
+        assert_eq!(persisted.signature, "sha-one");
+        std::fs::write(root.join(".git/refs/heads/main"), "sha-two\n").unwrap();
+        assert!(db.build_index().unwrap().contains_key("AAAA"));
+        let after: PersistedIndex =
+            serde_json::from_slice(&std::fs::read(&index_file).unwrap()).unwrap();
+        assert_eq!(after.signature, "sha-two", "cache rebuilt under new HEAD");
+    }
+
+    #[test]
+    fn mirror_signature_reads_loose_and_packed_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        // packed-refs only (no loose ref).
+        std::fs::write(
+            root.join(".git/packed-refs"),
+            "# pack-refs with: peeled fully-peeled sorted\nabc123 refs/heads/main\n",
+        )
+        .unwrap();
+        assert_eq!(mirror_signature(root).as_deref(), Some("abc123"));
+        // No .git -> None (caller then skips caching).
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(mirror_signature(plain.path()), None);
     }
 }

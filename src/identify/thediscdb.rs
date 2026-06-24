@@ -97,9 +97,10 @@ pub fn parse_lookup_response(json: &str, expected_hash: &str) -> Result<Vec<Iden
     }
 
     let data = response.data.ok_or_else(|| anyhow!("GraphQL response missing data block"))?;
+    let nodes = data.media_items.map(|c| c.nodes).unwrap_or_default();
 
     let mut out = Vec::new();
-    for media_item in &data.media_items.nodes {
+    for media_item in &nodes {
         for release in &media_item.releases {
             for disc in &release.discs {
                 let disc_hash = match &disc.content_hash {
@@ -219,7 +220,12 @@ struct GraphQLErrorNode {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LookupResponseData {
-    media_items: MediaItemConnection,
+    /// Nullable: when the server hits an execution error it returns
+    /// `{"errors":[…],"data":{"mediaItems":null}}` (HTTP 200). Keeping
+    /// this `Option` lets us deserialise that response and surface the
+    /// `errors` array as a clean error instead of failing the parse with
+    /// "invalid type: null, expected struct MediaItemConnection".
+    media_items: Option<MediaItemConnection>,
 }
 
 #[derive(Deserialize)]
@@ -343,6 +349,25 @@ mod tests {
         let json = r#"{"data": {"mediaItems": {"nodes": []}}}"#;
         let result = parse_lookup_response(json, "ABCDEF").unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn server_execution_error_with_null_mediaitems_surfaces_as_error() {
+        // The real shape the hosted endpoint returns under load (HTTP 200,
+        // null mediaItems + an errors array). Must NOT fail the JSON parse;
+        // it should surface the GraphQL error message.
+        let json = r#"{
+            "errors": [{"message": "Unexpected Execution Error"}],
+            "data": {"mediaItems": null}
+        }"#;
+        let err = parse_lookup_response(json, "ABCDEF").unwrap_err();
+        assert!(format!("{err}").contains("Unexpected Execution Error"));
+    }
+
+    #[test]
+    fn null_mediaitems_without_errors_is_empty_not_error() {
+        let json = r#"{"data": {"mediaItems": null}}"#;
+        assert!(parse_lookup_response(json, "ABCDEF").unwrap().is_empty());
     }
 
     #[test]
