@@ -57,10 +57,6 @@ mod imp {
 
         pub checkboxes: RefCell<Vec<gtk::CheckButton>>,
         pub episode_entries: RefCell<Vec<gtk::Entry>>,
-        /// Per-title 3D output-format dropdown, parallel to `checkboxes` /
-        /// `titles`. `Some` only for titles that carry an MVC track; `None`
-        /// for 2D titles (which can't be packed side-by-side).
-        pub format_dropdowns: RefCell<Vec<Option<gtk::DropDown>>>,
         pub titles: RefCell<Vec<TitleAttributes>>,
         pub iso_path: RefCell<Option<PathBuf>>,
         pub source: RefCell<Option<crate::rip::makemkv::ScanSource>>,
@@ -114,6 +110,14 @@ glib::wrapper! {
     pub struct TitleListPage(ObjectSubclass<imp::TitleListPage>)
         @extends gtk::Widget, adw::NavigationPage,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+/// Quick-select modes for the title-group header buttons.
+#[derive(Clone, Copy)]
+enum SelectMode {
+    Main,
+    All,
+    None,
 }
 
 impl Default for TitleListPage {
@@ -388,35 +392,60 @@ impl TitleListPage {
 
     fn populate_rows(&self, scan: &MakemkvScan) {
         let group = self.imp().title_group.get();
-        let mut checkboxes = Vec::with_capacity(scan.titles.len());
-        let mut episode_entries = Vec::with_capacity(scan.titles.len());
-        let mut format_dropdowns: Vec<Option<gtk::DropDown>> =
-            Vec::with_capacity(scan.titles.len());
-
-        let pairs: Vec<(u32, &str)> = scan
-            .titles
-            .iter()
-            .map(|t| (t.index, t.segment_map.as_deref().unwrap_or("")))
-            .collect();
-        let relations = analyze_relations(&pairs);
 
         // First identity (highest-confidence TheDiscDB match) provides
         // per-title roles + display titles. Match by sourceFile, not
         // index -- TheDiscDB's index is its own ordering and does not
         // line up with MakeMKV's title index.
         let identities = self.imp().identities.borrow();
-        let identity_titles: &[TitleIdentity] = identities
+        let identity_titles: Vec<TitleIdentity> = identities
             .first()
-            .map(|i| i.titles.as_slice())
-            .unwrap_or(&[]);
+            .map(|i| i.titles.clone())
+            .unwrap_or_default();
+        drop(identities);
+        let role_of = |t: &TitleAttributes| -> Option<TitleRole> {
+            crate::rip::plan::match_identity_for(&identity_titles, t).map(|i| i.role)
+        };
+
+        // Display order. For a movie, float the main feature to the top so
+        // it's the obvious thing to tick; extras follow. A *stable* sort
+        // keeps everything else in scan order, so series episodes (kept in
+        // scan order) and within-group ordering are preserved. The "main"
+        // is the title TheDiscDB tags Main, or — when nothing is
+        // identified — the longest title.
+        let mut ordered: Vec<TitleAttributes> = scan.titles.clone();
+        if auto_detect_content_kind(&scan.titles) == DiscContentKind::Movie {
+            let any_main = scan.titles.iter().any(|t| role_of(t) == Some(TitleRole::Main));
+            let longest = scan
+                .titles
+                .iter()
+                .max_by_key(|t| t.duration_seconds.unwrap_or(0))
+                .map(|t| t.index);
+            ordered.sort_by_key(|t| {
+                let is_main = role_of(t) == Some(TitleRole::Main)
+                    || (!any_main && Some(t.index) == longest);
+                u8::from(!is_main)
+            });
+        }
+        // Keep `titles` parallel to the rows/checkboxes we build below.
+        self.imp().titles.replace(ordered.clone());
+
+        let pairs: Vec<(u32, &str)> = ordered
+            .iter()
+            .map(|t| (t.index, t.segment_map.as_deref().unwrap_or("")))
+            .collect();
+        let relations = analyze_relations(&pairs);
 
         // Per-title display titles from bdmt_eng.xml, keyed by the
         // BDA `titleNumber` attribute (1-based -> MakeMKV index +1).
         let bdmt = self.imp().bdmt.borrow();
         let bdmt_names = bdmt.as_ref().map(|b| &b.title_names);
 
-        for (t, relation) in scan.titles.iter().zip(relations.iter()) {
-            let identity = crate::rip::plan::match_identity_for(identity_titles, t);
+        let mut checkboxes = Vec::with_capacity(ordered.len());
+        let mut episode_entries = Vec::with_capacity(ordered.len());
+
+        for (t, relation) in ordered.iter().zip(relations.iter()) {
+            let identity = crate::rip::plan::match_identity_for(&identity_titles, t);
             let role = identity.map(|i| i.role);
             let identity_display = identity
                 .map(|i| i.display_title.as_str())
@@ -438,17 +467,16 @@ impl TitleListPage {
                 }
                 _ => format!("Title {}", t.index),
             };
-            let duration = format_duration(t.duration_seconds.unwrap_or(0));
-            let size = format_bytes(t.size_bytes.unwrap_or(0));
-            let source = t.source_file.as_deref().unwrap_or("?");
 
-            let mut subtitle_parts: Vec<String> = Vec::with_capacity(5);
+            // Subtitle: role • duration • size (+ relation when notable).
+            // The raw source-file name lives on the detail page now — it's
+            // developer-facing and just lengthened every row.
+            let mut subtitle_parts: Vec<String> = Vec::with_capacity(4);
             if let Some(r) = role {
                 subtitle_parts.push(role_badge(r).to_string());
             }
-            subtitle_parts.push(duration);
-            subtitle_parts.push(size);
-            subtitle_parts.push(source.to_string());
+            subtitle_parts.push(format_duration(t.duration_seconds.unwrap_or(0)));
+            subtitle_parts.push(format_bytes(t.size_bytes.unwrap_or(0)));
             match relation {
                 TitleRelation::Composite { constituents } => {
                     subtitle_parts.push(format!("contains {} other title(s)", constituents.len()));
@@ -476,44 +504,17 @@ impl TitleListPage {
             row.add_prefix(&check);
             row.set_activatable_widget(Some(&check));
 
-            // 3D marker + per-title output-format picker. A title carrying
-            // an MVC dependent-view track is the stereoscopic-3D version of
-            // the feature: badge it, and give it its own 3D-output-format
-            // dropdown (the format used to be one disc-level combo). 2D
-            // titles get neither — there's nothing to pack side-by-side.
-            let format_dd = if t.has_mvc_stream() {
+            // 3D marker only. The per-title 3D output format moved to the
+            // detail page (the edit button) to keep rows uncluttered.
+            if t.has_mvc_stream() {
                 let badge = gtk::Label::builder()
                     .label("3D")
                     .valign(gtk::Align::Center)
                     .css_classes(["pill", "accent"])
-                    .tooltip_text("Contains an MVC stereoscopic-3D video track")
+                    .tooltip_text("Stereoscopic-3D (MVC). Set the output format via the edit button.")
                     .build();
                 row.add_suffix(&badge);
-
-                let dd = gtk::DropDown::from_strings(&[
-                    "2D (no 3D conversion)",
-                    "Full SBS",
-                    "Half SBS",
-                    "Full OU",
-                    "Half OU",
-                    "Frame-seq",
-                ]);
-                dd.set_valign(gtk::Align::Center);
-                dd.set_tooltip_text(Some(
-                    "3D output format for this title. \"2D\" keeps the MVC track but produces no side-by-side file.",
-                ));
-                // Only meaningful when the title is selected for ripping.
-                dd.set_sensitive(check.is_active());
-                check.connect_toggled(clone!(
-                    #[weak]
-                    dd,
-                    move |c| dd.set_sensitive(c.is_active())
-                ));
-                row.add_suffix(&dd);
-                Some(dd)
-            } else {
-                None
-            };
+            }
 
             let episode_entry = gtk::Entry::builder()
                 .placeholder_text("Episode title (optional)")
@@ -530,7 +531,7 @@ impl TitleListPage {
             let edit_button = gtk::Button::builder()
                 .icon_name("document-edit-symbolic")
                 .valign(gtk::Align::Center)
-                .tooltip_text("Edit title details (display name, role, chapters)")
+                .tooltip_text("Edit title details (display name, role, 3D format, chapters)")
                 .css_classes(["flat"])
                 .build();
             let title_index = t.index;
@@ -544,13 +545,58 @@ impl TitleListPage {
             group.add(&row);
             checkboxes.push(check);
             episode_entries.push(episode_entry);
-            format_dropdowns.push(format_dd);
         }
 
         self.imp().checkboxes.replace(checkboxes);
         self.imp().episode_entries.replace(episode_entries);
-        self.imp().format_dropdowns.replace(format_dropdowns);
+        self.install_select_buttons();
         self.refresh_rip_sensitivity();
+    }
+
+    /// Quick-select buttons in the title-group header: tick the main
+    /// feature, everything, or nothing. Installed once per population.
+    fn install_select_buttons(&self) {
+        let bx = gtk::Box::builder().spacing(6).build();
+        let main_btn = gtk::Button::builder()
+            .label("Main")
+            .tooltip_text("Select only the main feature (the first / longest title)")
+            .css_classes(["flat"])
+            .build();
+        let all_btn = gtk::Button::builder().label("All").css_classes(["flat"]).build();
+        let none_btn = gtk::Button::builder().label("None").css_classes(["flat"]).build();
+        main_btn.connect_clicked(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_| page.select_titles(SelectMode::Main)
+        ));
+        all_btn.connect_clicked(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_| page.select_titles(SelectMode::All)
+        ));
+        none_btn.connect_clicked(clone!(
+            #[weak(rename_to = page)]
+            self,
+            move |_| page.select_titles(SelectMode::None)
+        ));
+        bx.append(&main_btn);
+        bx.append(&all_btn);
+        bx.append(&none_btn);
+        self.imp().title_group.set_header_suffix(Some(&bx));
+    }
+
+    /// Apply a quick-select mode to the checkboxes. `Main` ticks just the
+    /// first row (the planner / sort put the main feature there).
+    fn select_titles(&self, mode: SelectMode) {
+        let checks = self.imp().checkboxes.borrow();
+        for (i, c) in checks.iter().enumerate() {
+            let on = match mode {
+                SelectMode::All => true,
+                SelectMode::None => false,
+                SelectMode::Main => i == 0,
+            };
+            c.set_active(on);
+        }
     }
 
     fn refresh_rip_sensitivity(&self) {
@@ -614,8 +660,9 @@ impl TitleListPage {
                 ..Default::default()
             });
 
+        let is_3d = title_attr.has_mvc_stream();
         let detail = TitleDetailPage::default();
-        detail.populate(&existing_edit, &display_default, &chapter_defaults);
+        detail.populate(&existing_edit, &display_default, &chapter_defaults, is_3d);
         detail.connect_saved(clone!(
             #[weak(rename_to = page)]
             self,
@@ -856,50 +903,35 @@ impl TitleListPage {
         }
     }
 
-    /// Map a per-title format-dropdown selection to an OutputFormat.
-    /// Index order must mirror the strings passed to `DropDown::from_strings`
-    /// in `populate_rows`. Index 0 ("2D") → `None` (no conversion).
-    fn dropdown_format(dd: &gtk::DropDown) -> Option<OutputFormat> {
-        match dd.selected() {
-            1 => Some(OutputFormat::FullSbs),
-            2 => Some(OutputFormat::HalfSbs),
-            3 => Some(OutputFormat::FullTab),
-            4 => Some(OutputFormat::HalfTab),
-            5 => Some(OutputFormat::FrameSequential),
-            _ => None,
-        }
-    }
-
-    /// Per-title 3D output format for the *selected* MVC titles. Title
-    /// index → chosen layout; titles left on "2D" (or 2D titles) are
-    /// absent. Fed to `plan_rip` so each title converts independently.
+    /// Per-title 3D output format for the *selected* titles, read from the
+    /// per-title edits set on the detail page. Title index → chosen layout;
+    /// titles left on "None" (or 2D titles) are absent. Fed to `plan_rip`
+    /// so each title converts independently.
     fn format_by_index(&self) -> HashMap<u32, OutputFormat> {
         let titles = self.imp().titles.borrow();
         let checks = self.imp().checkboxes.borrow();
-        let dds = self.imp().format_dropdowns.borrow();
+        let edits = self.imp().title_edits.borrow();
         let mut map = HashMap::new();
         for (i, t) in titles.iter().enumerate() {
             if !checks.get(i).map_or(false, |c| c.is_active()) {
                 continue;
             }
-            if let Some(Some(dd)) = dds.get(i) {
-                if let Some(fmt) = Self::dropdown_format(dd) {
-                    map.insert(t.index, fmt);
-                }
+            if let Some(fmt) = edits.get(&t.index).and_then(|e| e.format) {
+                map.insert(t.index, fmt);
             }
         }
         map
     }
 
-    /// The standalone-MKV convert path has a single MVC title and no rip
-    /// step; use the first MVC title's dropdown (regardless of checkbox).
+    /// The standalone-MKV convert path has a single title and no rip step;
+    /// use the format chosen for it on the detail page.
     fn mkv_convert_format(&self) -> Option<OutputFormat> {
-        self.imp()
-            .format_dropdowns
-            .borrow()
-            .iter()
-            .flatten()
-            .find_map(Self::dropdown_format)
+        let titles = self.imp().titles.borrow();
+        let edits = self.imp().title_edits.borrow();
+        titles
+            .first()
+            .and_then(|t| edits.get(&t.index))
+            .and_then(|e| e.format)
     }
 
     /// Encoder backend — now a global preference (Settings), not per disc.

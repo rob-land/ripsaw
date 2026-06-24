@@ -275,6 +275,7 @@ async fn main() -> Result<()> {
                 display_title: Some(episode_titles[slot].to_string()),
                 role: Some(TitleRole::Main),
                 chapter_titles: Vec::new(),
+                format: None,
             });
         }
         let staged = stage_full_submission(

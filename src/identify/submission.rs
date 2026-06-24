@@ -791,6 +791,7 @@ mod tests {
                 display_title: Some("Skyfall (corrected)".into()),
                 role: Some(TitleRole::Trailer),
                 chapter_titles: vec!["Cold Open".into(), "Title Sequence".into()],
+                format: None,
             },
         );
         let out = render_disc_json(&disc_meta(), &scan, Some(&id), &edits);

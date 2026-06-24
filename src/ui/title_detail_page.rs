@@ -11,6 +11,7 @@ use adw::subclass::prelude::*;
 use gtk::glib::{self};
 use gtk::CompositeTemplate;
 
+use crate::convert::format::OutputFormat;
 use crate::identify::TitleRole;
 
 #[derive(Debug, Default, Clone)]
@@ -22,6 +23,34 @@ pub struct TitleEdit {
     /// Per-chapter titles, ordered by 1-based chapter index. Empty
     /// vec means "no overrides; use what's already there".
     pub chapter_titles: Vec<String>,
+    /// 3D output format for this title (only meaningful for titles with
+    /// an MVC track). `None` = no 3D conversion — rip keeps the raw MVC
+    /// track. Chosen on this detail page; consumed by the rip planner.
+    pub format: Option<OutputFormat>,
+}
+
+/// Map the format ComboRow selection (rows mirror the StringList in
+/// title-detail-page.blp) to an `OutputFormat`. Index 0 ("None") → `None`.
+fn format_from_index(idx: u32) -> Option<OutputFormat> {
+    match idx {
+        1 => Some(OutputFormat::FullSbs),
+        2 => Some(OutputFormat::HalfSbs),
+        3 => Some(OutputFormat::FullTab),
+        4 => Some(OutputFormat::HalfTab),
+        5 => Some(OutputFormat::FrameSequential),
+        _ => None,
+    }
+}
+
+fn format_to_index(fmt: Option<OutputFormat>) -> u32 {
+    match fmt {
+        Some(OutputFormat::FullSbs) => 1,
+        Some(OutputFormat::HalfSbs) => 2,
+        Some(OutputFormat::FullTab) => 3,
+        Some(OutputFormat::HalfTab) => 4,
+        Some(OutputFormat::FrameSequential) => 5,
+        None => 0,
+    }
 }
 
 mod imp {
@@ -32,6 +61,8 @@ mod imp {
     pub struct TitleDetailPage {
         #[template_child] pub display_title_row: TemplateChild<adw::EntryRow>,
         #[template_child] pub role_row: TemplateChild<adw::ComboRow>,
+        #[template_child] pub format_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child] pub format_row: TemplateChild<adw::ComboRow>,
         #[template_child] pub chapters_group: TemplateChild<adw::PreferencesGroup>,
         #[allow(dead_code)]
         #[template_child] pub identity_group: TemplateChild<adw::PreferencesGroup>,
@@ -101,9 +132,16 @@ impl TitleDetailPage {
         edit: &TitleEdit,
         display_title_default: &str,
         chapter_defaults: &[String],
+        is_3d: bool,
     ) {
         self.set_title(&format!("Title {} details", edit.title_index));
         self.imp().title_index.replace(edit.title_index);
+
+        // 3D output format: only shown for titles that carry an MVC track
+        // (the format group is hidden otherwise). Used to be a per-row
+        // dropdown on the title list.
+        self.imp().format_group.set_visible(is_3d);
+        self.imp().format_row.set_selected(format_to_index(edit.format));
 
         // Display title: user override wins, then the default.
         let initial = edit
@@ -205,6 +243,7 @@ impl TitleDetailPage {
             .iter()
             .map(|r| r.text().trim().to_string())
             .collect();
-        TitleEdit { title_index, display_title, role, chapter_titles }
+        let format = format_from_index(self.imp().format_row.selected());
+        TitleEdit { title_index, display_title, role, chapter_titles, format }
     }
 }

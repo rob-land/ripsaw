@@ -35,6 +35,27 @@ template $RipsawTitleDetailPage: Adw.NavigationPage {
         }
       }
 
+      Adw.PreferencesGroup format_group {
+        title: _("3D output");
+        description: _("This title has an MVC stereoscopic track. Choose how to pack it when ripping.");
+        visible: false;
+
+        Adw.ComboRow format_row {
+          title: _("3D output format");
+          subtitle: _("\"None\" keeps the raw MVC track (3D-player compatible) without producing a packed file.");
+          model: StringList {
+            strings [
+              _("None (keeps MVC track)"),
+              _("Full side-by-side (3840×1080)"),
+              _("Half side-by-side (1920×1080)"),
+              _("Full over/under (1920×2160)"),
+              _("Half over/under (1920×1080)"),
+              _("Frame-sequential (2× fps)"),
+            ]
+          };
+        }
+      }
+
       Adw.PreferencesGroup chapters_group {
         title: _("Chapters");
         description: _("Per-chapter names. Pre-filled from TheDiscDB when the disc is identified.");
