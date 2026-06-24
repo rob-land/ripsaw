@@ -21,6 +21,8 @@ mod imp {
         #[template_child] pub radarr_url_row: TemplateChild<adw::EntryRow>,
         #[template_child] pub radarr_key_row: TemplateChild<adw::PasswordEntryRow>,
         #[template_child] pub tmdb_key_row: TemplateChild<adw::PasswordEntryRow>,
+        #[template_child] pub catalogue_status_row: TemplateChild<adw::ActionRow>,
+        #[template_child] pub catalogue_sync_button: TemplateChild<gtk::Button>,
     }
 
     #[glib::object_subclass]
@@ -75,9 +77,78 @@ impl PreferencesDialog {
         self.imp().radarr_url_row.set_text(current.radarr.url.as_deref().unwrap_or(""));
         self.imp().radarr_key_row.set_text(current.radarr.api_key.as_deref().unwrap_or(""));
         self.imp().tmdb_key_row.set_text(current.tmdb_api_key.as_deref().unwrap_or(""));
+        self.refresh_catalogue_status();
+    }
+
+    /// Update the "Local catalogue" row from the mirror on disk and set
+    /// the button label to Download (absent) or Refresh (present).
+    fn refresh_catalogue_status(&self) {
+        let root = crate::settings::thediscdb_mirror_root();
+        let count = crate::identify::thediscdb_local::disc_count(&root);
+        if count > 0 {
+            self.imp()
+                .catalogue_status_row
+                .set_subtitle(&format!("{count} discs • {}", root.display()));
+            self.imp().catalogue_sync_button.set_label("Refresh");
+        } else {
+            self.imp()
+                .catalogue_status_row
+                .set_subtitle("Not downloaded — identify will use the (currently unreliable) website");
+            self.imp().catalogue_sync_button.set_label("Download");
+        }
+    }
+
+    /// Sync the mirror on a worker thread, with a busy button + toast.
+    fn start_catalogue_sync(&self) {
+        let button = self.imp().catalogue_sync_button.get();
+        button.set_sensitive(false);
+        button.set_label("Downloading…");
+        self.imp()
+            .catalogue_status_row
+            .set_subtitle("Syncing the JSON catalogue from GitHub… (~350 MB, may take a few minutes)");
+
+        let root = crate::settings::thediscdb_mirror_root();
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<usize>>(1);
+        crate::runtime::tokio_runtime().spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                crate::identify::thediscdb_local::sync_mirror(&root)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("sync task panicked: {e}")));
+            let _ = tx.send(result).await;
+        });
+        glib::MainContext::default().spawn_local(clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            async move {
+                let outcome = rx.recv().await;
+                dialog.imp().catalogue_sync_button.set_sensitive(true);
+                match outcome {
+                    Ok(Ok(count)) => {
+                        dialog.toast(&format!("Disc catalogue ready — {count} discs."));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("catalogue sync failed: {e:#}");
+                        dialog.toast(&format!("Catalogue sync failed: {e}"));
+                    }
+                    Err(_) => {}
+                }
+                dialog.refresh_catalogue_status();
+            }
+        ));
+    }
+
+    fn toast(&self, text: &str) {
+        self.add_toast(adw::Toast::builder().title(text).timeout(6).build());
     }
 
     fn connect_signals(&self) {
+        self.imp().catalogue_sync_button.connect_clicked(clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |_| dialog.start_catalogue_sync()
+        ));
+
         // Activating the row opens a folder chooser.
         self.imp().library_root_row.connect_activated(clone!(
             #[weak(rename_to = dialog)]

@@ -1,9 +1,41 @@
-# Local TheDiscDB data source — scope
+# Local TheDiscDB data source
 
-Status: scoping doc (2026-06-22). Motivated by the hosted endpoint outage
-that made every lookup fail (see below). Companion to `docs/identify.md`.
+Status: **implemented 2026-06-24** (scoped 2026-06-22). Motivated by the
+hosted endpoint outage that made every lookup fail. Companion to
+`docs/identify.md`.
 
-## Why
+## What shipped
+
+- `src/identify/thediscdb_local.rs` — `LocalDiscDb`: walks a mirror to
+  build a `contentHash -> disc*.json` index, and resolves a hash to our
+  `Identity` (mapping the PascalCase, disc-centric on-disk JSON, reading
+  the sibling `release.json` + the title's `metadata.json` for IDs and
+  cover art). Plus `sync_mirror()` / `disc_count()`. Golden-JSON tests run
+  against real Friday-the-13th fixtures in `tests/fixtures/thediscdb/`.
+- `scripts/sync-thediscdb.sh` — blobless sparse JSON clone/refresh
+  (Strategy 1 below).
+- Pipeline: `lookup_with_status` tries the local mirror first, falls back
+  to live GraphQL; a local hit reports `LookupStatus::Ok`.
+- Preferences → "Disc catalogue (TheDiscDB)": status row + Download/Refresh
+  button (runs the sync on a worker thread).
+- Settings: `thediscdb_mirror` override; default
+  `$XDG_CACHE_HOME/ripsaw/thediscdb` (`settings::thediscdb_mirror_root`).
+
+**Verified end-to-end 2026-06-24:** with the GraphQL API still returning
+403, a synced mirror identified the mounted Friday the 13th Part 3 disc
+locally — title, year, TMDb 9728, IMDb tt0083972, cover URL, 13 titles
+with the feature tagged Main.
+
+Future optimisation (not yet done): persist the hash index to
+`$XDG_CACHE_HOME/ripsaw/thediscdb/hash-index.json` instead of rebuilding
+per lookup; the on-demand-GitHub-fetch alternative (Strategy 2) is also
+still open. The original scope follows.
+
+---
+
+## Original scope (2026-06-22)
+
+### Why
 
 TheDiscDB's hosted GraphQL endpoint (`https://thediscdb.com/graphql`) is
 **unreliable** — observed returning `403 "Web App - Unavailable"` (an

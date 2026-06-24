@@ -59,6 +59,23 @@ template $RipsawPreferencesDialog: Adw.PreferencesDialog {
     }
 
     Adw.PreferencesGroup {
+      title: _("Disc catalogue (TheDiscDB)");
+      description: _("A local copy of the open disc catalogue lets Ripsaw identify discs offline and when the TheDiscDB website is down. JSON only (~350 MB); refresh occasionally.");
+
+      Adw.ActionRow catalogue_status_row {
+        title: _("Local catalogue");
+        subtitle: _("Checking…");
+
+        [suffix]
+        Button catalogue_sync_button {
+          valign: center;
+          label: _("Download");
+          styles ["suggested-action"]
+        }
+      }
+    }
+
+    Adw.PreferencesGroup {
       title: _("Sonarr");
       description: _("Look up canonical series names and episode titles for TV rips.");
 

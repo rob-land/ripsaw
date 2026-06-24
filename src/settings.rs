@@ -31,6 +31,11 @@ pub struct UserSettings {
     /// hardware encoder, fall back to software.
     #[serde(default)]
     pub conversion_hw_backend: Option<crate::convert::hw::HwBackend>,
+    /// Optional override for the local TheDiscDB mirror root. `None` uses
+    /// the default under `$XDG_CACHE_HOME/ripsaw/thediscdb`. See
+    /// `thediscdb_mirror_root`.
+    #[serde(default)]
+    pub thediscdb_mirror: Option<PathBuf>,
 }
 
 impl UserSettings {
@@ -147,6 +152,26 @@ fn config_path() -> Result<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .ok_or_else(|| anyhow::anyhow!("neither XDG_CONFIG_HOME nor HOME is set"))?;
     Ok(base.join("ripsaw").join("config.json"))
+}
+
+/// Root of the local TheDiscDB mirror (a sync of `TheDiscDb/data`). The
+/// per-user setting overrides; otherwise default to
+/// `$XDG_CACHE_HOME/ripsaw/thediscdb` (`~/.cache/ripsaw/thediscdb`). The
+/// mirror's `data/` tree lives directly under this root.
+pub fn thediscdb_mirror_root() -> PathBuf {
+    if let Some(custom) = settings()
+        .lock()
+        .ok()
+        .and_then(|g| g.thediscdb_mirror.clone())
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        return custom;
+    }
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    base.join("ripsaw").join("thediscdb")
 }
 
 #[cfg(test)]

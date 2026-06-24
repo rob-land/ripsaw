@@ -9,6 +9,7 @@ pub mod from_scan;
 pub mod pipeline;
 pub mod submission;
 pub mod thediscdb;
+pub mod thediscdb_local;
 pub mod tmdb;
 pub mod submit;
 pub mod submit_pr;

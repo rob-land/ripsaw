@@ -92,12 +92,37 @@ impl IdentificationResult {
 }
 
 /// Run a TheDiscDB lookup for the given optional content hash, capturing
-/// whether it succeeded, returned nothing, or errored. Centralises the
-/// "service error vs no match" distinction both disc paths need.
+/// whether it succeeded, returned nothing, or errored. Tries the local
+/// mirror first (offline, outage-proof) and falls back to the live
+/// GraphQL endpoint. Centralises the "service error vs no match"
+/// distinction both disc paths need.
 async fn lookup_with_status(hash: Option<&str>) -> (Vec<Identity>, LookupStatus) {
     let Some(h) = hash else {
         return (Vec::new(), LookupStatus::NotAttempted);
     };
+
+    // 1. Local mirror first. A hit is authoritative (offline + instant);
+    //    a miss falls through to live in case the mirror is stale.
+    let mirror = crate::settings::thediscdb_mirror_root();
+    if mirror.join("data").is_dir() {
+        let hh = h.to_string();
+        let m = mirror.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::identify::thediscdb_local::LocalDiscDb::new(m).lookup_by_hash(&hh)
+        })
+        .await
+        {
+            Ok(Ok(ids)) if !ids.is_empty() => {
+                tracing::info!("identified via local TheDiscDB mirror");
+                return (ids, LookupStatus::Ok);
+            }
+            Ok(Ok(_)) => tracing::debug!("local TheDiscDB mirror: no match, trying live"),
+            Ok(Err(e)) => tracing::warn!("local TheDiscDB lookup error: {e:#}"),
+            Err(e) => tracing::warn!("local TheDiscDB task panicked: {e}"),
+        }
+    }
+
+    // 2. Live GraphQL fallback.
     let client = match TheDiscDbClient::with_default_endpoint() {
         Ok(c) => c,
         Err(e) => {
