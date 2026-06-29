@@ -174,17 +174,33 @@ the macroblock decode has started — validated against JM ldecod bit-exact:
   the base IDR frame), and `first_divergence` pinpoints the first mismatch.
 - **MB-header decode** (`src/mvc/mb_header.rs`): I-slice mb_type /
   transform_size_8x8_flag / intra modes / chroma / cbp / mb_qp_delta, with
-  context-init transcribed verbatim from JM `ctx_tables.h`. **MB 0's header
-  decodes bit-exact vs JM** (`examples/decode_mb0.rs`) — the first
-  real-data validation of the CABAC engine + context init + neighbour
-  derivation.
+  context-init transcribed verbatim from JM `ctx_tables.h`.
+- **Residual decode** (`src/mvc/residual.rs`, `residual_ctx.rs`): the
+  significance map (aliased through the `pos2ctx_map8x8`/`pos2ctx_last8x8`
+  position→context maps for 8×8), last-flag, and the run-adaptive level
+  decode (UEG0 prefix + EG0 bypass suffix), driven by per-category context
+  banks built from the verbatim `INIT_{BCBP,MAP,LAST,ONE,ABS}_I` tables.
+- **The whole base-view I-slice decodes bit-exact vs JM**
+  (`examples/decode_slice.rs`): **1320 MBs / 11,883 syntax elements match
+  the ldecod trace exactly** — header context derivation, neighbour
+  contexts, the 8×8 luma residual (incl. MB 0's level −3823 driving the
+  saturated TU prefix into the EG0 bypass), and `end_of_slice`. Standing
+  up the slice loop caught a silent desync that turned out to be two
+  off-by-one typos in the normative CABAC tables (`RANGE_TAB_LPS[31][0]`
+  28→29, `TRANS_IDX_LPS[28]` 23→22) — invisible to the round-trip tests
+  (the reference encoder shares the table) but fatal against an
+  independent decoder. Now pinned by a regression test.
 
-**Remaining:** the residual decode (`coded_block_flag`, the 8×8/4×4/chroma
-significance maps with their position→context tables, run-adaptive level
-decode) — needed to keep the CABAC engine in sync between MB headers, and
-now validatable per-coefficient against the trace. Then the slice loop
-(reconstruct = predict + residual + clip, deblock, crop) → the full-frame
-diff. The frame is I_8×8, so the 8×8 paths are required.
+This validates the entire CABAC + context-model + neighbour-derivation +
+residual stack on real data. **Remaining for the PoC:** the reconstruction
+path — apply the inverse transform/dequant to the decoded coefficients,
+add intra prediction, clip, deblock, crop → diff the *pixels* against
+ffmpeg/JM YUV. The syntax decode (the hard, unforgiving part) is done;
+the remaining work is arithmetic on already-correct coefficients. Chroma
+residual + I_4x4/I_16x16 residual categories are still stubbed in the
+slice loop (this frame's coded MBs are all I_8×8 luma) — they reuse the
+same `decode_residual_block` with their category descriptors plus the
+`coded_block_flag` neighbour path.
 
 ## How it sequences toward full libmvc
 
@@ -209,10 +225,17 @@ diff. The frame is I_8×8, so the 8×8 paths are required.
   intra decode will be slow. Whether libmvc ultimately beats ldecod (let
   alone Option A's libavcodec-SIMD dependent decode) depends on later
   SIMD work. The PoC should still log fps so we have an early datapoint.
-- **CABAC is unforgiving.** A single context-model or renormalisation bug
-  silently corrupts everything downstream. Mitigation: validate the CABAC
-  engine against ldecod's intermediate state on a tiny synthetic stream
-  before wiring it to real frames, if a trace can be extracted.
+- **CABAC is unforgiving.** *(Materialised and resolved.)* A single
+  context-model or table bug silently corrupts everything downstream — and
+  exactly this happened: two off-by-one CABAC-table entries that the
+  round-trip tests could not catch (encoder and decoder share the table,
+  so they drift together) survived until the full-slice diff against JM.
+  The mitigation that worked: diff every syntax element against an
+  *independent* decoder's trace (`examples/decode_slice.rs`), and when it
+  desyncs, instrument both engines to print `range`/`offset` per MB to
+  localise, then diff the suspect tables directly against JM's. Lesson:
+  self-consistent round-trips are necessary but **not** sufficient; the
+  per-element JM trace diff is the real guard.
 - **Scaling lists.** High-profile streams may carry non-flat scaling
   matrices; the SPS/PPS parsers currently *skip* them. The PoC must
   actually apply them (or assert flat and bail otherwise) to stay
