@@ -1,3 +1,21 @@
+diff --git a/source/app/ldecod/decoder_test.c b/source/app/ldecod/decoder_test.c
+index ec91409..44b948a 100644
+--- a/source/app/ldecod/decoder_test.c
++++ b/source/app/ldecod/decoder_test.c
+@@ -239,6 +239,13 @@ int main(int argc, char **argv)
+     return -1; //failed;
+   }
+ 
++#if TRACE
++  /* ripsaw: this JM revision never opens the decoder trace file (only the
++   * encoder does), so the TRACE writes would crash on a NULL FILE*. Open
++   * it here. Inert when TRACE==0 (the normal mvcdep build). */
++  p_Dec->p_trace = fopen("trace_dec.txt", "w");
++#endif
++
+   //decoding;
+   do
+   {
 diff --git a/source/app/ldecod/image.c b/source/app/ldecod/image.c
 index 404e268..0dfc99c 100644
 --- a/source/app/ldecod/image.c
