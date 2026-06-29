@@ -139,22 +139,28 @@ The independently-validatable building blocks are done and unit-tested:
 
 | Module | What | Validation |
 |---|---|---|
-| `cabac.rs` | CABAC arithmetic engine (decision/bypass/terminate, ctx init, tables) | round-trip vs a reference encoder (engine logic); tables pending real-frame |
-| `transform.rs` | dequant + inverse 4×4 transform, luma/chroma DC Hadamard | exactly-computable cases |
+| `cabac.rs` | CABAC engine (decision/bypass/terminate, FL + Exp-Golomb bypass, ctx init, tables) | round-trip vs a reference encoder (engine + binarisation logic); tables pending real-frame |
+| `transform.rs` | dequant + inverse 4×4 transform, luma/chroma DC Hadamard, inverse zig-zag scan | exactly-computable cases + permutation check |
 | `intra.rs` | Intra_4x4 (9 modes), Intra_16x16 + chroma (V/H/DC/Plane) | V/H/DC exact, directional constant-field + known taps |
 | `deblock.rs` | luma/chroma edge filters (bS<4 and bS=4) + threshold tables | hand-computed filter outputs; tables pending real-frame |
+| `residual.rs` | `residual_block_cabac` — significance map, last flag, run-adaptive level + sign (UEG0) | round-trip vs a matching reference encoder across coeff patterns |
 
-These are the pieces whose correctness can be checked in isolation. ~25
-unit tests across them.
+These are the pieces whose correctness can be checked in isolation —
+i.e. the entire decode-core *logic*. ~30 unit tests across them.
 
-**Remaining (the keystone):** the macroblock-layer syntax that drives the
-engine — `mb_type`/intra-mode/CBP/`mb_qp_delta` decoding, the full
-context-model init tables (Tables 9-12..9-33), and `residual_block_cabac`
-(significance maps + coefficient levels) — plus frame assembly and the
-boundary-strength derivation that feeds deblocking. This glue can only be
-*validated* end-to-end against a real frame (the §Validation diff), so it
-should be built alongside that harness rather than blind. That's the next
-work block.
+**Remaining (the keystone — the integration phase):** the
+macroblock-layer syntax that drives the engine (`mb_type` / intra-mode /
+CBP / `mb_qp_delta` / `coded_block_flag`), the full context-model init
+tables (Tables 9-12..9-33), neighbour management + context derivation
+(MB-type, cbf, the boundary-strength derivation feeding deblocking), the
+slice decode loop (predict + add residual + clip → frame), frame assembly
++ crop, and the real-frame validation harness.
+
+This block is tightly coupled and can only be *validated* end-to-end
+against a real frame (the § Validation diff) — so it's an
+iterative-debugging effort built with that harness, not more isolated
+modules. The isolation-validatable foundation is now complete; this is the
+next, distinct work block.
 
 ## How it sequences toward full libmvc
 

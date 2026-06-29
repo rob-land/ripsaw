@@ -149,9 +149,58 @@ pub fn chroma_dc_2x2(c: &[[i32; 2]; 2], qp: i32) -> [[i32; 2]; 2] {
     [[s(f00), s(f01)], [s(f10), s(f11)]]
 }
 
+/// Inverse zig-zag scan for a 4×4 block (§ 8.5.6, frame scan, Table 8-13):
+/// place coefficients given in scan order into their raster (row-major)
+/// positions. Bridges `residual::decode_residual_block` (scan order) to
+/// the transform (raster).
+#[rustfmt::skip]
+static ZIGZAG_4X4: [usize; 16] = [
+    0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15,
+];
+
+pub fn inverse_scan_4x4(scan: &[i32; 16]) -> [[i32; 4]; 4] {
+    let mut r = [[0i32; 4]; 4];
+    for (s, &raster) in ZIGZAG_4X4.iter().enumerate() {
+        r[raster / 4][raster % 4] = scan[s];
+    }
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inverse_scan_places_first_coeffs_in_zigzag_order() {
+        let mut scan = [0i32; 16];
+        scan[0] = 1; // -> raster (0,0)
+        scan[1] = 2; // -> raster (0,1)
+        scan[2] = 3; // -> raster (1,0)
+        scan[3] = 4; // -> raster (2,0)
+        let r = inverse_scan_4x4(&scan);
+        assert_eq!(r[0][0], 1);
+        assert_eq!(r[0][1], 2);
+        assert_eq!(r[1][0], 3);
+        assert_eq!(r[2][0], 4);
+        // Last scan position maps to the bottom-right corner.
+        let mut scan = [0i32; 16];
+        scan[15] = 9;
+        assert_eq!(inverse_scan_4x4(&scan)[3][3], 9);
+    }
+
+    #[test]
+    fn inverse_scan_is_a_permutation() {
+        // Each raster cell is written exactly once (no clobbering / gaps).
+        let scan: [i32; 16] = std::array::from_fn(|i| i as i32 + 1);
+        let r = inverse_scan_4x4(&scan);
+        let mut seen = [false; 16];
+        for row in r {
+            for v in row {
+                seen[(v - 1) as usize] = true;
+            }
+        }
+        assert!(seen.iter().all(|&b| b));
+    }
 
     #[test]
     fn dc_only_block_reconstructs_to_constant() {
