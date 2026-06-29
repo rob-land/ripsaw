@@ -89,6 +89,21 @@ impl<'a> CabacEngine<'a> {
         }
     }
 
+    /// Absolute bit index consumed so far (for diagnostics).
+    pub fn bit_position(&self) -> usize {
+        self.bit_pos
+    }
+
+    /// Current arithmetic range (for diagnostics; comparable to JM Drange).
+    pub fn range(&self) -> u32 {
+        self.range
+    }
+
+    /// Current arithmetic offset (for diagnostics; == JM Dvalue>>DbitsLeft).
+    pub fn offset(&self) -> u32 {
+        self.offset
+    }
+
     /// Decode one context-coded bin (§ 9.3.3.2.1), updating `ctx`.
     pub fn decode_decision(&mut self, ctx: &mut CtxState) -> u32 {
         let q = ((self.range >> 6) & 3) as usize;
@@ -175,7 +190,7 @@ static RANGE_TAB_LPS: [[u8; 4]; 64] = [
     [ 62,  76,  90, 104], [ 59,  72,  86,  99], [ 56,  69,  81,  94], [ 53,  65,  77,  89],
     [ 51,  62,  73,  85], [ 48,  59,  69,  80], [ 46,  56,  66,  76], [ 43,  53,  63,  72],
     [ 41,  50,  59,  69], [ 39,  48,  56,  65], [ 37,  45,  54,  62], [ 35,  43,  51,  59],
-    [ 33,  41,  48,  56], [ 32,  39,  46,  53], [ 30,  37,  43,  50], [ 28,  35,  41,  48],
+    [ 33,  41,  48,  56], [ 32,  39,  46,  53], [ 30,  37,  43,  50], [ 29,  35,  41,  48],
     [ 27,  33,  39,  45], [ 26,  31,  37,  43], [ 24,  30,  35,  41], [ 23,  28,  33,  39],
     [ 22,  27,  32,  37], [ 21,  26,  30,  35], [ 20,  24,  29,  33], [ 19,  23,  27,  31],
     [ 18,  22,  26,  30], [ 17,  21,  25,  28], [ 16,  20,  23,  27], [ 15,  19,  22,  25],
@@ -190,7 +205,7 @@ static RANGE_TAB_LPS: [[u8; 4]; 64] = [
 #[rustfmt::skip]
 static TRANS_IDX_LPS: [u8; 64] = [
      0,  0,  1,  2,  2,  4,  4,  5,  6,  7,  8,  9,  9, 11, 11, 12,
-    13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 23, 22, 23, 24,
+    13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 22, 22, 23, 24,
     24, 25, 26, 26, 27, 27, 28, 29, 29, 30, 30, 30, 31, 32, 32, 33,
     33, 33, 34, 34, 35, 35, 35, 36, 36, 36, 37, 37, 37, 38, 38, 63,
 ];
@@ -238,6 +253,20 @@ mod tests {
             assert!(TRANS_IDX_MPS[i] >= i as u8, "MPS transition climbs");
             assert!(TRANS_IDX_LPS[i] <= i as u8, "LPS transition falls or holds");
         }
+    }
+
+    #[test]
+    fn normative_table_entries_match_spec() {
+        // These specific entries were each off by one in early transcription
+        // (RANGE_TAB_LPS[31][0] was 28, TRANS_IDX_LPS[28] was 23). The round-
+        // trip tests can't catch a shared-table typo — the reference encoder
+        // uses the same table — so they survived until the full-slice JM
+        // trace diff (examples/decode_slice) caught a 1320-MB desync. Pin the
+        // corrected values (H.264 Tables 9-45/9-46, verified vs JM ldecod).
+        assert_eq!(RANGE_TAB_LPS[31], [29, 35, 41, 48]);
+        assert_eq!(RANGE_TAB_LPS[30], [30, 37, 43, 50]);
+        assert_eq!(RANGE_TAB_LPS[32], [27, 33, 39, 45]);
+        assert_eq!(&TRANS_IDX_LPS[26..32], &[21, 21, 22, 22, 23, 24]);
     }
 
     // ---- A reference CABAC *encoder* (test-only), per § 9.3.4, used to
