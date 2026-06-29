@@ -19,6 +19,7 @@ pub mod residual;
 pub mod decoder;
 pub mod ebml;
 pub mod layout;
+pub mod mb_header;
 pub mod mkv_extract;
 pub mod mvcc;
 pub mod nal;
