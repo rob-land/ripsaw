@@ -69,6 +69,16 @@ decoder" without committing to which decoder. This doc picks one.
   (~1.5 s) remains. Decoder half done + de-risked; the Ripsaw runner
   integration (ffmpeg→fifo→mvcdep→compose) is the remaining plumbing.
   Details in `docs/libmvc-optionb-carve.md` § Results.
+- **2026-06-29 (PoC scope).** Scoped a proof-of-concept in
+  `docs/libmvc-poc.md`. With the parser front-end and the hybrid
+  architecture both already proven, the only open libmvc question is "can
+  we write a correct H.264 decode core in Rust?". The PoC targets the
+  smallest slice that answers it: **one base-view IDR (intra) frame,
+  High-profile/CABAC, decoded bit-exact vs libavcodec** — exercising
+  CABAC + residual + inverse transform + intra prediction + deblocking
+  (the hardest ~60% of the decoder), reusing the existing parsers, and
+  deferring inter/DPB/inter-view to later phases. ~5–6 weeks; gates the
+  multi-month full decoder.
 
 ## What's already built
 
