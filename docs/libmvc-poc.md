@@ -133,6 +133,29 @@ This is a real chunk — but it is the bounded, high-information slice. It
 proves the hardest ~60% of the decoder (everything except inter/DPB) and,
 critically, the CABAC engine that the rest of the decoder is built on.
 
+## Progress (2026-06-29)
+
+The independently-validatable building blocks are done and unit-tested:
+
+| Module | What | Validation |
+|---|---|---|
+| `cabac.rs` | CABAC arithmetic engine (decision/bypass/terminate, ctx init, tables) | round-trip vs a reference encoder (engine logic); tables pending real-frame |
+| `transform.rs` | dequant + inverse 4×4 transform, luma/chroma DC Hadamard | exactly-computable cases |
+| `intra.rs` | Intra_4x4 (9 modes), Intra_16x16 + chroma (V/H/DC/Plane) | V/H/DC exact, directional constant-field + known taps |
+| `deblock.rs` | luma/chroma edge filters (bS<4 and bS=4) + threshold tables | hand-computed filter outputs; tables pending real-frame |
+
+These are the pieces whose correctness can be checked in isolation. ~25
+unit tests across them.
+
+**Remaining (the keystone):** the macroblock-layer syntax that drives the
+engine — `mb_type`/intra-mode/CBP/`mb_qp_delta` decoding, the full
+context-model init tables (Tables 9-12..9-33), and `residual_block_cabac`
+(significance maps + coefficient levels) — plus frame assembly and the
+boundary-strength derivation that feeds deblocking. This glue can only be
+*validated* end-to-end against a real frame (the §Validation diff), so it
+should be built alongside that harness rather than blind. That's the next
+work block.
+
 ## How it sequences toward full libmvc
 
 1. **PoC (this doc)** — base IDR intra, bit-exact. Proves the pixel

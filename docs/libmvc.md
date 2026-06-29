@@ -79,6 +79,14 @@ decoder" without committing to which decoder. This doc picks one.
   (the hardest ~60% of the decoder), reusing the existing parsers, and
   deferring inter/DPB/inter-view to later phases. ~5–6 weeks; gates the
   multi-month full decoder.
+- **2026-06-29 (PoC build started).** Landed the independently-testable
+  decode-core building blocks, all unit-tested (~25 tests): `cabac.rs`
+  (arithmetic engine, round-trip-validated), `transform.rs` (dequant +
+  inverse 4×4 / DC transforms), `intra.rs` (Intra_4x4 9 modes +
+  Intra_16x16/chroma), `deblock.rs` (edge filters + threshold tables).
+  Remaining for the first decoded frame: the MB-layer syntax + full
+  context-init tables + `residual_block_cabac`, built alongside the
+  real-frame validation harness. See `docs/libmvc-poc.md` § Progress.
 
 ## What's already built
 
