@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn more_rbsp_data_false_when_exhausted_or_all_zero() {
-        let mut r = BitReader::new(&[0x80]);
+        let r = BitReader::new(&[0x80]);
         assert!(!r.more_rbsp_data()); // only the stop bit, at index 0
         let r2 = BitReader::new(&[0x00, 0x00]);
         assert!(!r2.more_rbsp_data()); // no set bits anywhere

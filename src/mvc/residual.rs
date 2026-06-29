@@ -14,24 +14,40 @@
 use super::cabac::{CabacEngine, CtxState};
 
 /// Context models for one coefficient-block category. `sig` and `last`
-/// are indexed by the in-scan position (ctxIdxInc, § 9.3.3.1.3); `level`
-/// holds the 10 coeff_abs_level_minus1 contexts (0..=4 for bin 0,
-/// 5..=9 for the bin≥1 prefix).
+/// hold the significant_coeff_flag / last_significant_coeff_flag contexts;
+/// they are indexed *through* a position→context map (§ 9.3.3.1.3): for
+/// 4×4 blocks that map is the identity, but for 8×8 it aliases the 63 scan
+/// positions onto 15 significance / 9 last contexts (JM `pos2ctx_map8x8` /
+/// `pos2ctx_last8x8`). `level` holds the 10 coeff_abs_level_minus1 contexts
+/// (0..=4 = one_contexts for bin 0, 5..=9 = abs_contexts for the bin≥1
+/// prefix), matching JM's `read_significant_coefficients` c1/c2 model.
 pub struct CoeffContexts {
     pub sig: Vec<CtxState>,
     pub last: Vec<CtxState>,
     pub level: [CtxState; 10],
 }
 
+/// Identity position→context map for the 4×4 categories, where
+/// ctxIdxInc *is* the scan position (JM `pos2ctx_map4x4` /
+/// `pos2ctx_last4x4` for the first 15 entries).
+pub const POS2CTX_IDENTITY_4X4: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
 /// Decode one residual block of up to `max_num_coeff` coefficients,
 /// returning them in **scan order** (the caller applies the inverse scan
 /// to raster). Called only when the block is known to have coefficients
-/// (coded_block_flag = 1). `cat_gt1_cap` is the cap on `numDecodAbsLevelGt1`
-/// for the bin≥1 level context — 4 for most categories, 3 for chroma DC.
+/// (coded_block_flag = 1).
+///
+/// `pos2ctx_map` / `pos2ctx_last` map each scan position to its
+/// significance / last-flag context index (JM `pos2ctx_map[type]` /
+/// `pos2ctx_last[type]`); both must have at least `max_num_coeff` entries.
+/// `cat_gt1_cap` is the cap on `numDecodAbsLevelGt1` for the bin≥1 level
+/// context — 4 for most categories, 3 for chroma DC.
 pub fn decode_residual_block(
     e: &mut CabacEngine,
     ctx: &mut CoeffContexts,
     max_num_coeff: usize,
+    pos2ctx_map: &[u8],
+    pos2ctx_last: &[u8],
     cat_gt1_cap: u32,
 ) -> Vec<i32> {
     let mut sig = vec![false; max_num_coeff];
@@ -41,9 +57,9 @@ pub fn decode_residual_block(
     // significant by definition, so the loop stops one short of it.
     let mut i = 0;
     while i < num_coeff - 1 {
-        if e.decode_decision(&mut ctx.sig[i]) == 1 {
+        if e.decode_decision(&mut ctx.sig[pos2ctx_map[i] as usize]) == 1 {
             sig[i] = true;
-            if e.decode_decision(&mut ctx.last[i]) == 1 {
+            if e.decode_decision(&mut ctx.last[pos2ctx_last[i] as usize]) == 1 {
                 num_coeff = i + 1; // remaining positions are zero
                 break;
             }
@@ -245,7 +261,14 @@ mod tests {
         }
     }
 
-    fn encode_residual(enc: &mut refenc::Enc, ctx: &mut CoeffContexts, coeffs: &[i32], cap: u32) {
+    fn encode_residual(
+        enc: &mut refenc::Enc,
+        ctx: &mut CoeffContexts,
+        coeffs: &[i32],
+        map: &[u8],
+        last_map: &[u8],
+        cap: u32,
+    ) {
         let max = coeffs.len();
         let last = coeffs.iter().rposition(|&c| c != 0).expect("at least one coeff");
         // Mirror the decoder: code sig flags over 0..max-1, breaking once
@@ -254,9 +277,9 @@ mod tests {
         let mut i = 0;
         while i < max - 1 {
             let s = (coeffs[i] != 0) as u8;
-            enc.decision(&mut ctx.sig[i], s);
+            enc.decision(&mut ctx.sig[map[i] as usize], s);
             if s == 1 {
-                enc.decision(&mut ctx.last[i], (i == last) as u8);
+                enc.decision(&mut ctx.last[last_map[i] as usize], (i == last) as u8);
                 if i == last {
                     break;
                 }
@@ -298,30 +321,40 @@ mod tests {
         }
     }
 
-    fn fresh_ctx(n_pos: usize) -> CoeffContexts {
+    fn fresh_ctx(n_sig: usize, n_last: usize) -> CoeffContexts {
         // Placeholder inits; round-trip only needs encoder/decoder to share
         // them, so use a spread of states.
         let mk = |i: usize| CtxState::init(((i as i32 * 7) % 60) - 20, ((i as i32 * 5) % 40) - 10, 26);
         CoeffContexts {
-            sig: (0..n_pos).map(mk).collect(),
-            last: (0..n_pos).map(|i| mk(i + 3)).collect(),
+            sig: (0..n_sig).map(mk).collect(),
+            last: (0..n_last).map(|i| mk(i + 3)).collect(),
             level: std::array::from_fn(|i| mk(i + 1)),
         }
     }
 
-    fn round_trip(coeffs: &[i32], cap: u32) {
+    /// Round-trip with an explicit position→context map (8×8 and chroma
+    /// categories alias positions onto fewer contexts).
+    fn round_trip_mapped(coeffs: &[i32], map: &[u8], last_map: &[u8], cap: u32) {
         let max = coeffs.len();
-        let mut ectx = fresh_ctx(max - 1);
+        let n_sig = map[..max].iter().copied().max().unwrap() as usize + 1;
+        let n_last = last_map[..max].iter().copied().max().unwrap() as usize + 1;
+
+        let mut ectx = fresh_ctx(n_sig, n_last);
         let mut enc = refenc::Enc::new();
-        encode_residual(&mut enc, &mut ectx, coeffs, cap);
+        encode_residual(&mut enc, &mut ectx, coeffs, map, last_map, cap);
         enc.terminate1();
         let bytes = enc.into_bytes();
 
-        let mut dctx = fresh_ctx(max - 1);
+        let mut dctx = fresh_ctx(n_sig, n_last);
         let mut dec = CabacEngine::new(&bytes);
-        let got = decode_residual_block(&mut dec, &mut dctx, max, cap);
+        let got = decode_residual_block(&mut dec, &mut dctx, max, map, last_map, cap);
         assert_eq!(got, coeffs, "round-trip mismatch");
         assert_eq!(dec.decode_terminate(), 1);
+    }
+
+    /// 4×4 round-trip: identity position→context map.
+    fn round_trip(coeffs: &[i32], cap: u32) {
+        round_trip_mapped(coeffs, &POS2CTX_IDENTITY_4X4, &POS2CTX_IDENTITY_4X4, cap);
     }
 
     #[test]
@@ -372,5 +405,45 @@ mod tests {
     fn round_trip_full_run_of_ones() {
         let c = [1i32, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1];
         round_trip(&c, 4);
+    }
+
+    // JM pos2ctx_map8x8 / pos2ctx_last8x8: the 64-position significance and
+    // last maps for an 8×8 luma block. Verbatim from ldecod cabac.c.
+    #[rustfmt::skip]
+    const POS2CTX_MAP8X8: [u8; 64] = [
+        0,1,2,3,4,5,5,4,4,3,3,4,4,4,5,5, 4,4,4,4,3,3,6,7,7,7,8,9,10,9,8,7,
+        7,6,11,12,13,11,6,7,8,9,14,10,9,8,6,11, 12,13,11,6,9,14,10,9,11,12,13,11,14,10,12,14];
+    #[rustfmt::skip]
+    const POS2CTX_LAST8X8: [u8; 64] = [
+        0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+        3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4, 5,5,5,5,6,6,6,6,7,7,7,7,8,8,8,8];
+
+    #[test]
+    fn round_trip_8x8_aliased_contexts() {
+        // An 8×8 luma block (63 coded positions + implied last) whose
+        // significance/last contexts are aliased through pos2ctx_map8x8 /
+        // pos2ctx_last8x8 (15 sig, 9 last). Exercises that the decoder and
+        // encoder agree on the *shared* contexts those positions collapse to.
+        let mut c = [0i32; 64];
+        c[0] = 5;
+        c[1] = -1;
+        c[3] = 1;
+        c[7] = -2;
+        c[12] = 1;
+        c[20] = -1; // position 20 -> sig ctx 3, shared with positions 9,10,...
+        c[33] = 3; // -> last ctx 3
+        c[47] = -1;
+        c[63] = 1; // final position, implied-significant
+        round_trip_mapped(&c, &POS2CTX_MAP8X8, &POS2CTX_LAST8X8, 4);
+    }
+
+    #[test]
+    fn round_trip_8x8_long_run() {
+        // Sparse 8×8: a single early coefficient then a late one, so the
+        // significance loop walks deep into the aliased context region.
+        let mut c = [0i32; 64];
+        c[2] = -4;
+        c[40] = 7;
+        round_trip_mapped(&c, &POS2CTX_MAP8X8, &POS2CTX_LAST8X8, 4);
     }
 }
