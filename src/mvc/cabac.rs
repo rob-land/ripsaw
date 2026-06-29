@@ -137,6 +137,32 @@ impl<'a> CabacEngine<'a> {
             0
         }
     }
+
+    /// Read `n` bypass bins as an unsigned MSB-first integer (fixed-length
+    /// binarisation, § 9.3.2.4).
+    pub fn decode_bypass_bits(&mut self, n: u32) -> u32 {
+        let mut v = 0;
+        for _ in 0..n {
+            v = (v << 1) | self.decode_bypass();
+        }
+        v
+    }
+
+    /// Decode a k-th-order Exp-Golomb value from bypass bins — the suffix
+    /// of a UEGk binarisation (§ 9.3.2.3), e.g. large coefficient levels.
+    pub fn decode_exp_golomb_bypass(&mut self, k: u32) -> u32 {
+        let mut value = 0;
+        let mut shift = k;
+        while self.decode_bypass() == 1 {
+            value += 1 << shift;
+            shift += 1;
+        }
+        while shift > 0 {
+            shift -= 1;
+            value += self.decode_bypass() << shift;
+        }
+        value
+    }
 }
 
 /// rangeTabLPS — H.264 Table 9-46. Indexed `[pStateIdx][qCodIRangeIdx]`.
@@ -303,6 +329,24 @@ mod tests {
                 self.renorm();
             }
         }
+        fn encode_bypass_bits(&mut self, value: u32, n: u32) {
+            for i in (0..n).rev() {
+                self.encode_bypass(((value >> i) & 1) as u8);
+            }
+        }
+        fn encode_exp_golomb_bypass(&mut self, mut value: u32, k: u32) {
+            let mut k_local = k;
+            while value >= (1 << k_local) {
+                self.encode_bypass(1);
+                value -= 1 << k_local;
+                k_local += 1;
+            }
+            self.encode_bypass(0);
+            while k_local > 0 {
+                k_local -= 1;
+                self.encode_bypass(((value >> k_local) & 1) as u8);
+            }
+        }
         fn flush(&mut self) {
             self.range = 2;
             self.renorm();
@@ -391,6 +435,40 @@ mod tests {
             Op::Decision(0, 0),
         ];
         round_trip(&ops, 1, CtxState::init(-3, 50, 30));
+    }
+
+    #[test]
+    fn round_trip_fixed_length_and_exp_golomb() {
+        // Encode a mix of FL fields and EGk values via bypass, then a
+        // terminate(1) to flush; decode and compare.
+        let fl: &[(u32, u32)] = &[(5, 3), (0, 4), (15, 4), (170, 8)];
+        let eg0: &[u32] = &[0, 1, 2, 5, 14, 30, 199, 1000];
+        let eg3: &[u32] = &[0, 7, 8, 100, 4096];
+
+        let mut enc = RefEncoder::new();
+        for &(v, n) in fl {
+            enc.encode_bypass_bits(v, n);
+        }
+        for &v in eg0 {
+            enc.encode_exp_golomb_bypass(v, 0);
+        }
+        for &v in eg3 {
+            enc.encode_exp_golomb_bypass(v, 3);
+        }
+        enc.encode_terminate(1);
+        let bytes = enc.into_bytes();
+
+        let mut dec = CabacEngine::new(&bytes);
+        for &(v, n) in fl {
+            assert_eq!(dec.decode_bypass_bits(n), v, "FL {v} x{n}");
+        }
+        for &v in eg0 {
+            assert_eq!(dec.decode_exp_golomb_bypass(0), v, "EG0 {v}");
+        }
+        for &v in eg3 {
+            assert_eq!(dec.decode_exp_golomb_bypass(3), v, "EG3 {v}");
+        }
+        assert_eq!(dec.decode_terminate(), 1);
     }
 
     #[test]
