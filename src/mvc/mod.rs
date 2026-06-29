@@ -12,6 +12,7 @@ pub mod annexb;
 pub mod bitstream;
 pub mod cabac;
 pub mod transform;
+pub mod intra;
 pub mod decoder;
 pub mod ebml;
 pub mod layout;
