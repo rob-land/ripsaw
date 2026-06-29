@@ -3,11 +3,11 @@
 // (docs/libmvc-poc.md): once CABAC has produced coefficient *levels*,
 // these turn them into spatial residual samples.
 //
-// Scope here is the 4×4 residual path used by I_NxN luma + chroma AC, plus
-// the DC transforms for Intra_16x16 luma (4×4 Hadamard) and 4:2:0 chroma
-// (2×2 Hadamard). 8×8 lands in a follow-up. Custom scaling lists are not
-// handled — flat weightScale (=16) only, which is what asserts elsewhere
-// bail on; Blu-ray streams in the corpus use flat scaling.
+// Scope here is the 4×4 residual path used by I_NxN luma + chroma AC, the
+// DC transforms for Intra_16x16 luma (4×4 Hadamard) and 4:2:0 chroma (2×2
+// Hadamard), and the 8×8 residual path used by I_8x8 luma. Custom scaling
+// lists are not handled — flat weightScale (=16) only, which is what
+// asserts elsewhere bail on; Blu-ray streams in the corpus use flat scaling.
 
 /// `normAdjust4x4[m][class]` — H.264 § 8.5.9 (the "V" matrix). `class` is
 /// 0 for even/even positions, 1 for odd/odd, 2 otherwise.
@@ -87,6 +87,114 @@ pub fn reconstruct_residual_4x4(levels: &[[i32; 4]; 4], qp: i32) -> [[i32; 4]; 4
     let mut d = *levels;
     dequant_4x4(&mut d, qp);
     idct_4x4(&d)
+}
+
+/// `dequant_coef8[m][row][col]` — the 8×8 inverse-scaling weight matrix
+/// (JM `dequant_coef8`, == normAdjust8x8 of H.264 § 8.5.13.1), indexed by
+/// `m = qP % 6`. With flat weightScale (=16) the level scale is `16 ×` this.
+#[rustfmt::skip]
+static DEQUANT_COEF8: [[[i32; 8]; 8]; 6] = [
+    [[20,19,25,19,20,19,25,19],[19,18,24,18,19,18,24,18],[25,24,32,24,25,24,32,24],[19,18,24,18,19,18,24,18],
+     [20,19,25,19,20,19,25,19],[19,18,24,18,19,18,24,18],[25,24,32,24,25,24,32,24],[19,18,24,18,19,18,24,18]],
+    [[22,21,28,21,22,21,28,21],[21,19,26,19,21,19,26,19],[28,26,35,26,28,26,35,26],[21,19,26,19,21,19,26,19],
+     [22,21,28,21,22,21,28,21],[21,19,26,19,21,19,26,19],[28,26,35,26,28,26,35,26],[21,19,26,19,21,19,26,19]],
+    [[26,24,33,24,26,24,33,24],[24,23,31,23,24,23,31,23],[33,31,42,31,33,31,42,31],[24,23,31,23,24,23,31,23],
+     [26,24,33,24,26,24,33,24],[24,23,31,23,24,23,31,23],[33,31,42,31,33,31,42,31],[24,23,31,23,24,23,31,23]],
+    [[28,26,35,26,28,26,35,26],[26,25,33,25,26,25,33,25],[35,33,45,33,35,33,45,33],[26,25,33,25,26,25,33,25],
+     [28,26,35,26,28,26,35,26],[26,25,33,25,26,25,33,25],[35,33,45,33,35,33,45,33],[26,25,33,25,26,25,33,25]],
+    [[32,30,40,30,32,30,40,30],[30,28,38,28,30,28,38,28],[40,38,51,38,40,38,51,38],[30,28,38,28,30,28,38,28],
+     [32,30,40,30,32,30,40,30],[30,28,38,28,30,28,38,28],[40,38,51,38,40,38,51,38],[30,28,38,28,30,28,38,28]],
+    [[36,34,46,34,36,34,46,34],[34,32,43,32,34,32,43,32],[46,43,58,43,46,43,58,43],[34,32,43,32,34,32,43,32],
+     [36,34,46,34,36,34,46,34],[34,32,43,32,34,32,43,32],[46,43,58,43,46,43,58,43],[34,32,43,32,34,32,43,32]],
+];
+
+/// Inverse-scale (dequantise) an 8×8 block of coefficient levels in place
+/// (§ 8.5.13.1), flat scaling. Mirrors JM exactly:
+/// `d = (level · 16·normAdjust8x8[m] << (qP/6) + 32) >> 6`.
+pub fn dequant_8x8(levels: &mut [[i32; 8]; 8], qp: i32) {
+    let m = (qp % 6) as usize;
+    let shift = qp / 6;
+    for i in 0..8 {
+        for j in 0..8 {
+            let scale = (DEQUANT_COEF8[m][i][j] * 16) as i64;
+            let x = ((levels[i][j] as i64) * scale) << shift;
+            levels[i][j] = ((x + 32) >> 6) as i32;
+        }
+    }
+}
+
+/// Inverse 8×8 residual transform (§ 8.5.13.2), the JM `inverse8x8`
+/// butterfly applied to rows then columns. No final rounding/shift — the
+/// caller applies `(H + 32) >> 6` when adding to the prediction (JM
+/// `recon8x8`, `DQ_BITS_8 = 6`). `reconstruct_residual_8x8` does both.
+pub fn inverse_8x8(block: &[[i32; 8]; 8]) -> [[i32; 8]; 8] {
+    fn pass(p: [i32; 8]) -> [i32; 8] {
+        let (p0, p1, p2, p3, p4, p5, p6, p7) = (p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+        let a0 = p0 + p4;
+        let a1 = p0 - p4;
+        let a2 = p6 - (p2 >> 1);
+        let a3 = p2 + (p6 >> 1);
+        let b0 = a0 + a3;
+        let b2 = a1 - a2;
+        let b4 = a1 + a2;
+        let b6 = a0 - a3;
+        let a0 = -p3 + p5 - p7 - (p7 >> 1);
+        let a1 = p1 + p7 - p3 - (p3 >> 1);
+        let a2 = -p1 + p7 + p5 + (p5 >> 1);
+        let a3 = p3 + p5 + p1 + (p1 >> 1);
+        let b1 = a0 + (a3 >> 2);
+        let b3 = a1 + (a2 >> 2);
+        let b5 = a2 - (a1 >> 2);
+        let b7 = a3 - (a0 >> 2);
+        [b0 + b7, b2 - b5, b4 + b3, b6 + b1, b6 - b1, b4 - b3, b2 + b5, b0 - b7]
+    }
+    // Horizontal (each row).
+    let mut tmp = [[0i32; 8]; 8];
+    for i in 0..8 {
+        tmp[i] = pass(block[i]);
+    }
+    // Vertical (each column).
+    let mut out = [[0i32; 8]; 8];
+    for j in 0..8 {
+        let col = pass([tmp[0][j], tmp[1][j], tmp[2][j], tmp[3][j], tmp[4][j], tmp[5][j], tmp[6][j], tmp[7][j]]);
+        for i in 0..8 {
+            out[i][j] = col[i];
+        }
+    }
+    out
+}
+
+/// Dequantise, inverse-transform, and round an 8×8 residual block: returns
+/// the residual samples `(H + 32) >> 6` to be added to the prediction.
+pub fn reconstruct_residual_8x8(levels: &[[i32; 8]; 8], qp: i32) -> [[i32; 8]; 8] {
+    let mut d = *levels;
+    dequant_8x8(&mut d, qp);
+    let h = inverse_8x8(&d);
+    let mut r = [[0i32; 8]; 8];
+    for i in 0..8 {
+        for j in 0..8 {
+            r[i][j] = (h[i][j] + 32) >> 6;
+        }
+    }
+    r
+}
+
+/// 8×8 zig-zag scan (frame), JM `SNGL_SCAN8x8`: scan index → (row, col).
+#[rustfmt::skip]
+static SCAN_8X8: [(usize, usize); 64] = [
+    (0,0),(0,1),(1,0),(2,0),(1,1),(0,2),(0,3),(1,2),(2,1),(3,0),(4,0),(3,1),(2,2),(1,3),(0,4),(0,5),
+    (1,4),(2,3),(3,2),(4,1),(5,0),(6,0),(5,1),(4,2),(3,3),(2,4),(1,5),(0,6),(0,7),(1,6),(2,5),(3,4),
+    (4,3),(5,2),(6,1),(7,0),(7,1),(6,2),(5,3),(4,4),(3,5),(2,6),(1,7),(2,7),(3,6),(4,5),(5,4),(6,3),
+    (7,2),(7,3),(6,4),(5,5),(4,6),(3,7),(4,7),(5,6),(6,5),(7,4),(7,5),(6,6),(5,7),(6,7),(7,6),(7,7),
+];
+
+/// Place 64 scan-order coefficients into an 8×8 raster block `[row][col]`.
+pub fn inverse_scan_8x8(scan: &[i32; 64]) -> [[i32; 8]; 8] {
+    let mut out = [[0i32; 8]; 8];
+    for (k, &(row, col)) in SCAN_8X8.iter().enumerate() {
+        out[row][col] = scan[k];
+    }
+    out
 }
 
 /// Inverse 4×4 Hadamard transform of the Intra_16x16 luma DC coefficients
@@ -269,5 +377,92 @@ mod tests {
         assert_eq!(out[0][1], 0);
         assert_eq!(out[1][0], 0);
         assert_eq!(out[1][1], 0);
+    }
+
+    #[test]
+    fn inverse_8x8_dc_only_is_uniform() {
+        // A pure-DC 8×8 block (only [0][0] set) inverse-transforms to a flat
+        // block — every sample equals the DC value (definition of DC).
+        let mut block = [[0i32; 8]; 8];
+        block[0][0] = 64;
+        let out = inverse_8x8(&block);
+        for row in &out {
+            for &v in row {
+                assert_eq!(v, 64);
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_8x8_is_linear() {
+        // The transform is linear: T(a) + T(b) == T(a + b).
+        let mut a = [[0i32; 8]; 8];
+        let mut b = [[0i32; 8]; 8];
+        a[0][0] = 100;
+        a[1][3] = -8;
+        a[7][7] = 5;
+        b[0][0] = -20;
+        b[2][1] = 12;
+        b[4][4] = 30;
+        let ta = inverse_8x8(&a);
+        let tb = inverse_8x8(&b);
+        let mut sum = [[0i32; 8]; 8];
+        for i in 0..8 {
+            for j in 0..8 {
+                sum[i][j] = a[i][j] + b[i][j];
+            }
+        }
+        let tsum = inverse_8x8(&sum);
+        for i in 0..8 {
+            for j in 0..8 {
+                assert_eq!(ta[i][j] + tb[i][j], tsum[i][j]);
+            }
+        }
+    }
+
+    #[test]
+    fn dequant_8x8_matches_jm_formula() {
+        // JM: d = (level · 16·dequant_coef8[m][i][j] << (qp/6) + 32) >> 6.
+        // DC at qp 0: dequant_coef8[0][0][0] = 20 -> (level·320 + 32) >> 6.
+        let mut levels = [[0i32; 8]; 8];
+        levels[0][0] = -3823; // MB 0's real coefficient (level −3823 at qp 0)
+        dequant_8x8(&mut levels, 0);
+        assert_eq!(levels[0][0], ((-3823i64 * 320 + 32) >> 6) as i32);
+        // qp 6 doubles the per-step shift (qp/6 = 1): scale << 1.
+        let mut l2 = [[0i32; 8]; 8];
+        l2[2][2] = 3; // coef8[0][2][2] = 32
+        dequant_8x8(&mut l2, 6);
+        assert_eq!(l2[2][2], (((3i64 * 32 * 16) << 1) + 32) as i32 >> 6);
+    }
+
+    #[test]
+    fn reconstruct_residual_8x8_dc_spreads_uniformly() {
+        // DC-only level -> dequant DC, inverse spreads it flat, final
+        // (H+32)>>6 applied uniformly.
+        let mut levels = [[0i32; 8]; 8];
+        levels[0][0] = 12;
+        let r = reconstruct_residual_8x8(&levels, 18);
+        let expected = r[0][0];
+        for row in &r {
+            for &v in row {
+                assert_eq!(v, expected);
+            }
+        }
+        assert!(expected != 0);
+    }
+
+    #[test]
+    fn inverse_scan_8x8_places_diagonal() {
+        // Scan positions 0,1,2 land at (0,0),(0,1),(1,0) per SNGL_SCAN8x8.
+        let mut scan = [0i32; 64];
+        scan[0] = 1;
+        scan[1] = 2;
+        scan[2] = 3;
+        scan[63] = 9;
+        let b = inverse_scan_8x8(&scan);
+        assert_eq!(b[0][0], 1);
+        assert_eq!(b[0][1], 2);
+        assert_eq!(b[1][0], 3);
+        assert_eq!(b[7][7], 9);
     }
 }
