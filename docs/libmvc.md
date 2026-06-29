@@ -87,6 +87,16 @@ decoder" without committing to which decoder. This doc picks one.
   Remaining for the first decoded frame: the MB-layer syntax + full
   context-init tables + `residual_block_cabac`, built alongside the
   real-frame validation harness. See `docs/libmvc-poc.md` § Progress.
+- **2026-06-29 (integration + first real-data validation).** Built the
+  validation harness (`examples/decode_intra.rs`) and the JM ldecod
+  per-element trace tool (`scripts/build-ldecod-trace.sh`,
+  `src/mvc/trace.rs` — parses both header `(value)` elements and residual
+  run/level lines, `first_divergence` locates mismatches). Implemented the
+  I-slice MB-header decode (`src/mvc/mb_header.rs`, context tables verbatim
+  from JM): **MB 0 of a real base IDR decodes bit-exact vs JM** — first
+  real-data validation of the decode core. Remaining: residual decode +
+  slice loop → full-frame diff. The frame is I_8×8. See
+  `docs/libmvc-poc.md` § Integration progress.
 
 ## What's already built
 

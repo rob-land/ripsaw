@@ -162,6 +162,30 @@ iterative-debugging effort built with that harness, not more isolated
 modules. The isolation-validatable foundation is now complete; this is the
 next, distinct work block.
 
+### Integration progress (2026-06-29)
+
+The validation harness and a per-element feedback loop are in place, and
+the macroblock decode has started — validated against JM ldecod bit-exact:
+
+- **ldecod trace tool** (`scripts/build-ldecod-trace.sh`, `src/mvc/trace.rs`,
+  `examples/cmp_trace.rs`): a `TRACE=1` ldecod emits one line per syntax
+  element; the parser captures both the `(value)` header elements **and**
+  the `name <level> <run>` residual run/level lines (690,950 elements for
+  the base IDR frame), and `first_divergence` pinpoints the first mismatch.
+- **MB-header decode** (`src/mvc/mb_header.rs`): I-slice mb_type /
+  transform_size_8x8_flag / intra modes / chroma / cbp / mb_qp_delta, with
+  context-init transcribed verbatim from JM `ctx_tables.h`. **MB 0's header
+  decodes bit-exact vs JM** (`examples/decode_mb0.rs`) — the first
+  real-data validation of the CABAC engine + context init + neighbour
+  derivation.
+
+**Remaining:** the residual decode (`coded_block_flag`, the 8×8/4×4/chroma
+significance maps with their position→context tables, run-adaptive level
+decode) — needed to keep the CABAC engine in sync between MB headers, and
+now validatable per-coefficient against the trace. Then the slice loop
+(reconstruct = predict + residual + clip, deblock, crop) → the full-frame
+diff. The frame is I_8×8, so the 8×8 paths are required.
+
 ## How it sequences toward full libmvc
 
 1. **PoC (this doc)** — base IDR intra, bit-exact. Proves the pixel
