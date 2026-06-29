@@ -35,6 +35,12 @@ impl<'a> BitReader<'a> {
         self.bit_pos == 0
     }
 
+    /// Absolute bit offset consumed so far (MSB-first). Used to locate the
+    /// byte-aligned CABAC slice data that follows a parsed slice header.
+    pub fn position_bits(&self) -> usize {
+        self.byte_pos * 8 + self.bit_pos as usize
+    }
+
     /// `more_rbsp_data()` per H.264 § 7.2. Returns true if there is RBSP
     /// payload remaining before the `rbsp_stop_one_bit`. The stop bit is
     /// the last set bit in the whole buffer (everything after it is
