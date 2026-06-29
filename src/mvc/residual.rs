@@ -89,13 +89,11 @@ fn decode_abs_level_minus1(
     let ctx0 = if num_gt1 != 0 { 0 } else { (1 + num_eq1).min(4) } as usize;
     let ctx1 = (5 + num_gt1.min(cat_gt1_cap)) as usize;
 
-    // Truncated-unary prefix.
-    let mut prefix = 0u32;
-    // bin 0
+    // Truncated-unary prefix. Bin 0 = 0 means the level is 1 (m1 = 0).
     if e.decode_decision(&mut ctx.level[ctx0]) == 0 {
         return 0;
     }
-    prefix = 1;
+    let mut prefix = 1u32;
     while prefix < PREFIX_CMAX {
         if e.decode_decision(&mut ctx.level[ctx1]) == 0 {
             return prefix;

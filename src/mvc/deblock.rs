@@ -34,7 +34,7 @@ pub fn filter_luma_normal(s: &mut [i32; 8], alpha: i32, beta: i32, tc0: i32) {
     let ap = (p2 - p0).abs();
     let aq = (q2 - q0).abs();
     let tc = tc0 + (ap < beta) as i32 + (aq < beta) as i32;
-    let delta = clip3(-tc, tc, ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3));
+    let delta = clip3(-tc, tc, (((q0 - p0) << 2) + (p1 - q1) + 4) >> 3);
     s[3] = clip1(p0 + delta);
     s[4] = clip1(q0 - delta);
     if ap < beta {
@@ -81,7 +81,7 @@ pub fn filter_chroma(s: &mut [i32; 8], alpha: i32, beta: i32, tc0: i32, strong: 
         s[4] = (2 * q1 + q0 + p1 + 2) >> 2;
     } else {
         let tc = tc0 + 1;
-        let delta = clip3(-tc, tc, ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3));
+        let delta = clip3(-tc, tc, (((q0 - p0) << 2) + (p1 - q1) + 4) >> 3);
         s[3] = clip1(p0 + delta);
         s[4] = clip1(q0 - delta);
     }
