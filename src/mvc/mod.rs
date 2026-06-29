@@ -16,6 +16,7 @@ pub mod transform;
 pub mod intra;
 pub mod deblock;
 pub mod residual;
+pub mod residual_ctx;
 pub mod decoder;
 pub mod ebml;
 pub mod layout;
