@@ -210,6 +210,218 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &Neighbors4x4) -> [[i32; 4]; 4] {
     p
 }
 
+#[inline]
+fn clip1(v: i32) -> i32 {
+    v.clamp(0, 255)
+}
+
+/// The four whole-macroblock prediction modes shared by Intra_16x16 luma
+/// (§ 8.3.3) and chroma (§ 8.3.4): Vertical, Horizontal, DC, Plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaneMode {
+    Vertical,   // 0
+    Horizontal, // 1
+    Dc,         // 2
+    Plane,      // 3
+}
+
+impl PlaneMode {
+    pub fn from_index(i: u32) -> Option<Self> {
+        Some(match i {
+            0 => PlaneMode::Vertical,
+            1 => PlaneMode::Horizontal,
+            2 => PlaneMode::Dc,
+            3 => PlaneMode::Plane,
+            _ => return None,
+        })
+    }
+}
+
+/// Neighbours for an N×N whole-block predictor (N = 16 luma, 8 chroma).
+/// `top`/`left` are the N samples above/left; `corner` is `p[-1][-1]`.
+pub struct NeighborsNxN<'a> {
+    pub top: &'a [i32],
+    pub left: &'a [i32],
+    pub corner: i32,
+    pub top_avail: bool,
+    pub left_avail: bool,
+}
+
+/// Predict an Intra_16x16 luma macroblock (§ 8.3.3). `out[y][x]`, clipped.
+pub fn predict_16x16(mode: PlaneMode, n: &NeighborsNxN) -> [[i32; 16]; 16] {
+    let mut p = [[0i32; 16]; 16];
+    match mode {
+        PlaneMode::Vertical => {
+            for y in 0..16 {
+                for x in 0..16 {
+                    p[y][x] = n.top[x];
+                }
+            }
+        }
+        PlaneMode::Horizontal => {
+            for y in 0..16 {
+                for x in 0..16 {
+                    p[y][x] = n.left[y];
+                }
+            }
+        }
+        PlaneMode::Dc => {
+            let dc = dc_value(n, 16);
+            p = [[dc; 16]; 16];
+        }
+        PlaneMode::Plane => {
+            let mut h = 0;
+            for xp in 0..8i32 {
+                h += (xp + 1) * (n.top[(8 + xp) as usize] - n.top_or_corner(6 - xp));
+            }
+            let mut v = 0;
+            for yp in 0..8i32 {
+                v += (yp + 1) * (n.left[(8 + yp) as usize] - n.left_or_corner(6 - yp));
+            }
+            let b = (5 * h + 32) >> 6;
+            let c = (5 * v + 32) >> 6;
+            let a = 16 * (n.left[15] + n.top[15]);
+            for y in 0..16i32 {
+                for x in 0..16i32 {
+                    p[y as usize][x as usize] =
+                        clip1((a + b * (x - 7) + c * (y - 7) + 16) >> 5);
+                }
+            }
+        }
+    }
+    p
+}
+
+/// Predict an 8×8 chroma block for 4:2:0 (§ 8.3.4). `out[y][x]`, clipped.
+pub fn predict_chroma_8x8(mode: PlaneMode, n: &NeighborsNxN) -> [[i32; 8]; 8] {
+    let mut p = [[0i32; 8]; 8];
+    match mode {
+        PlaneMode::Vertical => {
+            for y in 0..8 {
+                for x in 0..8 {
+                    p[y][x] = n.top[x];
+                }
+            }
+        }
+        PlaneMode::Horizontal => {
+            for y in 0..8 {
+                for x in 0..8 {
+                    p[y][x] = n.left[y];
+                }
+            }
+        }
+        PlaneMode::Dc => chroma_dc(n, &mut p),
+        PlaneMode::Plane => {
+            let mut h = 0;
+            for xp in 0..4i32 {
+                h += (xp + 1) * (n.top[(4 + xp) as usize] - n.top_or_corner(2 - xp));
+            }
+            let mut v = 0;
+            for yp in 0..4i32 {
+                v += (yp + 1) * (n.left[(4 + yp) as usize] - n.left_or_corner(2 - yp));
+            }
+            let b = (17 * h + 16) >> 5;
+            let c = (17 * v + 16) >> 5;
+            let a = 16 * (n.left[7] + n.top[7]);
+            for y in 0..8i32 {
+                for x in 0..8i32 {
+                    p[y as usize][x as usize] =
+                        clip1((a + b * (x - 3) + c * (y - 3) + 16) >> 5);
+                }
+            }
+        }
+    }
+    p
+}
+
+impl<'a> NeighborsNxN<'a> {
+    #[inline]
+    fn top_or_corner(&self, i: i32) -> i32 {
+        if i < 0 {
+            self.corner
+        } else {
+            self.top[i as usize]
+        }
+    }
+    #[inline]
+    fn left_or_corner(&self, j: i32) -> i32 {
+        if j < 0 {
+            self.corner
+        } else {
+            self.left[j as usize]
+        }
+    }
+}
+
+fn dc_value(n: &NeighborsNxN, size: usize) -> i32 {
+    let sum_top: i32 = n.top[..size].iter().sum();
+    let sum_left: i32 = n.left[..size].iter().sum();
+    let log2 = size.trailing_zeros() as i32; // 4 for 16, 3 for 8
+    match (n.top_avail, n.left_avail) {
+        (true, true) => (sum_top + sum_left + size as i32) >> (log2 + 1),
+        (true, false) => (sum_top + (size as i32 >> 1)) >> log2,
+        (false, true) => (sum_left + (size as i32 >> 1)) >> log2,
+        (false, false) => 128,
+    }
+}
+
+/// 4:2:0 chroma DC (§ 8.3.4.1): the 8×8 splits into four 4×4 blocks, each
+/// with its own neighbour preference — the diagonal blocks use both
+/// top+left, the top-right prefers top, the bottom-left prefers left.
+fn chroma_dc(n: &NeighborsNxN, out: &mut [[i32; 8]; 8]) {
+    let sum4 = |s: &[i32]| -> i32 { s.iter().sum() };
+    let both = |t: &[i32], l: &[i32]| (sum4(t) + sum4(l) + 4) >> 3;
+    let one = |s: &[i32]| (sum4(s) + 2) >> 2;
+    let (ta, la) = (n.top_avail, n.left_avail);
+    let top = n.top;
+    let left = n.left;
+
+    // (block x-origin, y-origin) -> dc.
+    let dc = |bx: usize, by: usize| -> i32 {
+        let t = &top[bx..bx + 4];
+        let l = &left[by..by + 4];
+        match (bx, by) {
+            // Top-left and bottom-right: both neighbours.
+            (0, 0) | (4, 4) => match (ta, la) {
+                (true, true) => both(t, l),
+                (true, false) => one(t),
+                (false, true) => one(l),
+                (false, false) => 128,
+            },
+            // Top-right: prefer top.
+            (4, 0) => {
+                if ta {
+                    one(t)
+                } else if la {
+                    one(l)
+                } else {
+                    128
+                }
+            }
+            // Bottom-left: prefer left.
+            (0, 4) => {
+                if la {
+                    one(l)
+                } else if ta {
+                    one(t)
+                } else {
+                    128
+                }
+            }
+            _ => unreachable!(),
+        }
+    };
+
+    for &(bx, by) in &[(0, 0), (4, 0), (0, 4), (4, 4)] {
+        let v = dc(bx, by);
+        for y in by..by + 4 {
+            for x in bx..bx + 4 {
+                out[y][x] = v;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +506,54 @@ mod tests {
         let n = neigh([0, 4, 8, 12, 16, 20, 24, 28], [0; 4], 0);
         let p = predict_4x4(Intra4x4Mode::VerticalLeft, &n);
         assert_eq!(p[0], [avg2(0, 4), avg2(4, 8), avg2(8, 12), avg2(12, 16)]);
+    }
+
+    fn nxn(top: Vec<i32>, left: Vec<i32>, corner: i32) -> (Vec<i32>, Vec<i32>, i32) {
+        (top, left, corner)
+    }
+
+    #[test]
+    fn pred16_vertical_horizontal_dc() {
+        let (t, l, c) = nxn(vec![3; 16], vec![7; 16], 0);
+        let n = NeighborsNxN { top: &t, left: &l, corner: c, top_avail: true, left_avail: true };
+        assert_eq!(predict_16x16(PlaneMode::Vertical, &n)[5], [3; 16]);
+        assert_eq!(predict_16x16(PlaneMode::Horizontal, &n)[5], [7; 16]);
+        // DC both: (16*3 + 16*7 + 16) >> 5 = (48+112+16)/32 = 5.
+        assert_eq!(predict_16x16(PlaneMode::Dc, &n)[0][0], 5);
+    }
+
+    #[test]
+    fn pred16_plane_constant_field_is_constant() {
+        // Uniform neighbourhood -> H=V=0, a=32p, pred=(32p+16)>>5 = p.
+        let (t, l, c) = nxn(vec![100; 16], vec![100; 16], 100);
+        let n = NeighborsNxN { top: &t, left: &l, corner: c, top_avail: true, left_avail: true };
+        assert_eq!(predict_16x16(PlaneMode::Plane, &n), [[100; 16]; 16]);
+    }
+
+    #[test]
+    fn chroma_dc_per_block_preference() {
+        // top = 0..8 scaled, left = constant; check the four 4×4 DCs pick
+        // the right neighbours. top[0..4]=10 each, top[4..8]=20 each;
+        // left all = 40.
+        let t = vec![10, 10, 10, 10, 20, 20, 20, 20];
+        let l = vec![40; 8];
+        let n = NeighborsNxN { top: &t, left: &l, corner: 0, top_avail: true, left_avail: true };
+        let p = predict_chroma_8x8(PlaneMode::Dc, &n);
+        // Block (0,0): both -> (40 + 160 + 4)>>3 = 25.
+        assert_eq!(p[0][0], (40 + 160 + 4) >> 3);
+        // Block (4,0) top-right: prefers top[4..8]=80 -> (80+2)>>2 = 20.
+        assert_eq!(p[0][4], (80 + 2) >> 2);
+        // Block (0,4) bottom-left: prefers left -> (160+2)>>2 = 40.
+        assert_eq!(p[4][0], (160 + 2) >> 2);
+        // Block (4,4): both -> (80 + 160 + 4)>>3 = 30.
+        assert_eq!(p[4][4], (80 + 160 + 4) >> 3);
+    }
+
+    #[test]
+    fn chroma_plane_constant_field_is_constant() {
+        let t = vec![55; 8];
+        let l = vec![55; 8];
+        let n = NeighborsNxN { top: &t, left: &l, corner: 55, top_avail: true, left_avail: true };
+        assert_eq!(predict_chroma_8x8(PlaneMode::Plane, &n), [[55; 8]; 8]);
     }
 }
