@@ -9,7 +9,7 @@
 use ripsaw::mvc::annexb::NalSplitter;
 use ripsaw::mvc::bitstream::BitReader;
 use ripsaw::mvc::cabac::CabacEngine;
-use ripsaw::mvc::mb_inter::{decode_mb_skip_flag, InterContexts};
+use ripsaw::mvc::mb_inter::{decode_inter_mb_type, decode_mb_skip_flag, decode_mvd_component, InterContexts};
 use ripsaw::mvc::nal::parse_nal_unit_header;
 use ripsaw::mvc::pps::{parse_pic_parameter_set, Pps};
 use ripsaw::mvc::rbsp::extract_rbsp;
@@ -66,6 +66,23 @@ fn main() -> anyhow::Result<()> {
                     skip_grid.push(is_skip);
                     if !is_skip {
                         coded_at = Some(addr);
+                        // Decode this first coded MB's mb_type + mvd. Its
+                        // neighbours are all skipped/absent, so every mvd
+                        // ctxIdxInc is 0. (cbp/residual need P-model contexts,
+                        // not yet built — stop after mvd.)
+                        let mb_type = decode_inter_mb_type(&mut e, &mut ctx);
+                        decoded.push(("mb_type".into(), mb_type));
+                        let mvd_pairs = match mb_type {
+                            1 => 1,        // P_16x16
+                            2 | 3 => 2,    // P_16x8 / P_8x16
+                            _ => 0,        // P_8x8 / intra — handled later
+                        };
+                        for _ in 0..mvd_pairs {
+                            let x = decode_mvd_component(&mut e, &mut ctx, 0, 0);
+                            decoded.push(("mvd_l0".into(), x));
+                            let y = decode_mvd_component(&mut e, &mut ctx, 1, 0);
+                            decoded.push(("mvd_l0".into(), y));
+                        }
                         break;
                     }
                     // P_Skip: no further MB syntax; just end_of_slice_flag.
