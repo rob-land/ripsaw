@@ -91,7 +91,7 @@ fn main() -> anyhow::Result<()> {
 
                 let cat = ResidualCat::Luma8x8;
                 let d = cat.desc();
-                let mut coeff_ctx = cat.coeff_contexts(slice_qp);
+                let mut coeff_ctx = cat.coeff_contexts(slice_qp, false);
                 let coeffs = decode_residual_block(
                     &mut e,
                     &mut coeff_ctx,

@@ -176,6 +176,7 @@ fn decode_block(
 /// Decode an intra MB's residual, appending JM-matching trace elements to
 /// `out`. `qp` is the MB's luma QP; chroma QP mapping is applied internally.
 /// Updates `neigh.cur` with this MB's cbf bits (for the next MB's context).
+#[allow(clippy::too_many_arguments)]
 pub fn decode_mb_residual(
     e: &mut CabacEngine,
     ctxs: &mut ResidualContexts,
@@ -183,14 +184,18 @@ pub fn decode_mb_residual(
     neigh: &mut CbfNeighbours,
     qp: i32,
     chroma_qp_index_offset: i32,
+    is_inter: bool,
     out: &mut Vec<ResElem>,
 ) -> MbResidual {
     let cbp_luma = info.cbp & 0x0f;
     let cbp_chroma = info.cbp >> 4;
+    // coded_block_flag default for an unavailable neighbour: 1 for intra
+    // blocks, 0 for inter (JM `default_bit = is_intra_block ? 1 : 0`).
+    let db = if is_inter { 0 } else { 1 };
     let mut res = MbResidual::default();
 
     // ---- Luma ----
-    if !info.i_nxn {
+    if !is_inter && !info.i_nxn {
         // I_16x16: a luma DC block (Hadamard), then 16 AC blocks if cbp_luma.
         let up = neigh.up.map_or(1, |c| c.get(0));
         let left = neigh.left.map_or(1, |c| c.get(0));
@@ -202,7 +207,7 @@ pub fn decode_mb_residual(
             None => [[0i32; 4]; 4],
         };
         if cbp_luma != 0 {
-            decode_luma_4x4_blocks(e, ctxs, neigh, ResidualCat::Luma16Ac, cbp_luma, qp, Some(&dc16), &mut res.luma, out);
+            decode_luma_4x4_blocks(e, ctxs, neigh, ResidualCat::Luma16Ac, cbp_luma, qp, Some(&dc16), db, &mut res.luma, out);
         } else {
             // No AC: each 4×4 block is just its DC (idct of DC-only block).
             for by in 0..4usize {
@@ -227,7 +232,7 @@ pub fn decode_mb_residual(
             }
         }
     } else {
-        decode_luma_4x4_blocks(e, ctxs, neigh, ResidualCat::Luma4x4, cbp_luma, qp, None, &mut res.luma, out);
+        decode_luma_4x4_blocks(e, ctxs, neigh, ResidualCat::Luma4x4, cbp_luma, qp, None, db, &mut res.luma, out);
     }
 
     // ---- Chroma (4:2:0) ----
@@ -236,8 +241,8 @@ pub fn decode_mb_residual(
         let mut dc = [[[0i32; 2]; 2]; 2]; // [uv][cj][ci]
         for uv in 0..2u32 {
             let bit = 17 + uv;
-            let up = neigh.up.map_or(1, |c| c.get(bit));
-            let left = neigh.left.map_or(1, |c| c.get(bit));
+            let up = neigh.up.map_or(db, |c| c.get(bit));
+            let left = neigh.left.map_or(db, |c| c.get(bit));
             if let Some(coeffs) = decode_block(e, ctxs, ResidualCat::ChromaDc, (2 * up + left) as usize, "2x2 DC Chroma", out) {
                 neigh.cur.set(bit);
                 // Chroma DC: 2×2 inverse Hadamard + scale.
@@ -255,12 +260,12 @@ pub fn decode_mb_residual(
                         let left = if ci > 0 {
                             neigh.cur.get(base + 4 * cj as u32 + (ci as u32 - 1))
                         } else {
-                            neigh.left.map_or(1, |c| c.get(base + 4 * cj as u32 + 1))
+                            neigh.left.map_or(db, |c| c.get(base + 4 * cj as u32 + 1))
                         };
                         let up = if cj > 0 {
                             neigh.cur.get(base + 4 * (cj as u32 - 1) + ci as u32)
                         } else {
-                            neigh.up.map_or(1, |c| c.get(base + 4 + ci as u32))
+                            neigh.up.map_or(db, |c| c.get(base + 4 + ci as u32))
                         };
                         let r = decode_block(e, ctxs, ResidualCat::ChromaAc, (2 * up + left) as usize, "AC Chroma", out);
                         if r.is_some() {
@@ -310,6 +315,7 @@ fn decode_luma_4x4_blocks(
     cbp_luma: u8,
     qp: i32,
     dc16: Option<&[[i32; 4]; 4]>,
+    db: u32,
     luma: &mut [[i32; 16]; 16],
     out: &mut Vec<ResElem>,
 ) {
@@ -329,12 +335,12 @@ fn decode_luma_4x4_blocks(
                     let left = if bx > 0 {
                         neigh.cur.get(luma4x4_bit(bx - 1, by))
                     } else {
-                        neigh.left.map_or(1, |c| c.get(luma4x4_bit(3, by)))
+                        neigh.left.map_or(db, |c| c.get(luma4x4_bit(3, by)))
                     };
                     let up = if by > 0 {
                         neigh.cur.get(luma4x4_bit(bx, by - 1))
                     } else {
-                        neigh.up.map_or(1, |c| c.get(luma4x4_bit(bx, 3)))
+                        neigh.up.map_or(db, |c| c.get(luma4x4_bit(bx, 3)))
                     };
                     let coeffs = decode_block(e, ctxs, cat, (2 * up + left) as usize, "Luma sng", out);
                     if coeffs.is_some() {

@@ -97,7 +97,7 @@ fn main() -> anyhow::Result<()> {
                         left: if mbx != 0 { cbp_grid.get(addr - 1).copied() } else { None },
                         up: if addr >= width { cbp_grid.get(addr - width).copied() } else { None },
                     };
-                    let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut neigh, qp, pps.chroma_qp_index_offset, &mut sink);
+                    let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut neigh, qp, pps.chroma_qp_index_offset, false, &mut sink);
 
                     // ---- Luma reconstruction ----
                     let (mpx, mpy) = (mbx * 16, mby * 16);
