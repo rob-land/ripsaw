@@ -77,6 +77,7 @@ fn main() -> anyhow::Result<()> {
                 let mut modes = vec![None::<u8>; bw4 * fh / 4]; // per-4×4 luma mode (None = DC/not-NxN)
                 let mut grid: Vec<MbInfo> = Vec::new();
                 let mut cbp_grid: Vec<CbpBits> = Vec::new();
+                let mut qp_grid: Vec<i32> = Vec::new();
                 let mut addr = 0usize;
                 let mut sink = Vec::new();
 
@@ -179,10 +180,43 @@ fn main() -> anyhow::Result<()> {
                     let eos = e.decode_terminate();
                     grid.push(info);
                     cbp_grid.push(neigh.cur);
+                    qp_grid.push(qp);
                     if eos == 1 {
                         break;
                     }
                     addr += 1;
+                }
+
+                // Optional in-loop deblocking (§ 8.7), validated against JM's
+                // post-filter output when POST=<path> is set.
+                if let Some(post) = std::env::var_os("POST") {
+                    if sh.disable_deblocking_filter_idc != 1 {
+                        let off_a = sh.slice_alpha_c0_offset_div2 * 2;
+                        let off_b = sh.slice_beta_offset_div2 * 2;
+                        deblock(&mut y, &mut cb, &mut cr, &grid, &qp_grid, width, pps.chroma_qp_index_offset, off_a, off_b);
+                    }
+                    let reference = std::fs::read(post)?;
+                    let okp = |name: &str, p: &Plane, h: usize, off: usize| -> bool {
+                        for yy in 0..h {
+                            for xx in 0..p.w {
+                                if p.d[yy * p.w + xx] != reference[off + yy * p.w + xx] {
+                                    eprintln!("  ✗ {name} (post-deblock): first mismatch ({xx},{yy}): libmvc={} JM={}", p.d[yy * p.w + xx], reference[off + yy * p.w + xx]);
+                                    return false;
+                                }
+                            }
+                        }
+                        eprintln!("  ✓ {name} (post-deblock): {h}×{} match JM", p.w);
+                        true
+                    };
+                    let a = okp("Y", &y, fh, 0);
+                    let b = okp("U", &cb, ch, fw * fh);
+                    let c = okp("V", &cr, ch, fw * fh + cw * ch);
+                    if a && b && c {
+                        eprintln!("✓ full intra-frame reconstruction MATCHES JM (post-deblock)");
+                    } else {
+                        std::process::exit(1);
+                    }
+                    return Ok(());
                 }
 
                 if std::env::var_os("DUMPY").is_some() {
@@ -218,6 +252,129 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn chroma_qp_jm(qpy: i32, offset: i32) -> i32 {
+    const MAP: [i32; 22] = [29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 39, 39, 39, 39];
+    let qpi = (qpy + offset).clamp(0, 51);
+    if qpi < 30 { qpi } else { MAP[(qpi - 30) as usize] }
+}
+
+/// In-loop deblocking filter (§ 8.7) for an all-intra frame: bS = 4 on MB
+/// boundaries, 3 on internal edges; transform-8×8 MBs skip the internal 4×4
+/// (x/y = 4, 12) edges. Filters luma + 4:2:0 chroma in place, MB raster
+/// order, all vertical edges of an MB then all horizontal.
+#[allow(clippy::too_many_arguments)]
+fn deblock(y: &mut Plane, cb: &mut Plane, cr: &mut Plane, grid: &[MbInfo], qp_grid: &[i32], width: usize, chroma_off: i32, off_a: i32, off_b: i32) {
+    use ripsaw::mvc::deblock::{filter_chroma, filter_luma_normal, filter_luma_strong, ALPHA, BETA, TC0};
+    let height = grid.len() / width;
+
+    let luma_edge = |p: &mut Plane, horiz: bool, mbx: usize, mby: usize, ofs: usize, bs: usize, ia: usize, ib: usize| {
+        let (alpha, beta) = (ALPHA[ia], BETA[ib]);
+        if alpha == 0 {
+            return;
+        }
+        for t in 0..16 {
+            let mut s = [0i32; 8];
+            let (bx, by) = if horiz { (mbx * 16 + t, mby * 16 + ofs) } else { (mbx * 16 + ofs, mby * 16 + t) };
+            for (k, sl) in s.iter_mut().enumerate() {
+                *sl = if horiz { p.at(bx, by - 4 + k) } else { p.at(bx - 4 + k, by) };
+            }
+            if bs == 4 {
+                filter_luma_strong(&mut s, alpha, beta);
+            } else {
+                filter_luma_normal(&mut s, alpha, beta, TC0[ia][bs - 1]);
+            }
+            for (k, &v) in s.iter().enumerate() {
+                if horiz {
+                    p.set(bx, by - 4 + k, v);
+                } else {
+                    p.set(bx - 4 + k, by, v);
+                }
+            }
+        }
+    };
+
+    for mby in 0..height {
+        for mbx in 0..width {
+            let addr = mby * width + mbx;
+            let info = &grid[addr];
+            let qp_q = qp_grid[addr];
+            let t8 = info.transform8x8 && info.i_nxn;
+
+            // Luma vertical then horizontal edges.
+            for &horiz in &[false, true] {
+                for ei in 0..4usize {
+                    let ofs = ei * 4;
+                    let at_pic_edge = if horiz { mby == 0 } else { mbx == 0 };
+                    if ofs == 0 && at_pic_edge {
+                        continue;
+                    }
+                    if ofs != 0 && t8 && (ofs == 4 || ofs == 12) {
+                        continue;
+                    }
+                    let bs = if ofs == 0 { 4 } else { 3 };
+                    let qp_p = if ofs != 0 {
+                        qp_q
+                    } else if horiz {
+                        qp_grid[addr - width]
+                    } else {
+                        qp_grid[addr - 1]
+                    };
+                    let qpav = (qp_p + qp_q + 1) >> 1;
+                    let ia = (qpav + off_a).clamp(0, 51) as usize;
+                    let ib = (qpav + off_b).clamp(0, 51) as usize;
+                    luma_edge(y, horiz, mbx, mby, ofs, bs, ia, ib);
+                }
+            }
+
+            // Chroma: edges at 0 (boundary, bS 4) and 4 (internal, bS 3).
+            let cqp_q = chroma_qp_jm(qp_q, chroma_off);
+            for plane in [&mut *cb, &mut *cr] {
+                for &horiz in &[false, true] {
+                    for ce in 0..2usize {
+                        let ofs = ce * 4;
+                        let at_pic_edge = if horiz { mby == 0 } else { mbx == 0 };
+                        if ofs == 0 && at_pic_edge {
+                            continue;
+                        }
+                        let bs = if ofs == 0 { 4 } else { 3 };
+                        let qp_p_y = if ofs != 0 {
+                            qp_q
+                        } else if horiz {
+                            qp_grid[addr - width]
+                        } else {
+                            qp_grid[addr - 1]
+                        };
+                        let cqp_p = chroma_qp_jm(qp_p_y, chroma_off);
+                        let qpav = (cqp_p + cqp_q + 1) >> 1;
+                        let ia = (qpav + off_a).clamp(0, 51) as usize;
+                        let ib = (qpav + off_b).clamp(0, 51) as usize;
+                        let (alpha, beta) = (ALPHA[ia], BETA[ib]);
+                        if alpha == 0 {
+                            continue;
+                        }
+                        for t in 0..8 {
+                            let mut s = [0i32; 8];
+                            let (bx, by) = if horiz { (mbx * 8 + t, mby * 8 + ofs) } else { (mbx * 8 + ofs, mby * 8 + t) };
+                            for (k, sl) in s.iter_mut().enumerate() {
+                                *sl = if horiz { plane.at(bx, by - 4 + k) } else { plane.at(bx - 4 + k, by) };
+                            }
+                            let tc0 = if bs == 4 { 0 } else { TC0[ia][bs - 1] };
+                            filter_chroma(&mut s, alpha, beta, tc0, bs == 4);
+                            for (k, &v) in s.iter().enumerate() {
+                                if horiz {
+                                    plane.set(bx, by - 4 + k, v);
+                                } else {
+                                    plane.set(bx - 4 + k, by, v);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn modes_cells(mby: usize, mbx: usize, bw4: usize, n: usize) -> Vec<usize> {
