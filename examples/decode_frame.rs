@@ -77,6 +77,10 @@ fn main() -> anyhow::Result<()> {
                 let mut r = BitReader::new(&rbsp);
                 let sh = parse_slice_header(&mut r, true, hdr.nal_ref_idc, sps, pps)?;
                 let slice_qp = 26 + pps.pic_init_qp_minus26 + sh.slice_qp_delta;
+                eprintln!(
+                    "slice_qp={slice_qp} disable_deblock_idc={} alpha_off={} beta_off={}",
+                    sh.disable_deblocking_filter_idc, sh.slice_alpha_c0_offset_div2 * 2, sh.slice_beta_offset_div2 * 2
+                );
                 let cabac_start = (r.position_bits() + 7) / 8;
                 let mut e = CabacEngine::new(&rbsp[cabac_start..]);
                 let mut ctx = MbHeaderContexts::new(slice_qp);
@@ -209,7 +213,12 @@ fn main() -> anyhow::Result<()> {
                 let ok_u = check("U", &cb, cw, c_rows, y_size);
                 let ok_v = check("V", &cr, cw, c_rows, y_size + c_size);
                 if ok_y && ok_u && ok_v {
-                    eprintln!("✓ full YUV reconstruction MATCHES JM exactly (pre-deblock)");
+                    let note = if sh.disable_deblocking_filter_idc == 1 {
+                        " — deblocking disabled for this slice, so this is the FINAL decoded output"
+                    } else {
+                        " (pre-deblock)"
+                    };
+                    eprintln!("✓ full YUV reconstruction MATCHES JM exactly{note}");
                 } else {
                     std::process::exit(1);
                 }
