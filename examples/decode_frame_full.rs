@@ -195,6 +195,9 @@ fn main() -> anyhow::Result<()> {
                         let off_b = sh.slice_beta_offset_div2 * 2;
                         deblock(&mut y, &mut cb, &mut cr, &grid, &qp_grid, width, pps.chroma_qp_index_offset, off_a, off_b);
                     }
+                    if std::env::var_os("DUMPY").is_some() {
+                        std::fs::write("/home/rob/mvc-test/mine_y.bin", &y.d)?;
+                    }
                     let reference = std::fs::read(post)?;
                     let okp = |name: &str, p: &Plane, h: usize, off: usize| -> bool {
                         for yy in 0..h {

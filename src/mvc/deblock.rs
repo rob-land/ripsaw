@@ -65,7 +65,8 @@ pub fn filter_luma_strong(s: &mut [i32; 8], alpha: i32, beta: i32) {
         s[5] = (q2 + q1 + q0 + p0 + 2) >> 2;
         s[6] = (2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3;
     } else {
-        s[4] = (2 * q1 + q0 + p0 + 2) >> 2;
+        // q0' weak strong-filter tap uses p1 (not p0), § 8.7.2.4 eq. 8-476.
+        s[4] = (2 * q1 + q0 + p1 + 2) >> 2;
     }
 }
 
@@ -174,6 +175,22 @@ mod tests {
         assert_eq!(s[1], 95); // p2'
         assert_eq!(s[2], 97); // p1'
         assert_eq!(s[3], 99); // p0'
+    }
+
+    #[test]
+    fn strong_filter_weak_tap_uses_p1_not_p0() {
+        // bS=4 but NOT "small" (|p0-q0| >= (alpha>>2)+2) -> the single-tap
+        // form (§ 8.7.2.4 eq. 8-475/8-476). q0' MUST use p1, not p0 — the
+        // exact case a typo missed, caught only by the full-frame JM diff.
+        // p3,p2,p1,p0 = 67,67,67,69 ; q0,q1,q2,q3 = 75,77,77,77 ; alpha 13.
+        // filterable: |69-75|=6<13, |67-69|=2<beta, |77-75|=2<beta.
+        // small = 6 < (13>>2)+2 = 5 -> false -> single tap.
+        // p0' = (2*67 + 69 + 77 + 2) >> 2 = 70
+        // q0' = (2*77 + 75 + p1=67 + 2) >> 2 = 74   (would be 75 with p0=69)
+        let mut s = [67, 67, 67, 69, 75, 77, 77, 77];
+        filter_luma_strong(&mut s, 13, 8);
+        assert_eq!(s[3], 70); // p0'
+        assert_eq!(s[4], 74); // q0' — uses p1=67
     }
 
     #[test]
