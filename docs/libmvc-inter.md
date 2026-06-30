@@ -90,13 +90,50 @@ frame** the P-slice's motion compensation reads from.
    P-slice MC reference (P-frame matches `inter_predeblock.bin`). NB the MC
    reference must be the *post-deblock* IDR — this stream deblocks the IDR but
    not the P-slice; pre-deblock was off by 1-2/pixel.
-4. **Inter deblock** (bS now MV/ref/coded-block dependent, § 8.7.2.1) → diff
-   vs `inter_post.yuv`. **Blocked on a test stream**: `inter.h264`'s P-slice
-   has deblock disabled, so it can't validate the inter bS path — regenerate
-   an inter stream with deblock ON (and ideally intra-in-P + non-8×8 subs).
-5. **B-slices**, then the **dependent view** (Annex G inter-view
-   prediction) — the 3D payoff and the realtime decider. The inter core
-   (MC + MV pred + residual) is now reusable for it.
+4. ~~**Inter deblock**~~ DONE (`deblock_inter` in `decode_inter_full`). The
+   § 8.7.2.1 bS: per 4-sample segment, 2 if either side has nonzero luma
+   coeffs, 1 if refs differ or |Δmv| ≥ 4 (¼-pel), else 0. Luma 4 edges × 4
+   segments (transform-8×8 skips internal 4,12); chroma edges 0,4 take the
+   co-located luma edge's (0,8) bS. The P-frame matches JM BOTH pre-deblock
+   (`inter_predeblock.bin`) and post-deblock (`inter_post.yuv` frame 1 —
+   1065/18432 samples change). New `CbpBits::luma4x4_nonzero`; per-MB qp_grid +
+   per-4×4 nonzero grid; running QP (qp += mb_qp_delta mod 52). **The whole
+   base-view inter path is now bit-exact end to end, zero JM pixels.**
+5. **B-slices** (next) — see below. On the realtime-MVC critical path (real
+   Blu-ray uses B-frames in both views).
+6. **Dependent view** (Annex G inter-view prediction) — the 3D payoff and the
+   realtime decider. The inter core (MC + MV pred + residual + deblock) is now
+   reusable for it. Needs a real MVC test stream (NAL 20
+   coded-slice-extension); the single-view ffmpeg harness can't produce one —
+   use the disc clip via MakeMKV keep-MVC.
+
+## B-slice arc (scoped, not yet built)
+
+Harness: `scripts/gen-intra-test-frame.sh` now emits `bframe.h264` (I P B B in
+decode order, `qp 26`, spatial direct, `num_ref_idx l0=l1=1`,
+`bframes=2 b-pyramid=none ref=2`). `bframe_post.yuv` = all 4 frames in
+**display** order (I B B P). The DUMP_RECON hook keeps only the **last** decoded
+frame's pre-deblock (the 2nd B) — extend it to dump per-picture for pixel-exact
+B validation; the CABAC trace validates syntax as-is.
+
+First B-slice (from the trace): `direct_spatial_mv_pred_flag=1`, then 32 B_Skip
+MBs (spatial direct), then coded MBs. The first coded MB is `mb_type 2` with 4
+`mvd_l0` + cbp/residual. mb_type values seen include 0 (B_Direct_16x16), 2, 3,
+13, 22 (B_8x8), and an intra suffix (≥ 23).
+
+What B needs beyond the (done) P inter core:
+- **B `mb_type` CABAC tree** (JM `readMB_typeInfo_CABAC` B branch) → act_sym
+  0..48: B_Direct_16x16, B_{L0,L1,Bi}_{16x16,16x8,8x16}, B_8x8, intra suffix.
+  And **B `sub_mb_type`** (12 types incl. direct/L0/L1/Bi at 8x8/8x4/4x8/4x4).
+- **Two reference lists** L0/L1 with the § 8.2.4.2.3 POC-based default order;
+  POC from `pic_order_cnt_lsb` (already parsed).
+- **Spatial direct** (§ 8.4.1.2.2): MVs from spatial neighbours + the
+  colZeroFlag test against the **co-located** ref's MV/refIdx → need to store
+  the co-located picture's per-4×4 MV/ref grid (the P-frame's, kept from step
+  4's decode). B_Skip = B_Direct with no residual.
+- **Bi-prediction**: average the L0 and L1 `mc_luma`/`mc_chroma` predictions
+  (§ 8.4.2.3, default; `weighted_bipred_idc` here 0).
+- **B deblock**: the bS rules extend to two lists (compare both refs/MVs).
 
 ## P-MB decode order (from the trace, MB 32)
 

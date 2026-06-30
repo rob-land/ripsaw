@@ -39,6 +39,20 @@ ffmpeg -y -f lavfi -i "testsrc=size=128x96:rate=2:duration=1" -frames:v 2 \
   -pix_fmt yuv420p -bsf:v h264_mp4toannexb -f h264 inter.h264
 DUMP_RECON="$OUT/inter_predeblock.bin" "$LDECOD" -i inter.h264 -o inter_post.yuv >/dev/null
 echo "wrote: inter.h264 inter_post.yuv inter_predeblock.bin (P-frame)"
+
+# B-slice test: I P B B (decode order), spatial direct, two ref lists — the
+# validation target for the B arc (docs/libmvc-inter.md). bframe_post.yuv has
+# all 4 frames in DISPLAY order (I B B P); the DUMP_RECON hook only keeps the
+# LAST decoded frame's pre-deblock (the 2nd B), so per-B-frame predeblock
+# validation needs the hook extended to dump per-picture if pixel-exact B
+# checks are wanted — syntax (trace) validation works as-is.
+ffmpeg -y -f lavfi -i "testsrc=size=128x96:rate=4:duration=1" -frames:v 4 \
+  -c:v libx264 -profile:v high -qp 26 \
+  -x264-params "cabac=1:keyint=8:bframes=2:b-pyramid=none:ref=2:b-adapt=0" \
+  -pix_fmt yuv420p -bsf:v h264_mp4toannexb -f h264 bframe.h264
+DUMP_RECON="$OUT/bframe_predeblock.bin" "$LDECOD" -i bframe.h264 -o bframe_post.yuv >/dev/null
+echo "wrote: bframe.h264 bframe_post.yuv bframe_predeblock.bin (B-frames)"
+
 python3 - <<'PY'
 pre=open('test_predeblock.bin','rb').read(); post=open('test_postdeblock.yuv','rb').read()
 d=sum(1 for a,b in zip(pre,post) if a!=b)
