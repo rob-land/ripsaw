@@ -137,19 +137,37 @@ MBs (spatial direct), then coded MBs. The first coded MB is `mb_type 2` with 4
 - Two trace conventions pinned: 16×16 single-MB partitions label components
   `mvd{k}_l{list}` (else `mvd_l{list}`); `end_of_slice_flag` traced only when 0.
 
-### B reconstruction — still TODO (pixels)
+### B reconstruction — DONE (pixels bit-exact, `examples/decode_bframe`)
 
-- **Two reference lists** L0/L1 with the § 8.2.4.2.3 POC-based default order;
-  POC from `pic_order_cnt_lsb` (already parsed).
-- **Spatial direct** (§ 8.4.1.2.2): MVs from spatial neighbours + the
-  colZeroFlag test against the **co-located** ref's MV/refIdx → need to store
-  the co-located picture's per-4×4 MV/ref grid (the P-frame's). B_Skip =
-  B_Direct with no residual.
-- **Bi-prediction**: average the L0 and L1 `mc_luma`/`mc_chroma` predictions
-  (§ 8.4.2.3, default; `weighted_bipred_idc` here 0).
-- **B deblock**: the bS rules extend to two lists (compare both refs/MVs).
-- **Per-B-frame predeblock dump**: extend the DUMP_RECON hook (currently keeps
-  only the last decoded frame) for pixel-exact B validation.
+The whole B-frame (POC 2) reconstructs with **zero JM pixels** — libmvc decodes
+the IDR + P itself (`recon::decode_intra_frame`, `recon_inter::decode_p_frame`)
+and uses its own deblocked I/P as L0/L1. Y+U+V match JM's per-frame pre-deblock
+dump exactly.
+- **L0/L1 single-ref lists** by POC (§ 8.2.4.2.3): L0[0]=nearest past (IDR),
+  L1[0]=nearest future (P). POC from `pic_order_cnt_lsb`.
+- **Spatial direct** (§ 8.4.1.2.2): refIdx = MinPositive over A/B/C per list,
+  median mvp per list, directZeroPredictionFlag, and colZeroFlag against the
+  **co-located P-frame's** `MotionField` (from `decode_p_frame`). With
+  `direct_8x8_inference_flag=1`, colZeroFlag is per-8×8 from the MB's
+  **outer-corner** 4×4 (b8 0/1/2/3 → corner (0,0)/(3,0)/(0,3)/(3,3)).
+- **Explicit B partitions**: list-major mvd, per-list MV prediction incl. the
+  16×8/8×16 directional cases, L0/L1/Bi reconstruction.
+- **IMPLICIT weighted bi-prediction** (§ 8.4.2.3.2, `weighted_bipred_idc=2`):
+  `(predL0·w0 + predL1·w1 + 32) >> 6` with w0/w1 from the POC distances
+  (td=6, tb=2 → w0=43, w1=21) — **NOT a simple average**. This was the subtle
+  one: the skip region (I==P) and the uni-pred MBs hid it; it surfaced only at
+  the first bi-pred MB where the two refs differ (off-by-7).
+- **Per-frame predeblock dump**: the DUMP_RECON hook honours
+  `DUMP_RECON_APPEND=1` → `bframe_predeblock_all.bin` (4 frames, decode order)
+  so each frame is validated pre-deblock, isolated from deblock.
+
+### B — still TODO
+
+- **B deblock**: bS extends to two lists (compare both refs/MVs). Diff vs
+  `bframe_post.yuv`.
+- **Multi-ref / ref_idx**, ref-list reordering, B-pyramid, temporal direct.
+- Then the **dependent view** (Annex G) — the 3D payoff. Needs a real MVC
+  stream (NAL 20) from the disc.
 
 ## P-MB decode order (from the trace, MB 32)
 
