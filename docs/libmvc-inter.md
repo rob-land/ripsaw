@@ -47,6 +47,30 @@ frame** the P-slice's motion compensation reads from.
   fractional positions) + `mc_chroma` (eighth-pel bilinear), border-clamped.
   Unit-tested structurally; the authoritative check is the full-frame pixel
   diff once the full P-MB decode feeds it MVs.
+- **MV prediction** (`mv.rs`): `predict_mv` — the § 8.4.1.3.1 median (with the
+  B,C-unavailable-inherit-A and exactly-one-matching-ref rules) + the
+  § 8.4.1.3.2 directional 16×8 / 8×16 case; `predict_skip_mv` for P_Skip
+  (§ 8.4.1.1). Unit-tested. mv = mvp + mvd. **This completes the inter MB
+  decode side.**
+
+## Remaining: the reconstruction integration → first inter pixels
+
+The decode side is done; what's left is wiring it to pixels (each step
+diffed vs `inter_predeblock.bin`):
+1. **Refactor the intra-frame reconstruction** out of `decode_frame_full`
+   into a reusable `recon::decode_intra_frame(rbsp, sps, pps) -> Frame` (a
+   ~400-line move). The decoded base IDR is the inter reference frame.
+2. **Per-MB MV + ref grids** across the P-slice (the mvd ctxIdxInc needs the
+   neighbour |mvd| grid anyway), so `predict_mv`/`predict_skip_mv` can run.
+3. **Full P-slice decode** for *every* MB (not just MB 32): sub_mb_type
+   (P_8x8, INIT_B8_TYPE_P), ref_idx (trivial here, single ref), intra MBs in
+   the P-slice (P-model intra contexts), the mvd/cbp grids.
+4. **MC + residual reconstruct**: per partition, `mc_luma`/`mc_chroma` from
+   the reference at mv, + the inter residual, clip. Diff vs the JM dump.
+
+The first meaningful inter pixel is MB 32's bottom 16×8 partition (mvd 42 →
+~10.5px horizontal motion, mvp 0 since its neighbours are MV-0 skips): MC at
+that MV + residual is the real test of the MC interpolation.
 
 ## P-MB decode order (from the trace, MB 32)
 
