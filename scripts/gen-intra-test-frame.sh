@@ -29,6 +29,16 @@ ffmpeg -y -f lavfi -i "testsrc=size=128x96:rate=1:duration=1" -frames:v 1 \
 DUMP_RECON="$OUT/test_predeblock.bin" "$LDECOD" -i test.h264 -o test_postdeblock.yuv >/dev/null
 
 echo "wrote: test.h264 test_postdeblock.yuv test_predeblock.bin trace_dec.txt"
+
+# Inter test: IDR + one P-slice (single ref, no B), real motion — the
+# validation target for the inter arc (docs/libmvc-inter.md). The P-frame is
+# frame 1; its pre/post-deblock dumps are inter_predeblock.bin / inter_post.yuv.
+ffmpeg -y -f lavfi -i "testsrc=size=128x96:rate=2:duration=1" -frames:v 2 \
+  -c:v libx264 -profile:v high -qp 28 \
+  -x264-params "cabac=1:keyint=2:bframes=0:ref=1" \
+  -pix_fmt yuv420p -bsf:v h264_mp4toannexb -f h264 inter.h264
+DUMP_RECON="$OUT/inter_predeblock.bin" "$LDECOD" -i inter.h264 -o inter_post.yuv >/dev/null
+echo "wrote: inter.h264 inter_post.yuv inter_predeblock.bin (P-frame)"
 python3 - <<'PY'
 pre=open('test_predeblock.bin','rb').read(); post=open('test_postdeblock.yuv','rb').read()
 d=sum(1 for a,b in zip(pre,post) if a!=b)
