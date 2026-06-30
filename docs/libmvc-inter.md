@@ -28,8 +28,20 @@ frame** the P-slice's motion compensation reads from.
 - **mb_skip_flag** (P): ctxIdxInc = (left-not-skip) + (up-not-skip), context
   `mb_type_contexts[1][a+b]`. JM trace inversion: traced value is
   `(bin != 1)`, so **trace 0 = skipped, 1 = coded**.
-  `examples/decode_pslice` validates the skip prefix (32 skipped MBs + first
-  coded flag = 65 elements match JM).
+- **Inter mb_type** (`decode_inter_mb_type`): the JM bin tree; the traced
+  value `act_sym` = 1 P_16x16 / 2 P_16x8 / 3 P_8x16 / 4 P_8x8 / ≥6 intra
+  (incl. the I_16x16 suffix bins + I_PCM terminate).
+- **mvd** (`decode_mvd_component`): bin-0 on `mv_res_contexts[0][5k+inc]`
+  then the UEG3 magnitude (`unary_exp_golomb_mv`, exp_start 8, EG3 suffix) +
+  bypass sign; `mvd_ctx_inc` from the neighbour-|mvd| sum. INIT_MV_RES_P
+  transcribed (3 models).
+  `examples/decode_pslice` validates skip prefix + the first coded MB's
+  mb_type + mvd (P_16x8, mvd 0,0,42,0) = **70 elements match JM** (incl. the
+  magnitude-42 EG3 suffix).
+- **Motion compensation** (`mc.rs`): `mc_luma` (quarter-pel 6-tap, all 16
+  fractional positions) + `mc_chroma` (eighth-pel bilinear), border-clamped.
+  Unit-tested structurally; the authoritative check is the full-frame pixel
+  diff once the full P-MB decode feeds it MVs.
 
 ## P-MB decode order (from the trace, MB 32)
 
