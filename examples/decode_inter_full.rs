@@ -118,7 +118,10 @@ fn main() -> anyhow::Result<()> {
                 let mut cbp_grid: Vec<CbpBits> = Vec::new();
                 let mut cbpv: Vec<u8> = Vec::new();
                 let mut t8grid: Vec<bool> = Vec::new();
+                let mut qp_grid: Vec<i32> = Vec::new();
+                let mut nz = vec![false; bw4 * bh4]; // per-4×4 luma nonzero-coeff
                 let mut last_dquant = 0;
+                let mut qp = slice_qp;
                 let mut addr = 0usize;
 
                 let nb = |g_mv: &[(i32, i32)], g_ref: &[i32], bx: i32, by: i32| -> Neighbour {
@@ -151,6 +154,7 @@ fn main() -> anyhow::Result<()> {
                         cbp_grid.push(CbpBits::default());
                         cbpv.push(0);
                         t8grid.push(false);
+                        qp_grid.push(qp); // P_Skip: no residual, QP unchanged
                         if e.decode_terminate() == 1 {
                             break;
                         }
@@ -196,9 +200,15 @@ fn main() -> anyhow::Result<()> {
                         let ut = if addr >= width { t8grid[addr - width] as usize } else { 0 };
                         transform8x8 = e.decode_decision(&mut ctx.transform[lt + ut]) == 1;
                     }
-                    if cbp != 0 {
-                        decode_dquant_ctx(&mut e, &mut ctx.delta_qp, &mut last_dquant);
-                    }
+                    // Running QP = prev QP + mb_qp_delta (mod 52). Absent delta
+                    // (cbp==0) is 0; reset the dquant predictor too.
+                    let delta = if cbp != 0 {
+                        decode_dquant_ctx(&mut e, &mut ctx.delta_qp, &mut last_dquant)
+                    } else {
+                        last_dquant = 0;
+                        0
+                    };
+                    qp = (qp + delta).rem_euclid(52);
                     let info = MbInfo { i_nxn: false, transform8x8, c_ipred: 0, cbp: cbp as u8, i16_pred: 0 };
                     let mut rneigh = CbfNeighbours {
                         cur: CbpBits::default(),
@@ -206,10 +216,19 @@ fn main() -> anyhow::Result<()> {
                         up: if addr >= width { Some(cbp_grid[addr - width]) } else { None },
                     };
                     let mut sink = Vec::new();
-                    let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, slice_qp + last_dquant, pps.chroma_qp_index_offset, true, &mut sink);
+                    let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &mut sink);
                     cbp_grid.push(rneigh.cur);
                     cbpv.push(cbp as u8);
                     t8grid.push(transform8x8);
+                    qp_grid.push(qp);
+                    // Record per-4×4 luma nonzero-coeff flags for the deblock bS.
+                    for by in 0..4u32 {
+                        for bx in 0..4u32 {
+                            if rneigh.cur.luma4x4_nonzero(bx, by) {
+                                nz[(mby4 + by as usize) * bw4 + mbx4 + bx as usize] = true;
+                            }
+                        }
+                    }
 
                     for (bx4, by4, w4, h4, mv) in part_mv {
                         let (px, py) = (mbx * 16 + bx4 * 4, mby * 16 + by4 * 4);
@@ -221,22 +240,37 @@ fn main() -> anyhow::Result<()> {
                     addr += 1;
                 }
 
-                let jm = std::fs::read(&jm_p)?;
-                let cmp = |name: &str, got: &[u8], off: usize| -> bool {
+                // Pre-deblock check vs inter_predeblock.bin.
+                let pre = std::fs::read(&jm_p)?;
+                let cmp = |label: &str, got: &[u8], jm: &[u8], off: usize| -> bool {
                     for (i, &g) in got.iter().enumerate() {
                         if g != jm[off + i] {
-                            eprintln!("✗ P {name} mismatch at byte {i}: {g} vs JM {}", jm[off + i]);
+                            eprintln!("✗ {label} mismatch at byte {i}: {g} vs JM {}", jm[off + i]);
                             return false;
                         }
                     }
                     true
                 };
-                let oy = cmp("Y", &y, 0);
-                let ou = cmp("U", &cb, ysz);
-                let ov = cmp("V", &cr, ysz + csz);
-                if oy && ou && ov {
-                    eprintln!("✓ P-slice (ref = libmvc's own IDR) matches JM ({}×{})", fw, fh);
-                    eprintln!("✓ inter.h264 decoded END-TO-END by libmvc, both frames bit-exact, zero JM pixels");
+                let pre_ok = cmp("P pre-deblock Y", &y, &pre, 0) && cmp("P pre-deblock U", &cb, &pre, ysz) && cmp("P pre-deblock V", &cr, &pre, ysz + csz);
+                if pre_ok {
+                    eprintln!("✓ P-slice pre-deblock (ref = libmvc's own IDR) matches JM ({fw}×{fh})");
+                } else {
+                    std::process::exit(1);
+                }
+
+                // Inter in-loop deblock (§ 8.7, MV/ref/coded-block bS) → diff
+                // vs JM's final P-frame (inter_post.yuv frame 1).
+                if sh.disable_deblocking_filter_idc != 1 {
+                    let off_a = sh.slice_alpha_c0_offset_div2 * 2;
+                    let off_b = sh.slice_beta_offset_div2 * 2;
+                    deblock_inter(&mut y, &mut cb, &mut cr, fw, cw, width, &g_mv, &g_ref, &nz, &qp_grid, &t8grid, pps.chroma_qp_index_offset, off_a, off_b);
+                }
+                let jm = std::fs::read(&jm_yuv)?;
+                let foff = ysz + 2 * csz; // frame 1 (P-frame) offset
+                let post_ok = cmp("P post-deblock Y", &y, &jm, foff) && cmp("P post-deblock U", &cb, &jm, foff + ysz) && cmp("P post-deblock V", &cr, &jm, foff + ysz + csz);
+                if post_ok {
+                    eprintln!("✓ P-slice post-deblock matches JM final P-frame ({fw}×{fh})");
+                    eprintln!("✓ inter.h264 decoded END-TO-END by libmvc — both frames bit-exact incl. inter deblock, zero JM pixels");
                 } else {
                     std::process::exit(1);
                 }
@@ -246,6 +280,158 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn chroma_qp_jm(qpy: i32, offset: i32) -> i32 {
+    const MAP: [i32; 22] = [29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 39, 39, 39, 39];
+    let qpi = (qpy + offset).clamp(0, 51);
+    if qpi < 30 { qpi } else { MAP[(qpi - 30) as usize] }
+}
+
+/// Inter in-loop deblocking filter (§ 8.7) for a P-slice with no intra MBs.
+/// bS is computed per 4-sample edge segment (§ 8.7.2.1): 2 if either side has
+/// nonzero coeffs, 1 if refs differ or |Δmv| ≥ 4 (¼-pel) in either component,
+/// else 0. (bS = 4/3 would apply only across intra MBs — none here.) Luma 4
+/// edges × 4 segments; transform-8×8 MBs skip the internal x/y = 4,12 edges.
+/// Chroma edges at 0,4 take the luma bS of the co-located luma edge (0,8).
+#[allow(clippy::too_many_arguments)]
+fn deblock_inter(
+    y: &mut [u8], cb: &mut [u8], cr: &mut [u8],
+    fw: usize, cw: usize, width: usize,
+    mv: &[(i32, i32)], refg: &[i32], nz: &[bool],
+    qp_grid: &[i32], t8grid: &[bool],
+    chroma_off: i32, off_a: i32, off_b: i32,
+) {
+    use ripsaw::mvc::deblock::{filter_chroma, filter_luma_normal, ALPHA, BETA, TC0};
+    let bw4 = fw / 4;
+    let height = qp_grid.len() / width;
+    let at = |p: &[u8], stride: usize, x: usize, yy: usize| p[yy * stride + x] as i32;
+
+    // bS between 4×4 block p (across the edge) and q (this side). Inter-only.
+    let bs_of = |pi: usize, qi: usize| -> usize {
+        if nz[pi] || nz[qi] {
+            2
+        } else if refg[pi] != refg[qi]
+            || (mv[pi].0 - mv[qi].0).abs() >= 4
+            || (mv[pi].1 - mv[qi].1).abs() >= 4
+        {
+            1
+        } else {
+            0
+        }
+    };
+
+    for mby in 0..height {
+        for mbx in 0..width {
+            let addr = mby * width + mbx;
+            let qp_q = qp_grid[addr];
+            let t8 = t8grid[addr];
+
+            // ---- Luma ----
+            for &horiz in &[false, true] {
+                for ei in 0..4usize {
+                    let ofs = ei * 4;
+                    let at_pic_edge = if horiz { mby == 0 } else { mbx == 0 };
+                    if ofs == 0 && at_pic_edge {
+                        continue;
+                    }
+                    if ofs != 0 && t8 && (ofs == 4 || ofs == 12) {
+                        continue;
+                    }
+                    let qp_p = if ofs != 0 {
+                        qp_q
+                    } else if horiz {
+                        qp_grid[addr - width]
+                    } else {
+                        qp_grid[addr - 1]
+                    };
+                    let qpav = (qp_p + qp_q + 1) >> 1;
+                    let ia = (qpav + off_a).clamp(0, 51) as usize;
+                    let ib = (qpav + off_b).clamp(0, 51) as usize;
+                    let (alpha, beta) = (ALPHA[ia], BETA[ib]);
+                    if alpha == 0 {
+                        continue;
+                    }
+                    for seg in 0..4usize {
+                        // q = this side, p = one 4×4 cell across the edge.
+                        let (qbx, qby) = if horiz { (mbx * 4 + seg, mby * 4 + ofs / 4) } else { (mbx * 4 + ofs / 4, mby * 4 + seg) };
+                        let (pbx, pby) = if horiz { (qbx, qby - 1) } else { (qbx - 1, qby) };
+                        let bs = bs_of(pby * bw4 + pbx, qby * bw4 + qbx);
+                        if bs == 0 {
+                            continue;
+                        }
+                        for line in 0..4usize {
+                            let t = seg * 4 + line;
+                            let (bx, by) = if horiz { (mbx * 16 + t, mby * 16 + ofs) } else { (mbx * 16 + ofs, mby * 16 + t) };
+                            let mut s = [0i32; 8];
+                            for (k, sl) in s.iter_mut().enumerate() {
+                                *sl = if horiz { at(y, fw, bx, by - 4 + k) } else { at(y, fw, bx - 4 + k, by) };
+                            }
+                            filter_luma_normal(&mut s, alpha, beta, TC0[ia][bs - 1]);
+                            for (k, &v) in s.iter().enumerate() {
+                                let (px, py) = if horiz { (bx, by - 4 + k) } else { (bx - 4 + k, by) };
+                                y[py * fw + px] = v.clamp(0, 255) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- Chroma (4:2:0): edges at chroma 0,4 ↔ luma 0,8 ----
+            let cqp_q = chroma_qp_jm(qp_q, chroma_off);
+            for (plane, _name) in [(&mut *cb, 'u'), (&mut *cr, 'v')] {
+                for &horiz in &[false, true] {
+                    for ce in 0..2usize {
+                        let cofs = ce * 4;
+                        let lofs = ce * 8; // co-located luma edge (0 or 8)
+                        let at_pic_edge = if horiz { mby == 0 } else { mbx == 0 };
+                        if cofs == 0 && at_pic_edge {
+                            continue;
+                        }
+                        let qp_p_y = if cofs != 0 {
+                            qp_q
+                        } else if horiz {
+                            qp_grid[addr - width]
+                        } else {
+                            qp_grid[addr - 1]
+                        };
+                        let cqp_p = chroma_qp_jm(qp_p_y, chroma_off);
+                        let qpav = (cqp_p + cqp_q + 1) >> 1;
+                        let ia = (qpav + off_a).clamp(0, 51) as usize;
+                        let ib = (qpav + off_b).clamp(0, 51) as usize;
+                        let (alpha, beta) = (ALPHA[ia], BETA[ib]);
+                        if alpha == 0 {
+                            continue;
+                        }
+                        for t in 0..8usize {
+                            // Chroma sample t ↔ luma 2t; its segment = (2t)/4 = t/2.
+                            let seg = t / 2;
+                            let (qbx, qby) = if horiz {
+                                (mbx * 4 + seg, mby * 4 + lofs / 4)
+                            } else {
+                                (mbx * 4 + lofs / 4, mby * 4 + seg)
+                            };
+                            let (pbx, pby) = if horiz { (qbx, qby - 1) } else { (qbx - 1, qby) };
+                            let bs = bs_of(pby * bw4 + pbx, qby * bw4 + qbx);
+                            if bs == 0 {
+                                continue;
+                            }
+                            let (bx, by) = if horiz { (mbx * 8 + t, mby * 8 + cofs) } else { (mbx * 8 + cofs, mby * 8 + t) };
+                            let mut s = [0i32; 8];
+                            for (k, sl) in s.iter_mut().enumerate() {
+                                *sl = if horiz { at(plane, cw, bx, by - 4 + k) } else { at(plane, cw, bx - 4 + k, by) };
+                            }
+                            filter_chroma(&mut s, alpha, beta, TC0[ia][bs - 1], false);
+                            for (k, &v) in s.iter().enumerate() {
+                                let (px, py) = if horiz { (bx, by - 4 + k) } else { (bx - 4 + k, by) };
+                                plane[py * cw + px] = v.clamp(0, 255) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

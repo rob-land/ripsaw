@@ -75,20 +75,28 @@ frame** the P-slice's motion compensation reads from.
   context survived the first-MB pixel test but desynced CABAC three MBs after
   the first transform-8×8 neighbour — only the whole-frame decode caught it.**
 
-## Remaining: own reference → inter deblock → dependent view
+## Remaining: inter deblock → B-slices → dependent view
 
 1. ~~Per-MB MV + ref grids~~ DONE (`g_mv`/`g_mvd`/`g_ref`).
 2. ~~Full P-slice decode~~ DONE (`decode_pframe`, bit-exact). Caveat: this
    stream's P-slice has no intra-in-P MBs and all P_8×8 subs are P_L0_8×8 —
    `decode_pframe` asserts those, so intra-in-P + non-8×8 sub-partitions are
    still untested (need a stream that exercises them).
-3. **Own reference frame** — refactor the intra-frame reconstruction out of
-   `decode_frame_full` into `recon::decode_intra_frame` so libmvc decodes the
-   base IDR itself (currently borrows JM's `inter_post.yuv` frame 0).
-4. **Inter deblock** (bS now MV/ref/coded-block dependent) → diff vs
-   `inter_post.yuv`.
+3. ~~**Own reference frame**~~ DONE. The intra reconstruction is now the
+   library `recon::decode_intra_frame` (→ `Frame` with planes + MbInfo/QP
+   grids) + `Frame::deblock_intra` (§ 8.7). `examples/decode_inter_full`
+   decodes `inter.h264` end to end with **zero JM pixels**: libmvc decodes the
+   IDR (validated vs JM frame 0), then uses its **own post-deblock IDR** as the
+   P-slice MC reference (P-frame matches `inter_predeblock.bin`). NB the MC
+   reference must be the *post-deblock* IDR — this stream deblocks the IDR but
+   not the P-slice; pre-deblock was off by 1-2/pixel.
+4. **Inter deblock** (bS now MV/ref/coded-block dependent, § 8.7.2.1) → diff
+   vs `inter_post.yuv`. **Blocked on a test stream**: `inter.h264`'s P-slice
+   has deblock disabled, so it can't validate the inter bS path — regenerate
+   an inter stream with deblock ON (and ideally intra-in-P + non-8×8 subs).
 5. **B-slices**, then the **dependent view** (Annex G inter-view
-   prediction) — the 3D payoff and the realtime decider.
+   prediction) — the 3D payoff and the realtime decider. The inter core
+   (MC + MV pred + residual) is now reusable for it.
 
 ## P-MB decode order (from the trace, MB 32)
 

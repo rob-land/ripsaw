@@ -69,6 +69,13 @@ impl CbpBits {
     fn set(&mut self, bit: u32) {
         self.0 |= 1u64 << bit;
     }
+    /// Whether luma 4×4 block (bx, by in 0..4) has nonzero coefficients —
+    /// the deblock bS=2 test (§ 8.7.2.1). For an 8×8-transform MB the four
+    /// sub-4×4 bits are all set together, so this answers per-4×4 either way.
+    #[inline]
+    pub fn luma4x4_nonzero(self, bx: u32, by: u32) -> bool {
+        self.get(luma4x4_bit(bx, by)) != 0
+    }
 }
 
 /// Left/up neighbour cbf state for the current MB (None = unavailable).
