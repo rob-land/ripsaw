@@ -133,7 +133,7 @@ fn main() -> anyhow::Result<()> {
                     let mut rctx = ResidualContexts::new(slice_qp, true);
                     let mut rneigh = CbfNeighbours { cur: CbpBits::default(), left: None, up: Some(CbpBits::default()) };
                     let mut sink = Vec::new();
-                    let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, slice_qp + last_dquant, pps.chroma_qp_index_offset, true, &mut sink);
+                    let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, slice_qp + last_dquant, pps.chroma_qp_index_offset, true, &ripsaw::mvc::scaling::ScalingLists::flat(), &mut sink);
 
                     // P_16x8: partition 0 = top 16x8, partition 1 = bottom 16x8.
                     for (part, (mvx, mvy)) in [p0, p1].iter().enumerate() {

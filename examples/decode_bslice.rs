@@ -219,7 +219,7 @@ fn main() -> anyhow::Result<()> {
                         left: if mbx != 0 { Some(cbp_grid[addr - 1]) } else { None },
                         up: if addr >= width { Some(cbp_grid[addr - width]) } else { None },
                     };
-                    decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &mut decoded);
+                    decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &ripsaw::mvc::scaling::ScalingLists::flat(), &mut decoded);
                     cbp_grid.push(rneigh.cur);
                     cbpv.push(cbp as u8);
                     t8grid.push(transform8x8);

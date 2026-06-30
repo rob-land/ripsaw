@@ -352,7 +352,7 @@ fn reconstruct_b(rbsp: &[u8], hdr: &ripsaw::mvc::nal::NalUnitHeader, sps: &Sps, 
                 up: if addr >= width { Some(cbp_grid[addr - width]) } else { None },
             };
             let mut sink = Vec::new();
-            res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &mut sink);
+            res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &ripsaw::mvc::scaling::ScalingLists::flat(), &mut sink);
             cbp_grid.push(rneigh.cur);
             cbpv.push(cbp as u8);
             t8grid.push(transform8x8);

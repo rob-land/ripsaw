@@ -19,6 +19,7 @@ use crate::mvc::intra::{
 use crate::mvc::mb_header::{decode_mb_header, MbHeaderContexts, MbInfo, Neighbors};
 use crate::mvc::mb_residual::{decode_mb_residual, CbfNeighbours, CbpBits, ResidualContexts};
 use crate::mvc::pps::Pps;
+use crate::mvc::scaling::ScalingLists;
 use crate::mvc::slice_header::parse_slice_header;
 use crate::mvc::sps::Sps;
 
@@ -69,6 +70,8 @@ pub fn decode_intra_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps) ->
     let mut e = CabacEngine::new(&rbsp[cabac_start..]);
     let mut hctx = MbHeaderContexts::new(slice_qp);
     let mut rctx = ResidualContexts::new(slice_qp, false);
+    // Inverse-quant scaling lists: PPS overrides SPS overrides flat.
+    let scaling = pps.scaling.clone().or_else(|| sps.scaling.clone()).unwrap_or_else(ScalingLists::flat);
     let mut last_dquant = 0;
     let mut qp = slice_qp;
 
@@ -99,7 +102,7 @@ pub fn decode_intra_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps) ->
             left: if mbx != 0 { cbp_grid.get(addr - 1).copied() } else { None },
             up: if addr >= width { cbp_grid.get(addr - width).copied() } else { None },
         };
-        let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut neigh, qp, pps.chroma_qp_index_offset, false, &mut sink);
+        let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut neigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut sink);
 
         // ---- Luma reconstruction ----
         let (mpx, mpy) = (mbx * 16, mby * 16);

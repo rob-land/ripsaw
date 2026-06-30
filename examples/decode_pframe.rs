@@ -202,7 +202,7 @@ fn main() -> anyhow::Result<()> {
                         up: if addr >= width { Some(cbp_grid[addr - width]) } else { None },
                     };
                     let mut sink = Vec::new();
-                    let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, slice_qp + last_dquant, pps.chroma_qp_index_offset, true, &mut sink);
+                    let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, slice_qp + last_dquant, pps.chroma_qp_index_offset, true, &ripsaw::mvc::scaling::ScalingLists::flat(), &mut sink);
                     cbp_grid.push(rneigh.cur);
                     cbpv.push(cbp as u8);
                     t8grid.push(transform8x8);

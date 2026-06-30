@@ -5,9 +5,10 @@
 //
 // Scope here is the 4×4 residual path used by I_NxN luma + chroma AC, the
 // DC transforms for Intra_16x16 luma (4×4 Hadamard) and 4:2:0 chroma (2×2
-// Hadamard), and the 8×8 residual path used by I_8x8 luma. Custom scaling
-// lists are not handled — flat weightScale (=16) only, which is what
-// asserts elsewhere bail on; Blu-ray streams in the corpus use flat scaling.
+// Hadamard), and the 8×8 residual path used by I_8x8 luma. Every dequant
+// takes a `weight` (the stream's scaling list, or FLAT_WEIGHT_* for the
+// default weightScale 16) — real Blu-ray streams carry custom scaling
+// matrices (e.g. an intra-8×8 list with DC weight 6, not 16).
 
 /// `normAdjust4x4[m][class]` — H.264 § 8.5.9 (the "V" matrix). `class` is
 /// 0 for even/even positions, 1 for odd/odd, 2 otherwise.
@@ -32,16 +33,17 @@ fn class_4x4(i: usize, j: usize) -> usize {
 }
 
 /// Inverse-scale (dequantise) a 4×4 block of coefficient levels in place,
-/// for the residual path (§ 8.5.12.1), assuming flat scaling (weightScale
-/// = 16). `qp` is the block's QP (0..=51). Every position — including DC —
-/// is scaled; the separate-DC handling applies only to Intra_16x16 luma
+/// for the residual path (§ 8.5.12.1). `weight` is the per-position
+/// weightScale (the stream's 4×4 scaling list, or [`FLAT_WEIGHT_4X4`]).
+/// `qp` is the block's QP (0..=51). Every position — including DC — is
+/// scaled; the separate-DC handling applies only to Intra_16x16 luma
 /// and chroma, which call the DC helpers below instead.
-pub fn dequant_4x4(levels: &mut [[i32; 4]; 4], qp: i32) {
+pub fn dequant_4x4(levels: &mut [[i32; 4]; 4], qp: i32, weight: &[[i32; 4]; 4]) {
     let m = (qp % 6) as usize;
     let e = qp / 6;
     for i in 0..4 {
         for j in 0..4 {
-            let scale = 16 * NORM_ADJUST_4X4[m][class_4x4(i, j)];
+            let scale = weight[i][j] * NORM_ADJUST_4X4[m][class_4x4(i, j)];
             let c = levels[i][j];
             levels[i][j] = if qp >= 24 {
                 (c * scale) << (e - 4)
@@ -83,11 +85,14 @@ pub fn idct_4x4(d: &[[i32; 4]; 4]) -> [[i32; 4]; 4] {
 }
 
 /// Convenience: dequantise then inverse-transform a 4×4 residual block.
-pub fn reconstruct_residual_4x4(levels: &[[i32; 4]; 4], qp: i32) -> [[i32; 4]; 4] {
+pub fn reconstruct_residual_4x4(levels: &[[i32; 4]; 4], qp: i32, weight: &[[i32; 4]; 4]) -> [[i32; 4]; 4] {
     let mut d = *levels;
-    dequant_4x4(&mut d, qp);
+    dequant_4x4(&mut d, qp, weight);
     idct_4x4(&d)
 }
+
+/// The flat (weight 16) 4×4 inverse-quant matrix — default scaling.
+pub const FLAT_WEIGHT_4X4: [[i32; 4]; 4] = [[16; 4]; 4];
 
 /// `dequant_coef8[m][row][col]` — the 8×8 inverse-scaling weight matrix
 /// (JM `dequant_coef8`, == normAdjust8x8 of H.264 § 8.5.13.1), indexed by
@@ -206,7 +211,7 @@ pub fn inverse_scan_8x8(scan: &[i32; 64]) -> [[i32; 8]; 8] {
 /// (§ 8.5.10.2), followed by DC scaling (§ 8.5.10.3). Returns the 16
 /// dequantised DC values, to be slotted into each 4×4 block's `[0][0]`
 /// before its residual transform.
-pub fn luma_dc_4x4(c: &[[i32; 4]; 4], qp: i32) -> [[i32; 4]; 4] {
+pub fn luma_dc_4x4(c: &[[i32; 4]; 4], qp: i32, dc_weight: i32) -> [[i32; 4]; 4] {
     // Hadamard (separable, same butterfly both directions).
     let mut f = [[0i32; 4]; 4];
     for i in 0..4 {
@@ -233,7 +238,7 @@ pub fn luma_dc_4x4(c: &[[i32; 4]; 4], qp: i32) -> [[i32; 4]; 4] {
     // DC scaling.
     let m = (qp % 6) as usize;
     let e = qp / 6;
-    let scale = 16 * NORM_ADJUST_4X4[m][0];
+    let scale = dc_weight * NORM_ADJUST_4X4[m][0];
     let mut out = [[0i32; 4]; 4];
     for i in 0..4 {
         for j in 0..4 {
@@ -249,7 +254,7 @@ pub fn luma_dc_4x4(c: &[[i32; 4]; 4], qp: i32) -> [[i32; 4]; 4] {
 
 /// Inverse 2×2 Hadamard transform + scaling of the 4:2:0 chroma DC
 /// coefficients (§ 8.5.11.1/2). `c` is `[[c00, c01], [c10, c11]]`.
-pub fn chroma_dc_2x2(c: &[[i32; 2]; 2], qp: i32) -> [[i32; 2]; 2] {
+pub fn chroma_dc_2x2(c: &[[i32; 2]; 2], qp: i32, dc_weight: i32) -> [[i32; 2]; 2] {
     // 2×2 Hadamard.
     let f00 = c[0][0] + c[0][1] + c[1][0] + c[1][1];
     let f01 = c[0][0] - c[0][1] + c[1][0] - c[1][1];
@@ -257,7 +262,7 @@ pub fn chroma_dc_2x2(c: &[[i32; 2]; 2], qp: i32) -> [[i32; 2]; 2] {
     let f11 = c[0][0] - c[0][1] - c[1][0] + c[1][1];
     let m = (qp % 6) as usize;
     let e = qp / 6;
-    let scale = 16 * NORM_ADJUST_4X4[m][0];
+    let scale = dc_weight * NORM_ADJUST_4X4[m][0];
     let s = |v: i32| -> i32 { ((v * scale) << e) >> 5 };
     [[s(f00), s(f01)], [s(f10), s(f11)]]
 }
@@ -323,7 +328,7 @@ mod tests {
         // (160 + 32) >> 6 = 3 everywhere.
         let mut levels = [[0i32; 4]; 4];
         levels[0][0] = 1;
-        let r = reconstruct_residual_4x4(&levels, 24);
+        let r = reconstruct_residual_4x4(&levels, 24, &FLAT_WEIGHT_4X4);
         assert_eq!(r, [[3; 4]; 4]);
     }
 
@@ -331,13 +336,13 @@ mod tests {
     fn dequant_4x4_dc_value() {
         let mut d = [[0i32; 4]; 4];
         d[0][0] = 1;
-        dequant_4x4(&mut d, 24);
+        dequant_4x4(&mut d, 24, &FLAT_WEIGHT_4X4);
         assert_eq!(d[0][0], 160);
         // Position class drives the scale: (1,1) is class 1 -> normAdjust
         // [0][1] = 16 -> 16*16 = 256.
         let mut d = [[0i32; 4]; 4];
         d[1][1] = 1;
-        dequant_4x4(&mut d, 24);
+        dequant_4x4(&mut d, 24, &FLAT_WEIGHT_4X4);
         assert_eq!(d[1][1], 256);
     }
 
@@ -362,7 +367,7 @@ mod tests {
         // A constant DC field has energy only at the Hadamard DC (0,0);
         // all other transformed DCs are zero.
         let c = [[5i32; 4]; 4];
-        let out = luma_dc_4x4(&c, 30);
+        let out = luma_dc_4x4(&c, 30, 16);
         for i in 0..4 {
             for j in 0..4 {
                 if i == 0 && j == 0 {
@@ -377,7 +382,7 @@ mod tests {
     #[test]
     fn chroma_dc_hadamard_separates_constant() {
         // Constant input -> only the (0,0) Hadamard term is non-zero.
-        let out = chroma_dc_2x2(&[[7, 7], [7, 7]], 30);
+        let out = chroma_dc_2x2(&[[7, 7], [7, 7]], 30, 16);
         assert!(out[0][0] != 0);
         assert_eq!(out[0][1], 0);
         assert_eq!(out[1][0], 0);

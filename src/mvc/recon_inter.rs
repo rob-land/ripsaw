@@ -18,6 +18,7 @@ use crate::mvc::mc::{mc_chroma, mc_luma, Plane};
 use crate::mvc::mv::{predict_mv, predict_skip_mv, Directional, Neighbour};
 use crate::mvc::pps::Pps;
 use crate::mvc::recon::Frame;
+use crate::mvc::scaling::ScalingLists;
 use crate::mvc::slice_header::parse_slice_header;
 use crate::mvc::sps::Sps;
 
@@ -62,6 +63,7 @@ pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps, refere
     let mut e = CabacEngine::new(&rbsp[cabac_start..]);
     let mut ctx = InterContexts::new(idc, slice_qp);
     let mut rctx = ResidualContexts::new(slice_qp, true);
+    let scaling = pps.scaling.clone().or_else(|| sps.scaling.clone()).unwrap_or_else(ScalingLists::flat);
 
     let mut y = vec![0u8; ysz];
     let mut cb = vec![0u8; csz];
@@ -169,7 +171,7 @@ pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps, refere
             up: if addr >= width { Some(cbp_grid[addr - width]) } else { None },
         };
         let mut sink = Vec::new();
-        let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &mut sink);
+        let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &scaling, &mut sink);
         cbp_grid.push(rneigh.cur);
         cbpv.push(cbp as u8);
         mb_info.push(info);

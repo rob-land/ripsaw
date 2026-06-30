@@ -103,7 +103,7 @@ fn main() -> anyhow::Result<()> {
                         let info = MbInfo { i_nxn: false, transform8x8, c_ipred: 0, cbp: cbp as u8, i16_pred: 0 };
                         let mut rctx = ResidualContexts::new(slice_qp, true);
                         let mut rneigh = CbfNeighbours { cur: CbpBits::default(), left: None, up: Some(CbpBits::default()) };
-                        decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, slice_qp + last_dquant, pps.chroma_qp_index_offset, true, &mut decoded);
+                        decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, slice_qp + last_dquant, pps.chroma_qp_index_offset, true, &ripsaw::mvc::scaling::ScalingLists::flat(), &mut decoded);
                         let eos = e.decode_terminate();
                         decoded.push(("end_of_slice_flag".into(), eos as i64, None));
                         break;

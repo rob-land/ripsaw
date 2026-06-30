@@ -17,9 +17,10 @@ use super::cabac::{CabacEngine, CtxState};
 use super::mb_header::MbInfo;
 use super::residual::{decode_residual_block, CoeffContexts};
 use super::residual_ctx::ResidualCat;
+use super::scaling::ScalingLists;
 use super::transform::{
     chroma_dc_2x2, dequant_4x4, idct_4x4, inverse_scan_4x4, inverse_scan_8x8, luma_dc_4x4,
-    reconstruct_residual_4x4, reconstruct_residual_8x8, FLAT_WEIGHT_8X8,
+    reconstruct_residual_4x4, reconstruct_residual_8x8,
 };
 
 /// Reconstructed residual samples for one MB (to add to the prediction).
@@ -46,11 +47,11 @@ fn chroma_qp(qpy: i32, offset: i32) -> i32 {
 /// Inverse-transform a 4×4 AC block (15 scan coeffs, positions 1..15) with an
 /// externally dequantised DC inserted — the I_16x16 / chroma path where DC
 /// comes from the Hadamard transform.
-fn recon_4x4_ac_with_dc(ac: &[i32], dc: i32, qp: i32) -> [[i32; 4]; 4] {
+fn recon_4x4_ac_with_dc(ac: &[i32], dc: i32, qp: i32, weight: &[[i32; 4]; 4]) -> [[i32; 4]; 4] {
     let mut scan = [0i32; 16];
     scan[1..16].copy_from_slice(&ac[..15]);
     let mut d = inverse_scan_4x4(&scan);
-    dequant_4x4(&mut d, qp);
+    dequant_4x4(&mut d, qp, weight);
     d[0][0] = dc;
     idct_4x4(&d)
 }
@@ -184,6 +185,7 @@ fn decode_block(
 /// `out`. `qp` is the MB's luma QP; chroma QP mapping is applied internally.
 /// Updates `neigh.cur` with this MB's cbf bits (for the next MB's context).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn decode_mb_residual(
     e: &mut CabacEngine,
     ctxs: &mut ResidualContexts,
@@ -192,10 +194,16 @@ pub fn decode_mb_residual(
     qp: i32,
     chroma_qp_index_offset: i32,
     is_inter: bool,
+    scaling: &ScalingLists,
     out: &mut Vec<ResElem>,
 ) -> MbResidual {
     let cbp_luma = info.cbp & 0x0f;
     let cbp_chroma = info.cbp >> 4;
+    // Inverse-quant weight (scaling list) per category: 4×4 lists are
+    // [intraY, intraCb, intraCr, interY, interCb, interCr]; 8×8 [intraY, interY].
+    let luma4 = &scaling.list_4x4[if is_inter { 3 } else { 0 }];
+    let luma8 = &scaling.list_8x8[if is_inter { 1 } else { 0 }];
+    let chroma4 = |uv: usize| &scaling.list_4x4[if is_inter { 4 + uv } else { 1 + uv }];
     // coded_block_flag default for an unavailable neighbour: 1 for intra
     // blocks, 0 for inter (JM `default_bit = is_intra_block ? 1 : 0`).
     let db = if is_inter { 0 } else { 1 };
@@ -209,17 +217,17 @@ pub fn decode_mb_residual(
         let dc16 = match decode_block(e, ctxs, ResidualCat::Luma16Dc, (2 * up + left) as usize, "DC luma 16x16", out) {
             Some(coeffs) => {
                 neigh.cur.set(0);
-                luma_dc_4x4(&inverse_scan_4x4(&to16(&coeffs)), qp)
+                luma_dc_4x4(&inverse_scan_4x4(&to16(&coeffs)), qp, luma4[0][0])
             }
             None => [[0i32; 4]; 4],
         };
         if cbp_luma != 0 {
-            decode_luma_4x4_blocks(e, ctxs, neigh, ResidualCat::Luma16Ac, cbp_luma, qp, Some(&dc16), db, &mut res.luma, out);
+            decode_luma_4x4_blocks(e, ctxs, neigh, ResidualCat::Luma16Ac, cbp_luma, qp, Some(&dc16), db, luma4, &mut res.luma, out);
         } else {
             // No AC: each 4×4 block is just its DC (idct of DC-only block).
             for by in 0..4usize {
                 for bx in 0..4usize {
-                    place4x4(&mut res.luma, bx, by, recon_4x4_ac_with_dc(&[0; 15], dc16[by][bx], qp));
+                    place4x4(&mut res.luma, bx, by, recon_4x4_ac_with_dc(&[0; 15], dc16[by][bx], qp, luma4));
                 }
             }
         }
@@ -227,7 +235,7 @@ pub fn decode_mb_residual(
         for b8 in 0..4u32 {
             if cbp_luma & (1 << b8) != 0 {
                 let (bx8, by8) = ((b8 & 1) as usize, (b8 >> 1) as usize);
-                let samples = decode_luma8x8(e, ctxs, qp, out);
+                let samples = decode_luma8x8(e, ctxs, qp, luma8, out);
                 for yy in 0..8 {
                     for xx in 0..8 {
                         res.luma[by8 * 8 + yy][bx8 * 8 + xx] = samples[yy][xx];
@@ -239,7 +247,7 @@ pub fn decode_mb_residual(
             }
         }
     } else {
-        decode_luma_4x4_blocks(e, ctxs, neigh, ResidualCat::Luma4x4, cbp_luma, qp, None, db, &mut res.luma, out);
+        decode_luma_4x4_blocks(e, ctxs, neigh, ResidualCat::Luma4x4, cbp_luma, qp, None, db, luma4, &mut res.luma, out);
     }
 
     // ---- Chroma (4:2:0) ----
@@ -254,7 +262,7 @@ pub fn decode_mb_residual(
                 neigh.cur.set(bit);
                 // Chroma DC: 2×2 inverse Hadamard + scale.
                 let c2 = [[coeffs[0], coeffs[1]], [coeffs[2], coeffs[3]]];
-                dc[uv as usize] = chroma_dc_2x2(&c2, cqp);
+                dc[uv as usize] = chroma_dc_2x2(&c2, cqp, chroma4(uv as usize)[0][0]);
             }
         }
         // Each chroma component's 4 4×4 blocks: DC always, AC if cbp_chroma==2.
@@ -282,7 +290,7 @@ pub fn decode_mb_residual(
                     } else {
                         None
                     };
-                    let block = recon_4x4_ac_with_dc(ac.as_deref().unwrap_or(&[0; 15]), dc[uv][cj][ci], cqp);
+                    let block = recon_4x4_ac_with_dc(ac.as_deref().unwrap_or(&[0; 15]), dc[uv][cj][ci], cqp, chroma4(uv));
                     for yy in 0..4 {
                         for xx in 0..4 {
                             plane[cj * 4 + yy][ci * 4 + xx] = block[yy][xx];
@@ -323,6 +331,7 @@ fn decode_luma_4x4_blocks(
     qp: i32,
     dc16: Option<&[[i32; 4]; 4]>,
     db: u32,
+    weight: &[[i32; 4]; 4],
     luma: &mut [[i32; 16]; 16],
     out: &mut Vec<ResElem>,
 ) {
@@ -356,10 +365,10 @@ fn decode_luma_4x4_blocks(
                     let (bxu, byu) = (bx as usize, by as usize);
                     let block = if let Some(dc) = dc16 {
                         // I_16x16 AC block: DC from the Hadamard, AC decoded here.
-                        recon_4x4_ac_with_dc(coeffs.as_deref().unwrap_or(&[0; 15]), dc[byu][bxu], qp)
+                        recon_4x4_ac_with_dc(coeffs.as_deref().unwrap_or(&[0; 15]), dc[byu][bxu], qp, weight)
                     } else if let Some(c) = coeffs {
                         // I_4x4 block: full 4×4 residual.
-                        reconstruct_residual_4x4(&inverse_scan_4x4(&to16(&c)), qp)
+                        reconstruct_residual_4x4(&inverse_scan_4x4(&to16(&c)), qp, weight)
                     } else {
                         [[0i32; 4]; 4]
                     };
@@ -372,8 +381,8 @@ fn decode_luma_4x4_blocks(
 
 /// Decode one coded 8×8 luma block (no cbf), emitting "Luma8x8 DC sng" for
 /// the first (level, run) and "Luma8x8 sng" for the rest; returns the
-/// reconstructed 8×8 residual samples (flat scaling).
-fn decode_luma8x8(e: &mut CabacEngine, ctxs: &mut ResidualContexts, qp: i32, out: &mut Vec<ResElem>) -> [[i32; 8]; 8] {
+/// reconstructed 8×8 residual samples scaled by `weight` (the 8×8 list).
+fn decode_luma8x8(e: &mut CabacEngine, ctxs: &mut ResidualContexts, qp: i32, weight: &[[i32; 8]; 8], out: &mut Vec<ResElem>) -> [[i32; 8]; 8] {
     let cat = ResidualCat::Luma8x8;
     let d = cat.desc();
     let coeffs = decode_residual_block(
@@ -390,5 +399,5 @@ fn decode_luma8x8(e: &mut CabacEngine, ctxs: &mut ResidualContexts, qp: i32, out
     }
     let mut scan = [0i32; 64];
     scan.copy_from_slice(&coeffs[..64]);
-    reconstruct_residual_8x8(&inverse_scan_8x8(&scan), qp, &FLAT_WEIGHT_8X8)
+    reconstruct_residual_8x8(&inverse_scan_8x8(&scan), qp, weight)
 }
