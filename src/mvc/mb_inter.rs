@@ -63,6 +63,24 @@ const INIT_B8_TYPE_P: [[(i32, i32); 5]; 3] = [
     [(0,0),(6,57),(0,0),(-17,73),(14,57)],
 ];
 
+/// `INIT_MB_TYPE_B` = `INIT_MB_TYPE[model][2]` (the B mb_type/skip sub-array,
+/// `mot_ctx->mb_type_contexts[2]`). Indices: 0..2 = inter-tree first bin
+/// (ctxIdxInc a+b), 4..6 = inter-tree bins, 7..9 = mb_skip_flag (ctxIdxInc
+/// 7 + a+b). The I_16x16 suffix reuses `mb_type_contexts[1]` (= `mb_type`).
+#[rustfmt::skip]
+const INIT_MB_TYPE_B: [[(i32, i32); 11]; 3] = [
+    [(26,67),(16,90),(9,104),(0,0),(-46,127),(-20,104),(1,67),(18,64),(9,43),(29,0),(0,0)],
+    [(57,2),(41,36),(26,69),(0,0),(-45,127),(-15,101),(-4,76),(26,34),(19,22),(40,0),(0,0)],
+    [(54,0),(37,42),(12,97),(0,0),(-32,127),(-22,117),(-2,74),(20,40),(20,10),(29,0),(0,0)],
+];
+/// `INIT_B8_TYPE_B` = `INIT_B8_TYPE_P[model][1][0..4]` — B sub_mb_type ctx.
+#[rustfmt::skip]
+const INIT_B8_TYPE_B: [[(i32, i32); 4]; 3] = [
+    [(-6,86),(-17,95),(-6,61),(9,45)],
+    [(6,69),(-13,90),(0,52),(8,43)],
+    [(-6,93),(-14,88),(-6,44),(4,55)],
+];
+
 /// CABAC contexts for inter-MB header syntax, built once per slice from the
 /// cabac_init_idc model at the slice QP.
 pub struct InterContexts {
@@ -78,6 +96,10 @@ pub struct InterContexts {
     pub delta_qp: [CtxState; 4],
     /// sub_mb_type (b8_type_contexts[0], 5 ctx).
     pub b8_type: [CtxState; 5],
+    /// B mb_type/skip sub-array (`mot_ctx->mb_type_contexts[2]`, 11 ctx).
+    pub mb_type_b: [CtxState; 11],
+    /// B sub_mb_type (b8_type_contexts[1], 4 ctx).
+    pub b8_type_b: [CtxState; 4],
 }
 
 impl InterContexts {
@@ -89,6 +111,8 @@ impl InterContexts {
         let ts = &INIT_TRANSFORM_SIZE_P[m];
         let dq = &INIT_DELTA_QP_P[m];
         let b8 = &INIT_B8_TYPE_P[m];
+        let mtb = &INIT_MB_TYPE_B[m];
+        let b8b = &INIT_B8_TYPE_B[m];
         let mk = |(p, q): (i32, i32)| CtxState::init(p, q, slice_qp);
         InterContexts {
             mb_type: std::array::from_fn(|i| mk(row[i])),
@@ -97,6 +121,8 @@ impl InterContexts {
             transform: std::array::from_fn(|i| mk(ts[i])),
             delta_qp: std::array::from_fn(|i| mk(dq[i])),
             b8_type: std::array::from_fn(|i| mk(b8[i])),
+            mb_type_b: std::array::from_fn(|i| mk(mtb[i])),
+            b8_type_b: std::array::from_fn(|i| mk(b8b[i])),
         }
     }
 }
@@ -114,6 +140,128 @@ pub fn decode_sub_mb_type(e: &mut CabacEngine, ctx: &mut InterContexts) -> i64 {
         }
     } else {
         1
+    }
+}
+
+/// Decode a B-slice mb_skip_flag (JM read_skip_flag_CABAC_b_slice). Context
+/// `mb_type_b[7 + a + b]`, a/b = left/up MB not-skipped. Traced value is
+/// `(bin != 1)`: 0 = skipped (B_Skip), 1 = coded. Returns (is_skip, value1).
+pub fn decode_mb_skip_flag_b(e: &mut CabacEngine, ctx: &mut InterContexts, left_not_skip: u32, up_not_skip: u32) -> (bool, i64) {
+    let bin = e.decode_decision(&mut ctx.mb_type_b[(7 + left_not_skip + up_not_skip) as usize]);
+    let value1 = (bin != 1) as i64;
+    (value1 == 0, value1)
+}
+
+/// Decode a B-slice mb_type (JM readMB_typeInfo_CABAC_b_slice). Returns the
+/// traced act_sym / curr_mb_type: 0 = B_Direct_16x16, 1..3 = B_{L0,L1,Bi}_16x16,
+/// 4..21 = the 16x8/8x16 bi-pred modes, 22 = B_8x8, 23 = I_NxN, 24..47 =
+/// I_16x16 expanded, 48 = I_PCM. `a`/`b` = left/up MB not-direct (mb_type != 0).
+pub fn decode_b_mb_type(e: &mut CabacEngine, ctx: &mut InterContexts, a: u32, b: u32) -> i64 {
+    let mut act_sym: i64;
+    {
+        let mt = &mut ctx.mb_type_b;
+        if e.decode_decision(&mut mt[(a + b) as usize]) != 0 {
+            if e.decode_decision(&mut mt[4]) != 0 {
+                if e.decode_decision(&mut mt[5]) != 0 {
+                    act_sym = 12;
+                    if e.decode_decision(&mut mt[6]) != 0 { act_sym += 8; }
+                    if e.decode_decision(&mut mt[6]) != 0 { act_sym += 4; }
+                    if e.decode_decision(&mut mt[6]) != 0 { act_sym += 2; }
+                    if act_sym == 24 {
+                        act_sym = 11;
+                    } else if act_sym == 26 {
+                        act_sym = 22;
+                    } else {
+                        if act_sym == 22 { act_sym = 23; }
+                        if e.decode_decision(&mut mt[6]) != 0 { act_sym += 1; }
+                    }
+                } else {
+                    act_sym = 3;
+                    if e.decode_decision(&mut mt[6]) != 0 { act_sym += 4; }
+                    if e.decode_decision(&mut mt[6]) != 0 { act_sym += 2; }
+                    if e.decode_decision(&mut mt[6]) != 0 { act_sym += 1; }
+                }
+            } else if e.decode_decision(&mut mt[6]) != 0 {
+                act_sym = 2;
+            } else {
+                act_sym = 1;
+            }
+        } else {
+            act_sym = 0;
+        }
+    }
+    if act_sym <= 23 {
+        return act_sym;
+    }
+    // I_16x16 suffix (act_sym 24): I_PCM final bin, else AC/cbp/pred bins on
+    // mb_type_contexts[1] (= mb_type) indices 8,9,10.
+    if e.decode_terminate() == 1 {
+        return 48;
+    }
+    let p = &mut ctx.mb_type;
+    if e.decode_decision(&mut p[8]) != 0 { act_sym += 12; }
+    if e.decode_decision(&mut p[9]) != 0 {
+        act_sym += 4;
+        if e.decode_decision(&mut p[9]) != 0 { act_sym += 4; }
+    }
+    if e.decode_decision(&mut p[10]) != 0 { act_sym += 2; }
+    if e.decode_decision(&mut p[10]) != 0 { act_sym += 1; }
+    act_sym
+}
+
+/// Decode a B-slice sub_mb_type (JM readB8_typeInfo_CABAC_b_slice) →
+/// 0 = B_Direct_8x8, 1 = B_L0_8x8, 2 = B_L1_8x8, 3 = B_Bi_8x8, 4 = B_L0_8x4,
+/// 5 = B_L0_4x8, 6 = B_L1_8x4, 7 = B_L1_4x8, 8 = B_Bi_8x4, 9 = B_Bi_4x8,
+/// 10 = B_L0_4x4, 11 = B_L1_4x4, 12 = B_Bi_4x4.
+pub fn decode_b_sub_mb_type(e: &mut CabacEngine, ctx: &mut InterContexts) -> i64 {
+    let b8 = &mut ctx.b8_type_b;
+    if e.decode_decision(&mut b8[0]) == 0 {
+        return 0;
+    }
+    if e.decode_decision(&mut b8[1]) == 0 {
+        return if e.decode_decision(&mut b8[3]) != 0 { 2 } else { 1 };
+    }
+    let mut act_sym: i64;
+    if e.decode_decision(&mut b8[2]) != 0 {
+        if e.decode_decision(&mut b8[3]) != 0 {
+            act_sym = 10;
+            if e.decode_decision(&mut b8[3]) != 0 { act_sym += 1; }
+        } else {
+            act_sym = 6;
+            if e.decode_decision(&mut b8[3]) != 0 { act_sym += 2; }
+            if e.decode_decision(&mut b8[3]) != 0 { act_sym += 1; }
+        }
+    } else {
+        act_sym = 2;
+        if e.decode_decision(&mut b8[3]) != 0 { act_sym += 2; }
+        if e.decode_decision(&mut b8[3]) != 0 { act_sym += 1; }
+    }
+    act_sym + 1
+}
+
+/// B-slice mb_type → (partition shape, per-partition prediction direction).
+/// Shape: `(num_parts, part_w4, part_h4)` in 4×4 units. pdir: 0 = L0, 1 = L1,
+/// 2 = Bi. From JM `interpret_mb_mode_B`. Only inter modes 0..22 (no intra).
+pub fn interpret_b_mb_type(mb_type: i64) -> (usize, usize, usize, [u8; 4]) {
+    const PDIR16X16: [u8; 4] = [0, 0, 1, 2]; // index by mb_type (0..3)
+    #[rustfmt::skip]
+    const PDIR16X8: [[u8; 2]; 22] = [[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[1,1],[0,0],[0,1],[0,0],[1,0],
+                                     [0,0],[0,2],[0,0],[1,2],[0,0],[2,0],[0,0],[2,1],[0,0],[2,2],[0,0]];
+    #[rustfmt::skip]
+    const PDIR8X16: [[u8; 2]; 22] = [[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[0,0],[1,1],[0,0],[0,1],[0,0],
+                                     [1,0],[0,0],[0,2],[0,0],[1,2],[0,0],[2,0],[0,0],[2,1],[0,0],[2,2]];
+    match mb_type {
+        0 => (1, 4, 4, [2, 2, 2, 2]),        // B_Direct_16x16 (whole-MB direct)
+        1..=3 => (1, 4, 4, [PDIR16X16[mb_type as usize]; 4]),
+        22 => (4, 2, 2, [0, 0, 0, 0]),       // B_8x8 (pdir per sub_mb_type)
+        _ if mb_type & 1 == 0 => {           // even → 16x8
+            let p = PDIR16X8[mb_type as usize];
+            (2, 4, 2, [p[0], p[1], 0, 0])
+        }
+        _ => {                               // odd → 8x16
+            let p = PDIR8X16[mb_type as usize];
+            (2, 2, 4, [p[0], p[1], 0, 0])
+        }
     }
 }
 
