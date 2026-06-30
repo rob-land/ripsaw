@@ -216,17 +216,29 @@ slice). Standing this up surfaced the **custom scaling list** (PPS, 8×8
 intra DC weight 6 not 16); now parsed (`scaling.rs`) and validated against
 JM's `qmatrix` dump.
 
+**Full intra *syntax* decode is bit-exact for every MB type.** `mb_residual.rs`
+orchestrates the complete intra-MB residual decode — the `coded_block_flag`
+neighbour context (JM `read_and_store_CBP_block_bit`, per-MB `s_cbp` bit
+tracking in `CbpBits`) + the per-category significance/level decode, in JM's
+exact block order: I_16×16 luma DC then AC, I_4×4 / I_8×8 luma, 4:2:0 chroma
+DC/AC. Contexts are built once per slice and shared. Validated on an
+ffmpeg/x264 test frame (`scripts/gen-intra-test-frame.sh`) that mixes
+I_4×4 / I_8×8 / I_16×16 + chroma residual + deblocking: **3075 elements /
+48 MBs match the JM trace exactly** (`examples/decode_slice_full`).
+
 **Remaining for the PoC:**
-1. *Deblocking orchestration* — the `deblock.rs` filter primitives exist
-   (ALPHA/BETA/TC0 + the luma/chroma filters); still needed is the
-   boundary-strength (bS) computation and the edge-iteration loop, then a
-   post-deblock diff against JM (deblock the decoded region, compare the
-   interior away from the concealed-MB boundary).
-2. *Complete the residual decode for every MB category* — chroma DC/AC
-   (the `coded_block_flag` neighbour path, tracking each MB's `s_cbp`
-   bits) and I_4x4 / I_16x16. The first slice's coded MBs are all I_8×8
-   luma; a full frame (all 68 rows) contains the rest, needed to compare
-   against JM's *complete*-picture YUV output.
+1. *Extend reconstruction to all MB types* — the syntax decode is done and
+   the transform/prediction primitives all exist (`predict_4x4`,
+   `predict_16x16`, `luma_dc_4x4` Hadamard, `chroma_dc_2x2`,
+   `reconstruct_residual_4x4`). Needed: have `decode_mb_residual` return the
+   per-block coefficients, then per MB type apply dequant + transform +
+   prediction (the I_16×16 DC-Hadamard-then-AC combine, chroma QP mapping
+   § 8.5.8, and per-4×4-block predict/reconstruct interleave). Validate the
+   pixels against `test_predeblock.bin`.
+2. *Deblocking orchestration* — filter primitives exist in `deblock.rs`;
+   still needed is the bS computation + edge-iteration loop, then a
+   post-deblock diff against JM's `-o` output (the test frame's deblock is
+   active — 1715 samples change — so it's a real validation target).
 
 The syntax decode and the intra-frame pixel pipeline (luma + chroma) are
 done and proven bit-exact on real data. Deblocking is the last layer for
