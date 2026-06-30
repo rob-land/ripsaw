@@ -210,6 +210,203 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &Neighbors4x4) -> [[i32; 4]; 4] {
     p
 }
 
+/// Reference samples for an Intra_8x8 luma block (§ 8.3.2.2). `top` holds
+/// p[0..15][-1] (the row above plus above-right; the caller replicates
+/// p[7][-1] into indices 8..16 when the above-right block is unavailable),
+/// `left` holds p[-1][0..7], `corner` is p[-1][-1]. Intra_8x8 uses the same
+/// nine modes as 4×4, applied to *low-pass-filtered* reference samples.
+pub struct Neighbors8x8 {
+    pub top: [i32; 16],
+    pub left: [i32; 8],
+    pub corner: i32,
+    pub top_avail: bool,
+    pub left_avail: bool,
+    pub corner_avail: bool,
+}
+
+impl Neighbors8x8 {
+    #[inline]
+    fn t(&self, i: i32) -> i32 {
+        if i < 0 {
+            self.corner
+        } else {
+            self.top[i as usize]
+        }
+    }
+    #[inline]
+    fn l(&self, j: i32) -> i32 {
+        if j < 0 {
+            self.corner
+        } else {
+            self.left[j as usize]
+        }
+    }
+
+    /// Apply the Intra_8x8 reference-sample low-pass filter (§ 8.3.2.2.1,
+    /// JM `LowPassForIntra8x8Pred`): a [1 2 1]/4 filter over the available
+    /// reference samples, replicating at the two far ends.
+    fn filtered(&self) -> Neighbors8x8 {
+        let (up, lf, ul) = (self.top_avail, self.left_avail, self.corner_avail);
+        let mut top = self.top;
+        let mut left = self.left;
+        let mut corner = self.corner;
+        if ul {
+            corner = if up && lf {
+                (self.left[0] + 2 * self.corner + self.top[0] + 2) >> 2
+            } else if up {
+                (3 * self.corner + self.top[0] + 2) >> 2
+            } else if lf {
+                (3 * self.corner + self.left[0] + 2) >> 2
+            } else {
+                self.corner
+            };
+        }
+        if up {
+            top[0] = if ul {
+                (self.corner + 2 * self.top[0] + self.top[1] + 2) >> 2
+            } else {
+                (3 * self.top[0] + self.top[1] + 2) >> 2
+            };
+            for i in 1..15 {
+                top[i] = (self.top[i - 1] + 2 * self.top[i] + self.top[i + 1] + 2) >> 2;
+            }
+            top[15] = (self.top[14] + 3 * self.top[15] + 2) >> 2;
+        }
+        if lf {
+            left[0] = if ul {
+                (self.corner + 2 * self.left[0] + self.left[1] + 2) >> 2
+            } else {
+                (3 * self.left[0] + self.left[1] + 2) >> 2
+            };
+            for j in 1..7 {
+                left[j] = (self.left[j - 1] + 2 * self.left[j] + self.left[j + 1] + 2) >> 2;
+            }
+            left[7] = (self.left[6] + 3 * self.left[7] + 2) >> 2;
+        }
+        Neighbors8x8 { top, left, corner, top_avail: up, left_avail: lf, corner_avail: ul }
+    }
+}
+
+/// Predict an 8×8 luma block (§ 8.3.2.2), reusing the nine Intra_4x4 mode
+/// directions. Reference samples are low-pass filtered first (the defining
+/// difference from 4×4). Output `pred[y][x]` (row-major), unclipped.
+pub fn predict_8x8(mode: Intra4x4Mode, raw: &Neighbors8x8) -> [[i32; 8]; 8] {
+    use Intra4x4Mode::*;
+    let n = raw.filtered();
+    let mut p = [[0i32; 8]; 8];
+    match mode {
+        Vertical => {
+            for y in 0..8 {
+                for x in 0..8 {
+                    p[y][x] = n.t(x as i32);
+                }
+            }
+        }
+        Horizontal => {
+            for y in 0..8 {
+                for x in 0..8 {
+                    p[y][x] = n.l(y as i32);
+                }
+            }
+        }
+        Dc => {
+            let dc = match (n.top_avail, n.left_avail) {
+                (true, true) => {
+                    ((0..8).map(|i| n.top[i]).sum::<i32>() + (0..8).map(|j| n.left[j]).sum::<i32>() + 8) >> 4
+                }
+                (true, false) => ((0..8).map(|i| n.top[i]).sum::<i32>() + 4) >> 3,
+                (false, true) => ((0..8).map(|j| n.left[j]).sum::<i32>() + 4) >> 3,
+                (false, false) => 128,
+            };
+            for row in &mut p {
+                row.fill(dc);
+            }
+        }
+        DiagDownLeft => {
+            for y in 0..8i32 {
+                for x in 0..8i32 {
+                    p[y as usize][x as usize] = if x == 7 && y == 7 {
+                        avg3(n.t(14), n.t(15), n.t(15))
+                    } else {
+                        avg3(n.t(x + y), n.t(x + y + 1), n.t(x + y + 2))
+                    };
+                }
+            }
+        }
+        DiagDownRight => {
+            for y in 0..8i32 {
+                for x in 0..8i32 {
+                    p[y as usize][x as usize] = match x.cmp(&y) {
+                        std::cmp::Ordering::Greater => avg3(n.t(x - y - 2), n.t(x - y - 1), n.t(x - y)),
+                        std::cmp::Ordering::Less => avg3(n.l(y - x - 2), n.l(y - x - 1), n.l(y - x)),
+                        std::cmp::Ordering::Equal => avg3(n.t(0), n.t(-1), n.l(0)),
+                    };
+                }
+            }
+        }
+        VerticalRight => {
+            for y in 0..8i32 {
+                for x in 0..8i32 {
+                    let z = 2 * x - y;
+                    p[y as usize][x as usize] = if z >= 0 && z % 2 == 0 {
+                        avg2(n.t(x - (y >> 1) - 1), n.t(x - (y >> 1)))
+                    } else if z >= 0 {
+                        avg3(n.t(x - (y >> 1) - 2), n.t(x - (y >> 1) - 1), n.t(x - (y >> 1)))
+                    } else if z == -1 {
+                        avg3(n.l(0), n.t(-1), n.t(0))
+                    } else {
+                        avg3(n.l(y - 1), n.l(y - 2), n.l(y - 3))
+                    };
+                }
+            }
+        }
+        HorizontalDown => {
+            for y in 0..8i32 {
+                for x in 0..8i32 {
+                    let z = 2 * y - x;
+                    p[y as usize][x as usize] = if z >= 0 && z % 2 == 0 {
+                        avg2(n.l(y - (x >> 1) - 1), n.l(y - (x >> 1)))
+                    } else if z >= 0 {
+                        avg3(n.l(y - (x >> 1) - 2), n.l(y - (x >> 1) - 1), n.l(y - (x >> 1)))
+                    } else if z == -1 {
+                        avg3(n.l(0), n.t(-1), n.t(0))
+                    } else {
+                        avg3(n.t(x - 1), n.t(x - 2), n.t(x - 3))
+                    };
+                }
+            }
+        }
+        VerticalLeft => {
+            for y in 0..8i32 {
+                for x in 0..8i32 {
+                    p[y as usize][x as usize] = if y % 2 == 0 {
+                        avg2(n.t(x + (y >> 1)), n.t(x + (y >> 1) + 1))
+                    } else {
+                        avg3(n.t(x + (y >> 1)), n.t(x + (y >> 1) + 1), n.t(x + (y >> 1) + 2))
+                    };
+                }
+            }
+        }
+        HorizontalUp => {
+            for y in 0..8i32 {
+                for x in 0..8i32 {
+                    let z = x + 2 * y;
+                    p[y as usize][x as usize] = if z < 13 && z % 2 == 0 {
+                        avg2(n.l(y + (x >> 1)), n.l(y + (x >> 1) + 1))
+                    } else if z < 13 {
+                        avg3(n.l(y + (x >> 1)), n.l(y + (x >> 1) + 1), n.l(y + (x >> 1) + 2))
+                    } else if z == 13 {
+                        avg3(n.l(6), n.l(7), n.l(7))
+                    } else {
+                        n.l(7)
+                    };
+                }
+            }
+        }
+    }
+    p
+}
+
 #[inline]
 fn clip1(v: i32) -> i32 {
     v.clamp(0, 255)
@@ -555,5 +752,81 @@ mod tests {
         let l = vec![55; 8];
         let n = NeighborsNxN { top: &t, left: &l, corner: 55, top_avail: true, left_avail: true };
         assert_eq!(predict_chroma_8x8(PlaneMode::Plane, &n), [[55; 8]; 8]);
+    }
+
+    fn n8(top: [i32; 16], left: [i32; 8], corner: i32) -> Neighbors8x8 {
+        Neighbors8x8 { top, left, corner, top_avail: true, left_avail: true, corner_avail: true }
+    }
+
+    #[test]
+    fn intra8x8_filter_of_constant_is_constant() {
+        // The [1 2 1] low-pass filter preserves a constant field exactly.
+        let n = n8([99; 16], [99; 8], 99);
+        let f = n.filtered();
+        assert_eq!(f.top, [99; 16]);
+        assert_eq!(f.left, [99; 8]);
+        assert_eq!(f.corner, 99);
+    }
+
+    #[test]
+    fn intra8x8_filter_smooths_a_spike() {
+        // A single spike against a flat background gets [1 2 1]-smoothed; the
+        // ends replicate. top = [0,40,0,0,...], all-avail with corner 0.
+        let mut top = [0i32; 16];
+        top[1] = 40;
+        let n = n8(top, [0; 8], 0);
+        let f = n.filtered();
+        // top[0]: corner avail -> (corner + 2*0 + 40 + 2)>>2 = (0+0+40+2)>>2 = 10
+        assert_eq!(f.top[0], (0 + 0 + 40 + 2) >> 2);
+        // top[1]: (0 + 2*40 + 0 + 2)>>2 = 20
+        assert_eq!(f.top[1], (0 + 80 + 0 + 2) >> 2);
+        // top[2]: (40 + 0 + 0 + 2)>>2 = 10
+        assert_eq!(f.top[2], (40 + 0 + 0 + 2) >> 2);
+        // far end replicates: top[15] = (top[14] + 3*top[15] + 2)>>2 = 0
+        assert_eq!(f.top[15], 0);
+    }
+
+    #[test]
+    fn intra8x8_vertical_copies_filtered_top() {
+        // Uniform field (top == corner) -> filter is a no-op -> flat columns.
+        let n = n8([70; 16], [70; 8], 70);
+        let p = predict_8x8(Intra4x4Mode::Vertical, &n);
+        assert_eq!(p, [[70; 8]; 8]);
+    }
+
+    #[test]
+    fn intra8x8_horizontal_copies_filtered_left() {
+        let n = n8([70; 16], [70; 8], 70);
+        let p = predict_8x8(Intra4x4Mode::Horizontal, &n);
+        assert_eq!(p, [[70; 8]; 8]);
+    }
+
+    #[test]
+    fn intra8x8_dc_uniform_field() {
+        // Uniform neighbours -> filter no-op -> DC equals the field value.
+        let n = n8([80; 16], [80; 8], 80);
+        assert_eq!(predict_8x8(Intra4x4Mode::Dc, &n), [[80; 8]; 8]);
+    }
+
+    #[test]
+    fn intra8x8_dc_no_neighbours_is_128() {
+        let raw = Neighbors8x8 {
+            top: [0; 16],
+            left: [0; 8],
+            corner: 0,
+            top_avail: false,
+            left_avail: false,
+            corner_avail: false,
+        };
+        assert_eq!(predict_8x8(Intra4x4Mode::Dc, &raw), [[128; 8]; 8]);
+    }
+
+    #[test]
+    fn intra8x8_diag_down_left_depends_on_x_plus_y() {
+        // With a uniform field, every avg3 collapses to the constant, so
+        // the whole block equals it — exercises the x+y indexing safely.
+        let n = n8([55; 16], [55; 8], 55);
+        let p = predict_8x8(Intra4x4Mode::DiagDownLeft, &n);
+        assert_eq!(p, [[55; 8]; 8]);
     }
 }
