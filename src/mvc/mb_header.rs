@@ -209,39 +209,41 @@ fn decode_i16_mb_type(e: &mut CabacEngine, ctx: &mut MbHeaderContexts) -> (i64, 
 /// coded_block_pattern (§ read_CBP_CABAC), 4:2:0. Mirrors JM's bit-by-bit
 /// luma derivation + the two chroma bins.
 fn decode_cbp(e: &mut CabacEngine, ctx: &mut MbHeaderContexts, neigh: &Neighbors) -> i64 {
-    let up = neigh.up;
-    let left = neigh.left;
-    let mut cbp: i64 = 0;
+    decode_cbp_ctx(e, &mut ctx.cbp, neigh.up.map(|u| u.cbp), neigh.left.map(|l| l.cbp))
+}
 
-    // Luma: four 8x8 blocks at (mb_y, mb_x) in {0,2}×{0,2}.
+/// coded_block_pattern decode (§ read_CBP_CABAC), 4:2:0, parameterised by the
+/// cbp context bank and the neighbour MBs' cbp values — shared by intra and
+/// inter (the algorithm is identical; only the init tables differ).
+pub fn decode_cbp_ctx(e: &mut CabacEngine, cbp_ctx: &mut [[CtxState; 4]; 3], up: Option<u8>, left: Option<u8>) -> i64 {
+    let mut cbp: i64 = 0;
     for mb_y in (0..4).step_by(2) {
         for mb_x in (0..4).step_by(2) {
-            // top contribution b
             let b = if mb_y == 0 {
-                up.map_or(0, |u| if (u.cbp as i64 & (1 << (2 + (mb_x >> 1)))) == 0 { 2 } else { 0 })
+                up.map_or(0, |u| if (u as i64 & (1 << (2 + (mb_x >> 1)))) == 0 { 2 } else { 0 })
+            } else if (cbp & (1 << (mb_x / 2))) == 0 {
+                2
             } else {
-                if (cbp & (1 << (mb_x / 2))) == 0 { 2 } else { 0 }
+                0
             };
-            // left contribution a
             let a = if mb_x == 0 {
-                left.map_or(0, |l| if (l.cbp as i64 & (1 << (2 * (mb_y / 2) + 1))) == 0 { 1 } else { 0 })
+                left.map_or(0, |l| if (l as i64 & (1 << (2 * (mb_y / 2) + 1))) == 0 { 1 } else { 0 })
+            } else if (cbp & (1 << mb_y)) == 0 {
+                1
             } else {
-                if (cbp & (1 << mb_y)) == 0 { 1 } else { 0 }
+                0
             };
-            let bit = e.decode_decision(&mut ctx.cbp[0][(a + b) as usize]);
-            if bit == 1 {
+            if e.decode_decision(&mut cbp_ctx[0][(a + b) as usize]) == 1 {
                 cbp += 1 << (mb_y + (mb_x >> 1));
             }
         }
     }
-
-    // Chroma (4:2:0): bin0 (any chroma), bin1 (chroma AC).
-    let b = up.map_or(0, |u| if u.cbp > 15 { 2 } else { 0 });
-    let a = left.map_or(0, |l| if l.cbp > 15 { 1 } else { 0 });
-    if e.decode_decision(&mut ctx.cbp[1][(a + b) as usize]) == 1 {
-        let b = up.map_or(0, |u| if (u.cbp >> 4) == 2 { 2 } else { 0 });
-        let a = left.map_or(0, |l| if (l.cbp >> 4) == 2 { 1 } else { 0 });
-        let bit = e.decode_decision(&mut ctx.cbp[2][(a + b) as usize]);
+    let b = up.map_or(0, |u| if u > 15 { 2 } else { 0 });
+    let a = left.map_or(0, |l| if l > 15 { 1 } else { 0 });
+    if e.decode_decision(&mut cbp_ctx[1][(a + b) as usize]) == 1 {
+        let b = up.map_or(0, |u| if (u >> 4) == 2 { 2 } else { 0 });
+        let a = left.map_or(0, |l| if (l >> 4) == 2 { 1 } else { 0 });
+        let bit = e.decode_decision(&mut cbp_ctx[2][(a + b) as usize]);
         cbp += if bit == 1 { 32 } else { 16 };
     }
     cbp
@@ -249,16 +251,20 @@ fn decode_cbp(e: &mut CabacEngine, ctx: &mut MbHeaderContexts, neigh: &Neighbors
 
 /// mb_qp_delta (§ read_dQuant_CABAC). Updates `last_dquant`.
 fn decode_dquant(e: &mut CabacEngine, ctx: &mut MbHeaderContexts, last_dquant: &mut i32) -> i32 {
+    decode_dquant_ctx(e, &mut ctx.delta_qp, last_dquant)
+}
+
+/// mb_qp_delta decode parameterised by the delta_qp context bank (shared by
+/// intra and inter). Updates `last_dquant`.
+pub fn decode_dquant_ctx(e: &mut CabacEngine, ctx: &mut [CtxState; 4], last_dquant: &mut i32) -> i32 {
     let act_ctx = (*last_dquant != 0) as usize;
-    let dquant = if e.decode_decision(&mut ctx.delta_qp[act_ctx]) != 0 {
-        // unary_bin_decode(delta_qp+2, ctx_offset=1): first bin on ctx 2;
-        // if non-zero, count further 1s on ctx 3 (the JM do/while).
-        let unary = if e.decode_decision(&mut ctx.delta_qp[2]) == 0 {
+    let dquant = if e.decode_decision(&mut ctx[act_ctx]) != 0 {
+        let unary = if e.decode_decision(&mut ctx[2]) == 0 {
             0u32
         } else {
             let mut s = 0u32;
             loop {
-                let l = e.decode_decision(&mut ctx.delta_qp[3]);
+                let l = e.decode_decision(&mut ctx[3]);
                 s += 1;
                 if l == 0 {
                     break;
@@ -266,10 +272,10 @@ fn decode_dquant(e: &mut CabacEngine, ctx: &mut MbHeaderContexts, last_dquant: &
             }
             s
         };
-        let act_sym = unary + 1; // JM: ++act_sym
+        let act_sym = unary + 1;
         let mut d = ((act_sym + 1) >> 1) as i32;
         if act_sym & 1 == 0 {
-            d = -d; // lsb is the sign bit
+            d = -d;
         }
         d
     } else {

@@ -34,6 +34,28 @@ const INIT_MV_RES_P: [[[(i32, i32); 10]; 2]; 3] = [
      [(8,55),(11,58),(-7,93),(3,93),(0,0),(7,53),(8,63),(-4,86),(2,95),(0,0)]],
 ];
 
+/// `INIT_CBP_P[model][3][4]`, `INIT_TRANSFORM_SIZE_P[model][3]`,
+/// `INIT_DELTA_QP_P[model][4]` — the inter cbp / transform-flag / mb_qp_delta
+/// contexts (same algorithms as intra, different init).
+#[rustfmt::skip]
+const INIT_CBP_P: [[[(i32, i32); 4]; 3]; 3] = [
+    [[(-27,126),(-28,98),(-25,101),(-23,67)],[(-28,82),(-20,94),(-16,83),(-22,110)],[(-21,91),(-18,102),(-13,93),(-29,127)]],
+    [[(-39,127),(-18,91),(-17,96),(-26,81)],[(-35,98),(-24,102),(-23,97),(-27,119)],[(-24,99),(-21,110),(-18,102),(-36,127)]],
+    [[(-36,127),(-17,91),(-14,95),(-25,84)],[(-25,86),(-12,89),(-17,91),(-31,127)],[(-14,76),(-18,103),(-13,90),(-37,127)]],
+];
+#[rustfmt::skip]
+const INIT_TRANSFORM_SIZE_P: [[(i32, i32); 3]; 3] = [
+    [(12,40),(11,51),(14,59)],
+    [(25,32),(21,49),(21,54)],
+    [(21,33),(19,50),(17,61)],
+];
+#[rustfmt::skip]
+const INIT_DELTA_QP_P: [[(i32, i32); 4]; 3] = [
+    [(0,41),(0,63),(0,63),(0,63)],
+    [(0,41),(0,63),(0,63),(0,63)],
+    [(0,41),(0,63),(0,63),(0,63)],
+];
+
 /// CABAC contexts for inter-MB header syntax, built once per slice from the
 /// cabac_init_idc model at the slice QP.
 pub struct InterContexts {
@@ -41,6 +63,12 @@ pub struct InterContexts {
     pub mb_type: [CtxState; 11],
     /// mvd contexts: `[0]` bin-0 (10), `[1]` UEGk suffix (10).
     pub mv_res: [[CtxState; 10]; 2],
+    /// coded_block_pattern (3 sub-arrays × 4 ctx).
+    pub cbp: [[CtxState; 4]; 3],
+    /// transform_size_8x8_flag (3 ctx).
+    pub transform: [CtxState; 3],
+    /// mb_qp_delta (4 ctx).
+    pub delta_qp: [CtxState; 4],
 }
 
 impl InterContexts {
@@ -48,9 +76,16 @@ impl InterContexts {
         let m = cabac_init_idc as usize % 3;
         let row = &INIT_MB_TYPE_P[m];
         let mvr = &INIT_MV_RES_P[m];
+        let cbp = &INIT_CBP_P[m];
+        let ts = &INIT_TRANSFORM_SIZE_P[m];
+        let dq = &INIT_DELTA_QP_P[m];
+        let mk = |(p, q): (i32, i32)| CtxState::init(p, q, slice_qp);
         InterContexts {
-            mb_type: std::array::from_fn(|i| CtxState::init(row[i].0, row[i].1, slice_qp)),
-            mv_res: std::array::from_fn(|j| std::array::from_fn(|i| CtxState::init(mvr[j][i].0, mvr[j][i].1, slice_qp))),
+            mb_type: std::array::from_fn(|i| mk(row[i])),
+            mv_res: std::array::from_fn(|j| std::array::from_fn(|i| mk(mvr[j][i]))),
+            cbp: std::array::from_fn(|j| std::array::from_fn(|i| mk(cbp[j][i]))),
+            transform: std::array::from_fn(|i| mk(ts[i])),
+            delta_qp: std::array::from_fn(|i| mk(dq[i])),
         }
     }
 }
