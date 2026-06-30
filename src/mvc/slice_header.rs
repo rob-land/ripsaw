@@ -323,6 +323,7 @@ mod tests {
             width: 1920,
             height: 1080,
             vui_timing: None,
+            scaling: None,
         }
     }
 
@@ -345,6 +346,7 @@ mod tests {
             redundant_pic_cnt_present_flag: false,
             transform_8x8_mode_flag: false,
             second_chroma_qp_index_offset: 0,
+            scaling: None,
         }
     }
 

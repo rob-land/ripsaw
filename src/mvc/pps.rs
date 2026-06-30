@@ -9,7 +9,6 @@
 // supplies.
 
 use super::bitstream::{BitReader, ReadError};
-use super::sps::skip_scaling_list;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pps {
@@ -30,6 +29,10 @@ pub struct Pps {
     pub redundant_pic_cnt_present_flag: bool,
     pub transform_8x8_mode_flag: bool,
     pub second_chroma_qp_index_offset: i32,
+    /// Resolved inverse-quant weight matrices when the PPS carries a scaling
+    /// matrix (`pic_scaling_matrix_present_flag`); `None` means use the SPS's
+    /// matrices, or flat (16) if neither is present.
+    pub scaling: Option<crate::mvc::scaling::ScalingLists>,
 }
 
 /// Parse `pic_parameter_set_rbsp()` (§ 7.3.2.2) from the current bit
@@ -60,6 +63,7 @@ pub fn parse_pic_parameter_set(
     let redundant_pic_cnt_present_flag = reader.read_bit()?;
 
     let mut transform_8x8_mode_flag = false;
+    let mut scaling = None;
     // Per § 7.4.2.2, when the extension is absent second_chroma_qp_index_offset
     // defaults to chroma_qp_index_offset.
     let mut second_chroma_qp_index_offset = chroma_qp_index_offset;
@@ -69,12 +73,10 @@ pub fn parse_pic_parameter_set(
         if pic_scaling_matrix_present_flag {
             let extra = if chroma_format_idc != 3 { 2 } else { 6 };
             let count = 6 + extra * (transform_8x8_mode_flag as usize);
-            for i in 0..count {
-                if reader.read_bit()? {
-                    let size = if i < 6 { 16 } else { 64 };
-                    skip_scaling_list(reader, size)?;
-                }
-            }
+            // Fall-back rule A (correct when the SPS carries no scaling
+            // matrix; rule B — falling back to the SPS lists — is TODO for
+            // streams that set both).
+            scaling = Some(crate::mvc::scaling::parse_scaling_matrix(reader, count)?);
         }
         second_chroma_qp_index_offset = reader.read_se()?;
     }
@@ -97,6 +99,7 @@ pub fn parse_pic_parameter_set(
         redundant_pic_cnt_present_flag,
         transform_8x8_mode_flag,
         second_chroma_qp_index_offset,
+        scaling,
     })
 }
 

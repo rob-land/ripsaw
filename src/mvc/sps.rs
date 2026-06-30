@@ -50,6 +50,9 @@ pub struct Sps {
     /// Cropped luma height in samples.
     pub height: u32,
     pub vui_timing: Option<VuiTiming>,
+    /// Resolved inverse-quant weight matrices when the SPS carries a scaling
+    /// matrix (`seq_scaling_matrix_present_flag`); `None` means flat (16).
+    pub scaling: Option<crate::mvc::scaling::ScalingLists>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +91,7 @@ pub fn parse_seq_parameter_set_data(reader: &mut BitReader<'_>) -> Result<Sps, R
     let mut separate_colour_plane_flag = false;
     let mut bit_depth_luma_minus8 = 0;
     let mut bit_depth_chroma_minus8 = 0;
+    let mut scaling = None;
     if HIGH_PROFILES.contains(&profile_idc) {
         chroma_format_idc = reader.read_ue()?;
         if chroma_format_idc == 3 {
@@ -99,12 +103,7 @@ pub fn parse_seq_parameter_set_data(reader: &mut BitReader<'_>) -> Result<Sps, R
         let seq_scaling_matrix_present_flag = reader.read_bit()?;
         if seq_scaling_matrix_present_flag {
             let count = if chroma_format_idc != 3 { 8 } else { 12 };
-            for i in 0..count {
-                if reader.read_bit()? {
-                    let size = if i < 6 { 16 } else { 64 };
-                    skip_scaling_list(reader, size)?;
-                }
-            }
+            scaling = Some(crate::mvc::scaling::parse_scaling_matrix(reader, count)?);
         }
     }
 
@@ -181,6 +180,7 @@ pub fn parse_seq_parameter_set_data(reader: &mut BitReader<'_>) -> Result<Sps, R
         width: 0,
         height: 0,
         vui_timing,
+        scaling,
     };
     let (w, h) = derive_dimensions(&sps);
     sps.width = w;
@@ -213,23 +213,6 @@ fn derive_dimensions(sps: &Sps) -> (u32, u32) {
     (width, height)
 }
 
-/// `scaling_list()` (§ 7.3.2.1.1.1). We don't keep the coefficients —
-/// just consume the exact number of `se(v)` codes so the reader stays
-/// aligned for everything that follows. Shared with the PPS parser.
-pub(crate) fn skip_scaling_list(reader: &mut BitReader<'_>, size: usize) -> Result<(), ReadError> {
-    let mut last_scale: i32 = 8;
-    let mut next_scale: i32 = 8;
-    for _ in 0..size {
-        if next_scale != 0 {
-            let delta_scale = reader.read_se()?;
-            next_scale = (last_scale + delta_scale + 256).rem_euclid(256);
-        }
-        if next_scale != 0 {
-            last_scale = next_scale;
-        }
-    }
-    Ok(())
-}
 
 /// `vui_parameters()` (Annex E § E.1.1). Returns timing info when present;
 /// everything else is consumed to keep the reader aligned.

@@ -109,19 +109,23 @@ static DEQUANT_COEF8: [[[i32; 8]; 8]; 6] = [
 ];
 
 /// Inverse-scale (dequantise) an 8×8 block of coefficient levels in place
-/// (§ 8.5.13.1), flat scaling. Mirrors JM exactly:
-/// `d = (level · 16·normAdjust8x8[m] << (qP/6) + 32) >> 6`.
-pub fn dequant_8x8(levels: &mut [[i32; 8]; 8], qp: i32) {
+/// (§ 8.5.13.1). `weight` is the inverse-quant weight matrix (raster order):
+/// flat 16 for default scaling, or the stream's 8×8 scaling list. Mirrors JM
+/// exactly: `d = (level · normAdjust8x8[m]·weight << (qP/6) + 32) >> 6`.
+pub fn dequant_8x8(levels: &mut [[i32; 8]; 8], qp: i32, weight: &[[i32; 8]; 8]) {
     let m = (qp % 6) as usize;
     let shift = qp / 6;
     for i in 0..8 {
         for j in 0..8 {
-            let scale = (DEQUANT_COEF8[m][i][j] * 16) as i64;
+            let scale = (DEQUANT_COEF8[m][i][j] * weight[i][j]) as i64;
             let x = ((levels[i][j] as i64) * scale) << shift;
             levels[i][j] = ((x + 32) >> 6) as i32;
         }
     }
 }
+
+/// The flat (weight 16) 8×8 inverse-quant matrix — default scaling.
+pub const FLAT_WEIGHT_8X8: [[i32; 8]; 8] = [[16; 8]; 8];
 
 /// Inverse 8×8 residual transform (§ 8.5.13.2), the JM `inverse8x8`
 /// butterfly applied to rows then columns. No final rounding/shift — the
@@ -166,9 +170,10 @@ pub fn inverse_8x8(block: &[[i32; 8]; 8]) -> [[i32; 8]; 8] {
 
 /// Dequantise, inverse-transform, and round an 8×8 residual block: returns
 /// the residual samples `(H + 32) >> 6` to be added to the prediction.
-pub fn reconstruct_residual_8x8(levels: &[[i32; 8]; 8], qp: i32) -> [[i32; 8]; 8] {
+/// `weight` is the 8×8 inverse-quant weight matrix (see [`dequant_8x8`]).
+pub fn reconstruct_residual_8x8(levels: &[[i32; 8]; 8], qp: i32, weight: &[[i32; 8]; 8]) -> [[i32; 8]; 8] {
     let mut d = *levels;
-    dequant_8x8(&mut d, qp);
+    dequant_8x8(&mut d, qp, weight);
     let h = inverse_8x8(&d);
     let mut r = [[0i32; 8]; 8];
     for i in 0..8 {
@@ -422,17 +427,38 @@ mod tests {
 
     #[test]
     fn dequant_8x8_matches_jm_formula() {
-        // JM: d = (level · 16·dequant_coef8[m][i][j] << (qp/6) + 32) >> 6.
-        // DC at qp 0: dequant_coef8[0][0][0] = 20 -> (level·320 + 32) >> 6.
+        // JM: d = (level · weight·dequant_coef8[m][i][j] << (qp/6) + 32) >> 6.
+        // Flat DC at qp 0: dequant_coef8[0][0][0] = 20 -> (level·320 + 32) >> 6.
         let mut levels = [[0i32; 8]; 8];
-        levels[0][0] = -3823; // MB 0's real coefficient (level −3823 at qp 0)
-        dequant_8x8(&mut levels, 0);
+        levels[0][0] = -3823;
+        dequant_8x8(&mut levels, 0, &FLAT_WEIGHT_8X8);
         assert_eq!(levels[0][0], ((-3823i64 * 320 + 32) >> 6) as i32);
         // qp 6 doubles the per-step shift (qp/6 = 1): scale << 1.
         let mut l2 = [[0i32; 8]; 8];
         l2[2][2] = 3; // coef8[0][2][2] = 32
-        dequant_8x8(&mut l2, 6);
+        dequant_8x8(&mut l2, 6, &FLAT_WEIGHT_8X8);
         assert_eq!(l2[2][2], (((3i64 * 32 * 16) << 1) + 32) as i32 >> 6);
+    }
+
+    #[test]
+    fn dequant_8x8_with_scaling_list_matches_jm_mb0() {
+        // MB 0 of the real stream: level −3823 at scan pos 0 (DC), qp 0,
+        // with the stream's 8×8 intra scaling weight 6 at DC (not flat 16).
+        // JM's dequantised DC was −7168; the residual (inverse spreads DC
+        // uniformly, then (H+32)>>6) is −112, so pred 128 → pixel 16.
+        let mut weight = [[16i32; 8]; 8];
+        weight[0][0] = 6;
+        let mut levels = [[0i32; 8]; 8];
+        levels[0][0] = -3823;
+        dequant_8x8(&mut levels, 0, &weight);
+        assert_eq!(levels[0][0], -7168);
+
+        let mut lv = [[0i32; 8]; 8];
+        lv[0][0] = -3823;
+        let r = reconstruct_residual_8x8(&lv, 0, &weight);
+        assert_eq!(r[0][0], -112);
+        // Pred (DC, no neighbours) = 128; reconstructed pixel = clip(128−112).
+        assert_eq!((128 + r[0][0]).clamp(0, 255), 16);
     }
 
     #[test]
@@ -441,7 +467,7 @@ mod tests {
         // (H+32)>>6 applied uniformly.
         let mut levels = [[0i32; 8]; 8];
         levels[0][0] = 12;
-        let r = reconstruct_residual_8x8(&levels, 18);
+        let r = reconstruct_residual_8x8(&levels, 18, &FLAT_WEIGHT_8X8);
         let expected = r[0][0];
         for row in &r {
             for &v in row {
