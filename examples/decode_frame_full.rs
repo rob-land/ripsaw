@@ -66,7 +66,7 @@ fn main() -> anyhow::Result<()> {
                 let cabac_start = (r.position_bits() + 7) / 8;
                 let mut e = CabacEngine::new(&rbsp[cabac_start..]);
                 let mut hctx = MbHeaderContexts::new(slice_qp);
-                let mut rctx = ResidualContexts::new(slice_qp);
+                let mut rctx = ResidualContexts::new(slice_qp, false);
                 let mut last_dquant = 0;
                 let mut qp = slice_qp;
 

@@ -100,6 +100,64 @@ const ABS_I: [[(i32, i32); 5]; 8] = [
     [U, U, U, U, U],
 ];
 
+// ---- P-slice (inter) context-init tables, cabac_init_idc model 0
+// (the test stream's model; extracted verbatim from ctx_tables.h INIT_*_P).
+#[rustfmt::skip]
+const BCBP_P: [[(i32, i32); 4]; 8] = [
+    [(-7,92),(-5,89),(-7,96),(-13,108)],
+    [(-3,46),(-1,65),(-1,57),(-9,93)],
+    [(-3,74),(-9,92),(-8,87),(-23,126)],
+    [U,U,U,U],
+    [(-3,74),(-9,92),(-8,87),(-23,126)],
+    [(5,54),(6,60),(6,59),(6,69)],
+    [(-1,48),(0,68),(-4,69),(-8,88)],
+    [U,U,U,U],
+];
+#[rustfmt::skip]
+const MAP_P: [[(i32, i32); 15]; 8] = [
+    [(-2,85),(-6,78),(-1,75),(-7,77),(2,54),(5,50),(-3,68),(1,50),(6,42),(-4,81),(1,63),(-4,70),(0,67),(2,57),(-2,76)],
+    [U,(11,35),(4,64),(1,61),(11,35),(18,25),(12,24),(13,29),(13,36),(-10,93),(-7,73),(-2,73),(13,46),(9,49),(-7,100)],
+    [(-4,79),(-7,71),(-5,69),(-9,70),(-8,66),(-10,68),(-19,73),(-12,69),(-16,70),(-15,67),(-20,62),(-19,70),(-16,66),(-22,65),(-20,63)],
+    [U,U,U,U,U,U,U,U,U,U,U,U,U,U,U],
+    [U,U,U,U,U,U,U,U,U,U,U,U,U,U,U],
+    [(9,53),(2,53),(5,53),(-2,61),(0,56),(0,56),(-13,63),(-5,60),(-1,62),(4,57),(-6,69),(4,57),(14,39),(4,51),(13,68)],
+    [(3,64),(1,61),(9,63),U,U,U,U,U,U,U,U,U,U,U,U],
+    [U,(7,50),(16,39),(5,44),(4,52),(11,48),(-5,60),(-1,59),(0,59),(22,33),(5,44),(14,43),(-1,78),(0,60),(9,69)],
+];
+#[rustfmt::skip]
+const LAST_P: [[(i32, i32); 15]; 8] = [
+    [(11,28),(2,40),(3,44),(0,49),(0,46),(2,44),(2,51),(0,47),(4,39),(2,62),(6,46),(0,54),(3,54),(2,58),(4,63)],
+    [U,(6,51),(6,57),(7,53),(6,52),(6,55),(11,45),(14,36),(8,53),(-1,82),(7,55),(-3,78),(15,46),(22,31),(-1,84)],
+    [(9,-2),(26,-9),(33,-9),(39,-7),(41,-2),(45,3),(49,9),(45,27),(36,59),U,U,U,U,U,U],
+    [U,U,U,U,U,U,U,U,U,U,U,U,U,U,U],
+    [U,U,U,U,U,U,U,U,U,U,U,U,U,U,U],
+    [(25,7),(30,-7),(28,3),(28,4),(32,0),(34,-1),(30,6),(30,6),(32,9),(31,19),(26,27),(26,30),(37,20),(28,34),(17,70)],
+    [(1,67),(5,59),(9,67),U,U,U,U,U,U,U,U,U,U,U,U],
+    [U,(16,30),(18,32),(18,35),(22,29),(24,31),(23,38),(18,43),(20,41),(11,63),(9,59),(9,64),(-1,94),(-2,89),(-9,108)],
+];
+#[rustfmt::skip]
+const ONE_P: [[(i32, i32); 5]; 8] = [
+    [(-6,76),(-2,44),(0,45),(0,52),(-3,64)],
+    [(-9,77),(3,24),(0,42),(0,48),(0,55)],
+    [(-6,66),(-7,35),(-7,42),(-8,45),(-5,48)],
+    [U,U,U,U,U],
+    [(1,58),(-3,29),(-1,36),(1,38),(2,43)],
+    [(0,70),(-4,29),(5,31),(7,42),(1,59)],
+    [(0,58),(8,5),(10,14),(14,18),(13,27)],
+    [U,U,U,U,U],
+];
+#[rustfmt::skip]
+const ABS_P: [[(i32, i32); 5]; 8] = [
+    [(-2,59),(-4,70),(-4,75),(-8,82),(-17,102)],
+    [(-6,59),(-7,71),(-12,83),(-11,87),(-30,119)],
+    [(-12,56),(-6,60),(-5,62),(-8,66),(-8,76)],
+    [U,U,U,U,U],
+    [(-6,55),(0,58),(0,64),(-3,74),(-10,90)],
+    [(-2,58),(-3,72),(-3,81),(-11,97),U],
+    [(2,40),(0,58),(-3,70),(-6,79),(-8,85)],
+    [U,U,U,U,U],
+];
+
 /// A residual block category, parameterising the significance/level decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidualCat {
@@ -191,25 +249,29 @@ impl ResidualCat {
     }
 
     /// Build the significance/last/level context bank for this category at
-    /// `slice_qp`. The bcbp (coded_block_flag) contexts are built separately
-    /// via [`bcbp_contexts`] since luma 8×8 has none.
-    pub fn coeff_contexts(self, slice_qp: i32) -> CoeffContexts {
+    /// `slice_qp`. `inter` selects the P-slice init tables (cabac_init_idc
+    /// model 0) instead of the I-slice ones. The bcbp (coded_block_flag)
+    /// contexts are built separately via [`bcbp_contexts`].
+    pub fn coeff_contexts(self, slice_qp: i32, inter: bool) -> CoeffContexts {
         let mk = |(m, n): (i32, i32)| CtxState::init(m, n, slice_qp);
         let (_, ml_row, oa_row) = self.rows();
-        let one = ONE_I[oa_row];
-        let abs = ABS_I[oa_row];
+        let (map, last, one_t, abs_t): (&[[(i32, i32); 15]; 8], _, &[[(i32, i32); 5]; 8], _) =
+            if inter { (&MAP_P, &LAST_P, &ONE_P, &ABS_P) } else { (&MAP_I, &LAST_I, &ONE_I, &ABS_I) };
+        let one = one_t[oa_row];
+        let abs = abs_t[oa_row];
         CoeffContexts {
-            sig: MAP_I[ml_row].iter().copied().map(mk).collect(),
-            last: LAST_I[ml_row].iter().copied().map(mk).collect(),
+            sig: map[ml_row].iter().copied().map(mk).collect(),
+            last: last[ml_row].iter().copied().map(mk).collect(),
             level: std::array::from_fn(|i| if i < 5 { mk(one[i]) } else { mk(abs[i - 5]) }),
         }
     }
 
     /// The 4 coded_block_flag contexts for this category at `slice_qp`
-    /// (indexed by 2*upper_bit + left_bit). Unused for luma 8×8.
-    pub fn bcbp_contexts(self, slice_qp: i32) -> [CtxState; 4] {
+    /// (indexed by 2*upper_bit + left_bit). `inter` selects the P tables.
+    pub fn bcbp_contexts(self, slice_qp: i32, inter: bool) -> [CtxState; 4] {
+        let bcbp = if inter { &BCBP_P } else { &BCBP_I };
         let (bcbp_row, _, _) = self.rows();
-        BCBP_I[bcbp_row].map(|(m, n)| CtxState::init(m, n, slice_qp))
+        bcbp[bcbp_row].map(|(m, n)| CtxState::init(m, n, slice_qp))
     }
 }
 
@@ -234,7 +296,7 @@ mod tests {
     #[test]
     fn coeff_contexts_built_from_correct_rows() {
         // Luma 8×8 sig context 0 comes from MAP_I row 2 = (-17, 120).
-        let c = ResidualCat::Luma8x8.coeff_contexts(26);
+        let c = ResidualCat::Luma8x8.coeff_contexts(26, false);
         assert_eq!(c.sig.len(), 15);
         assert_eq!(c.last.len(), 15);
         // Confirm the init matches a direct CtxState::init from row 2 entry 0.
@@ -250,16 +312,16 @@ mod tests {
     fn intra16x16_and_4x4_categories_use_correct_rows() {
         // LUMA_16DC (type 0): map/last row 0 entry 0 = (-7, 93); one row 0
         // entry 0 = (-3, 71); bcbp row 0 entry 0 = (-17, 123).
-        let dc = ResidualCat::Luma16Dc.coeff_contexts(26);
+        let dc = ResidualCat::Luma16Dc.coeff_contexts(26, false);
         assert_eq!(dc.sig[0], CtxState::init(-7, 93, 26));
         assert_eq!(dc.level[0], CtxState::init(-3, 71, 26));
-        assert_eq!(ResidualCat::Luma16Dc.bcbp_contexts(26)[0], CtxState::init(-17, 123, 26));
+        assert_eq!(ResidualCat::Luma16Dc.bcbp_contexts(26, false)[0], CtxState::init(-17, 123, 26));
         // LUMA_4x4 (type 5): map/last row 5 entry 0 = (-13, 108); one/abs
         // row 4 entry 0 = (-12, 92); bcbp row 4 entry 0 = (-3, 70).
-        let l4 = ResidualCat::Luma4x4.coeff_contexts(26);
+        let l4 = ResidualCat::Luma4x4.coeff_contexts(26, false);
         assert_eq!(l4.sig[0], CtxState::init(-13, 108, 26));
         assert_eq!(l4.level[0], CtxState::init(-12, 92, 26));
-        assert_eq!(ResidualCat::Luma4x4.bcbp_contexts(26)[0], CtxState::init(-3, 70, 26));
+        assert_eq!(ResidualCat::Luma4x4.bcbp_contexts(26, false)[0], CtxState::init(-3, 70, 26));
         // 16AC starts at scan position 1.
         assert_eq!(ResidualCat::Luma16Ac.desc().max_num_coeff, 15);
         assert_eq!(ResidualCat::Luma16Ac.desc().pos2ctx_map[0], 1);
@@ -269,9 +331,9 @@ mod tests {
     fn chroma_dc_uses_one_abs_row_5_and_bcbp_row_5() {
         // CHROMA_DC: type2ctx_one[6]=5 -> ONE_I row 5 entry 0 = (-11, 97);
         // type2ctx_bcbp[6]=5 -> BCBP_I row 5 entry 0 = (-1, 74).
-        let c = ResidualCat::ChromaDc.coeff_contexts(26);
+        let c = ResidualCat::ChromaDc.coeff_contexts(26, false);
         assert_eq!(c.level[0], CtxState::init(-11, 97, 26));
-        let b = ResidualCat::ChromaDc.bcbp_contexts(26);
+        let b = ResidualCat::ChromaDc.bcbp_contexts(26, false);
         assert_eq!(b[0], CtxState::init(-1, 74, 26));
     }
 }
