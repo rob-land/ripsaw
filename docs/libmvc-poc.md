@@ -203,29 +203,35 @@ reference-sample low-pass filter (§ 8.3.2.2.1), and `derive_intra_mode`
 verified structurally; the JM tables (`dequant_coef8`, `SNGL_SCAN8x8`)
 were transcribed and diffed against source.
 
-**Remaining for the PoC — the frame-assembly capstone:**
-1. *Complete the residual decode for every MB category* — chroma DC/AC
+**Full intra-frame reconstruction is bit-exact vs JM (pre-deblock).**
+`examples/decode_frame` reconstructs the whole base-view I-slice — CABAC
+decode + `derive_intra_mode` + `predict_8x8`/`predict_chroma_8x8` +
+`reconstruct_residual_8x8` (with the stream's custom scaling list) + clip,
+with neighbour-sample gathering (above-right availability via decode-order
+sequence numbers) — and **all three planes match JM's pre-deblock
+reconstruction exactly**: Y 176×1920, U/V 88×960, 506,880 samples over
+1320 MBs. JM's reference is dumped via a `DUMP_RECON` hook in `exit_picture`
+(before the completeness early-return, so it works for this 11-of-68-row
+slice). Standing this up surfaced the **custom scaling list** (PPS, 8×8
+intra DC weight 6 not 16); now parsed (`scaling.rs`) and validated against
+JM's `qmatrix` dump.
+
+**Remaining for the PoC:**
+1. *Deblocking orchestration* — the `deblock.rs` filter primitives exist
+   (ALPHA/BETA/TC0 + the luma/chroma filters); still needed is the
+   boundary-strength (bS) computation and the edge-iteration loop, then a
+   post-deblock diff against JM (deblock the decoded region, compare the
+   interior away from the concealed-MB boundary).
+2. *Complete the residual decode for every MB category* — chroma DC/AC
    (the `coded_block_flag` neighbour path, tracking each MB's `s_cbp`
    bits) and I_4x4 / I_16x16. The first slice's coded MBs are all I_8×8
-   luma, so the slice loop currently bails on the rest; a full frame
-   contains them.
-2. *Frame buffer + reconstruction loop* — per 8×8 block: derive the mode,
-   gather reference samples from the reconstructed neighbours (with the
-   above-right availability rule), `predict_8x8`, add
-   `reconstruct_residual_8x8`, clip; track per-block modes for the next
-   block's prediction.
-3. *Deblocking orchestration* — the `deblock.rs` filter primitives exist
-   (ALPHA/BETA/TC0 + the luma/chroma filters); still needed is the
-   boundary-strength (bS) computation and the edge-iteration loop.
-4. *Pixel diff* — JM only emits YUV for a **complete** picture, so this
-   needs the first frame's *full* set of slices (the carved single slice
-   is 11 of 68 MB rows). Re-carve the first access unit, reconstruct, and
-   diff Y/U/V; for a pre-deblock checkpoint, `DeblockPicture` can be
-   stubbed via an env gate in the trace build.
+   luma; a full frame (all 68 rows) contains the rest, needed to compare
+   against JM's *complete*-picture YUV output.
 
-The syntax decode (the hard, unforgiving part) is done and the pixel
-primitives are in place; the remaining work is integration + the deblock
-loop, validated the same way — diff against JM, now at the pixel level.
+The syntax decode and the intra-frame pixel pipeline (luma + chroma) are
+done and proven bit-exact on real data. Deblocking is the last layer for
+a frame that matches JM's final output; the inter/dependent-view path
+(§ "How it sequences") is the larger arc beyond the PoC.
 
 ## How it sequences toward full libmvc
 
