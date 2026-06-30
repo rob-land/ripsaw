@@ -22,6 +22,7 @@ pub mod mb_inter;
 pub mod mc;
 pub mod mv;
 pub mod recon;
+pub mod recon_inter;
 pub mod scaling;
 pub mod decoder;
 pub mod ebml;
