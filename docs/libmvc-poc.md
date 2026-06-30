@@ -192,15 +192,40 @@ the macroblock decode has started — validated against JM ldecod bit-exact:
   independent decoder. Now pinned by a regression test.
 
 This validates the entire CABAC + context-model + neighbour-derivation +
-residual stack on real data. **Remaining for the PoC:** the reconstruction
-path — apply the inverse transform/dequant to the decoded coefficients,
-add intra prediction, clip, deblock, crop → diff the *pixels* against
-ffmpeg/JM YUV. The syntax decode (the hard, unforgiving part) is done;
-the remaining work is arithmetic on already-correct coefficients. Chroma
-residual + I_4x4/I_16x16 residual categories are still stubbed in the
-slice loop (this frame's coded MBs are all I_8×8 luma) — they reuse the
-same `decode_residual_block` with their category descriptors plus the
-`coded_block_flag` neighbour path.
+residual stack on real data.
+
+**Reconstruction primitives (built + unit-tested):** the I_8×8 luma pixel
+pipeline is assembled from tested pieces — `transform.rs` `dequant_8x8` +
+`inverse_8x8` + `reconstruct_residual_8x8` + `inverse_scan_8x8` (the
+SNGL_SCAN8x8 zig-zag), `intra.rs` `predict_8x8` + the `Neighbors8x8`
+reference-sample low-pass filter (§ 8.3.2.2.1), and `derive_intra_mode`
+(§ 8.3.1.1, turning the trace's `−1` into the actual mode). Each is
+verified structurally; the JM tables (`dequant_coef8`, `SNGL_SCAN8x8`)
+were transcribed and diffed against source.
+
+**Remaining for the PoC — the frame-assembly capstone:**
+1. *Complete the residual decode for every MB category* — chroma DC/AC
+   (the `coded_block_flag` neighbour path, tracking each MB's `s_cbp`
+   bits) and I_4x4 / I_16x16. The first slice's coded MBs are all I_8×8
+   luma, so the slice loop currently bails on the rest; a full frame
+   contains them.
+2. *Frame buffer + reconstruction loop* — per 8×8 block: derive the mode,
+   gather reference samples from the reconstructed neighbours (with the
+   above-right availability rule), `predict_8x8`, add
+   `reconstruct_residual_8x8`, clip; track per-block modes for the next
+   block's prediction.
+3. *Deblocking orchestration* — the `deblock.rs` filter primitives exist
+   (ALPHA/BETA/TC0 + the luma/chroma filters); still needed is the
+   boundary-strength (bS) computation and the edge-iteration loop.
+4. *Pixel diff* — JM only emits YUV for a **complete** picture, so this
+   needs the first frame's *full* set of slices (the carved single slice
+   is 11 of 68 MB rows). Re-carve the first access unit, reconstruct, and
+   diff Y/U/V; for a pre-deblock checkpoint, `DeblockPicture` can be
+   stubbed via an env gate in the trace build.
+
+The syntax decode (the hard, unforgiving part) is done and the pixel
+primitives are in place; the remaining work is integration + the deblock
+loop, validated the same way — diff against JM, now at the pixel level.
 
 ## How it sequences toward full libmvc
 
