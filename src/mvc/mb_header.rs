@@ -22,8 +22,11 @@ pub struct MbInfo {
     pub transform8x8: bool,
     /// intra_chroma_pred_mode (c_ipred_mode).
     pub c_ipred: u8,
-    /// coded_block_pattern (luma bits 0..3, chroma in 4..5).
+    /// coded_block_pattern (luma bits 0..3, chroma in 4..5). For I_16x16
+    /// this is derived from mb_type (cbp_luma is 0 or 15).
     pub cbp: u8,
+    /// Intra_16x16 prediction mode (0..3), valid when `!i_nxn`.
+    pub i16_pred: u8,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -104,7 +107,17 @@ pub fn decode_mb_header(
     };
     out.push(("mb_type".into(), mb_type_value));
 
-    let mut info = MbInfo { i_nxn, transform8x8: false, c_ipred: 0, cbp: 0 };
+    let mut info = MbInfo { i_nxn, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 };
+
+    // Intra_16x16 (mb_type 1..24): derive pred mode + cbp from mb_type
+    // (mb_type = 1 + predMode + 4·cbpChroma + 12·(cbpLuma!=0), § 7.4.5).
+    if is_i16 && (1..=24).contains(&mb_type_value) {
+        let x = mb_type_value - 1;
+        info.i16_pred = (x % 4) as u8;
+        let cbp_chroma = ((x / 4) % 3) as u8;
+        let cbp_luma = if x >= 12 { 15u8 } else { 0 };
+        info.cbp = cbp_luma | (cbp_chroma << 4);
+    }
 
     if i_nxn {
         // --- transform_size_8x8_flag ---
