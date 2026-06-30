@@ -237,14 +237,29 @@ inverse transform per block, the I_16×16 DC-Hadamard/AC combine, chroma
 available-but-not-Intra_NxN neighbour (I_16×16) contributes mode 2 (DC) to
 mode prediction — distinct from an *unavailable* neighbour.
 
-**Remaining for the PoC:** the deblocking-filter **luma** orchestration.
-The bS/edge/QP loop is built (`decode_frame_full`, `POST=` env) and
-**chroma deblock matches JM exactly**; luma is correct through ~⅔ of the
-frame then a localized off-by-1 at one I_8×8 MB cascades. The luma filter
-primitives were re-verified against JM `loop_filter_normal.c` and match, so
-the remaining bug is a data-dependent edge-ordering detail, not the filter
-math — a focused fix against `test_postdeblock.yuv`. After that, the intra
-decoder produces JM's exact final output for any frame.
+**The base-view intra decoder is complete — bit-exact to JM's FINAL
+output, including the in-loop deblocking filter.** `examples/decode_frame_full`
+(`POST=<jm_output>`) reconstructs the test frame and applies deblocking;
+**all three planes match JM's post-filter YUV exactly** — every MB type
+(I_4×4/I_8×8/I_16×16 + chroma residual) and the full §8.7 loop (bS = 4 on MB
+boundaries / 3 internal, transform-8×8 internal-edge skipping, per-MB QP →
+α/β/tc0, vertical-then-horizontal, luma + chroma).
+
+Finding it required the full-frame diff: a one-pixel typo in
+`filter_luma_strong` (the bS=4 single-tap `q0'` must use **p1**, not p0,
+§8.7.2.4) survived the round-trip unit tests and only bit on the
+non-"small" branch with `p0 != p1`. Localised by instrumenting JM's
+`loop_filter_normal.c` at the first diverging pixel; now pinned by a
+regression test. The lesson from the CABAC tables repeats: round-trip
+self-consistency is necessary but not sufficient — the per-element/per-pixel
+JM diff is the real guard.
+
+**So: compressed bitstream → final decoded pixels, bit-exact vs ldecod, in
+pure Rust, for any intra frame.** What remains is no longer the intra
+PoC — it's the larger arc: inter prediction (P/B slices, motion
+compensation, DPB) and then the dependent view (Annex G inter-view
+prediction) — the actual MVC 3D payoff, and the part that decides whether
+realtime MVC→FSBS is feasible.
 
 The syntax decode and the intra-frame pixel pipeline (luma + chroma) are
 done and proven bit-exact on real data. Deblocking is the last layer for
