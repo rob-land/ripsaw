@@ -14,7 +14,9 @@
 use ripsaw::mvc::annexb::NalSplitter;
 use ripsaw::mvc::bitstream::BitReader;
 use ripsaw::mvc::cabac::CabacEngine;
-use ripsaw::mvc::intra::{derive_intra_mode, predict_8x8, Intra4x4Mode, Neighbors8x8};
+use ripsaw::mvc::intra::{
+    derive_intra_mode, predict_8x8, predict_chroma_8x8, Intra4x4Mode, Neighbors8x8, NeighborsNxN, PlaneMode,
+};
 use ripsaw::mvc::mb_header::{decode_mb_header, MbHeaderContexts, MbInfo, Neighbors};
 use ripsaw::mvc::nal::parse_nal_unit_header;
 use ripsaw::mvc::pps::{parse_pic_parameter_set, Pps};
@@ -81,6 +83,9 @@ fn main() -> anyhow::Result<()> {
                 let mut last_dquant = 0;
 
                 let mut frame = Frame { y: vec![0u8; frame_w * frame_h], w: frame_w };
+                let (cw, ch) = (frame_w / 2, frame_h / 2); // 4:2:0 chroma plane
+                let mut cb = vec![0u8; cw * ch];
+                let mut cr = vec![0u8; cw * ch];
                 let bw = width * 2; // 8×8 blocks across
                 let mut modes = vec![255u8; bw * frame_h / 8]; // per-8×8-block mode grid
                 let mut grid: Vec<MbInfo> = Vec::new();
@@ -139,6 +144,25 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
+                    // Chroma (4:2:0): one 8×8 Cb and Cr block per MB,
+                    // prediction only (this slice carries no chroma residual,
+                    // guaranteed by the cbp & 0x30 bail above). Chroma mode
+                    // numbering: 0=DC, 1=Horizontal, 2=Vertical, 3=Plane.
+                    let cmode = match info.c_ipred {
+                        0 => PlaneMode::Dc,
+                        1 => PlaneMode::Horizontal,
+                        2 => PlaneMode::Vertical,
+                        _ => PlaneMode::Plane,
+                    };
+                    for plane in [&mut cb, &mut cr] {
+                        let pred = predict_chroma_8x8(cmode, &gather_chroma(plane, mbx, mby, cw));
+                        for yy in 0..8 {
+                            for xx in 0..8 {
+                                plane[(mby * 8 + yy) * cw + mbx * 8 + xx] = pred[yy][xx].clamp(0, 255) as u8;
+                            }
+                        }
+                    }
+
                     let eos = e.decode_terminate();
                     grid.push(info);
                     if eos == 1 {
@@ -147,30 +171,46 @@ fn main() -> anyhow::Result<()> {
                     addr += 1;
                 }
 
-                // Diff the decoded region against the JM reference. The last
-                // fully decoded MB row is (grid.len()-1)/width.
+                // Diff the decoded region against the JM reference (Y, then
+                // U, then V). The last fully decoded MB row is
+                // (grid.len()-1)/width.
                 let reference = std::fs::read(&ref_path)?;
-                let rows = ((grid.len() - 1) / width + 1) * 16; // decoded luma lines
-                eprintln!("decoded {} MBs ({} luma rows); diffing {rows}×{frame_w}", grid.len(), rows);
-                let mut mism = 0usize;
-                let mut first: Option<(usize, usize, u8, u8)> = None;
-                for y in 0..rows {
-                    for x in 0..frame_w {
-                        let got = frame.at(x, y) as u8;
-                        let exp = reference[y * frame_w + x];
-                        if got != exp {
-                            mism += 1;
-                            if first.is_none() {
-                                first = Some((x, y, got, exp));
+                let mb_rows = (grid.len() - 1) / width + 1;
+                let y_rows = mb_rows * 16;
+                let c_rows = mb_rows * 8;
+                let y_size = frame_w * frame_h;
+                let c_size = cw * ch;
+                eprintln!("decoded {} MBs ({y_rows} luma rows); diffing Y + U + V", grid.len());
+
+                let check = |name: &str, got: &[u8], plane_w: usize, rows: usize, ref_off: usize| -> bool {
+                    let mut mism = 0usize;
+                    let mut first = None;
+                    for y in 0..rows {
+                        for x in 0..plane_w {
+                            let g = got[y * plane_w + x];
+                            let exp = reference[ref_off + y * plane_w + x];
+                            if g != exp {
+                                mism += 1;
+                                first.get_or_insert((x, y, g, exp));
                             }
                         }
                     }
-                }
-                if mism == 0 {
-                    eprintln!("✓ luma reconstruction MATCHES JM exactly over {rows}×{frame_w} ({} samples)", rows * frame_w);
+                    if mism == 0 {
+                        eprintln!("  ✓ {name}: {rows}×{plane_w} ({} samples) match JM", rows * plane_w);
+                        true
+                    } else {
+                        let (x, y, g, e) = first.unwrap();
+                        eprintln!("  ✗ {name}: {mism} mismatches; first at ({x},{y}): libmvc={g} JM={e}");
+                        false
+                    }
+                };
+
+                let ok_y = check("Y", &frame.y, frame_w, y_rows, 0);
+                let ok_u = check("U", &cb, cw, c_rows, y_size);
+                let ok_v = check("V", &cr, cw, c_rows, y_size + c_size);
+                if ok_y && ok_u && ok_v {
+                    eprintln!("✓ full YUV reconstruction MATCHES JM exactly (pre-deblock)");
                 } else {
-                    let (x, y, g, e) = first.unwrap();
-                    eprintln!("✗ {mism} mismatches; first at ({x},{y}): libmvc={g} JM={e}");
                     std::process::exit(1);
                 }
                 break;
@@ -179,6 +219,33 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Gather an MB's 8×8 chroma reference samples (top 8, left 8, corner) from
+/// a reconstructed chroma plane.
+fn gather_chroma(plane: &[u8], mbx: usize, mby: usize, cw: usize) -> NeighborsNxN<'static> {
+    // NeighborsNxN borrows slices; leak small Vecs (example-only, one frame).
+    let (px, py) = (mbx * 8, mby * 8);
+    let top_avail = mby > 0;
+    let left_avail = mbx > 0;
+    let top: Vec<i32> = if top_avail {
+        (0..8).map(|x| plane[(py - 1) * cw + px + x] as i32).collect()
+    } else {
+        vec![0; 8]
+    };
+    let left: Vec<i32> = if left_avail {
+        (0..8).map(|y| plane[(py + y) * cw + px - 1] as i32).collect()
+    } else {
+        vec![0; 8]
+    };
+    let corner = if top_avail && left_avail { plane[(py - 1) * cw + px - 1] as i32 } else { 0 };
+    NeighborsNxN {
+        top: Box::leak(top.into_boxed_slice()),
+        left: Box::leak(left.into_boxed_slice()),
+        corner,
+        top_avail,
+        left_avail,
+    }
 }
 
 /// Decode-order sequence number of the 8×8 block at (gbx, gby).
