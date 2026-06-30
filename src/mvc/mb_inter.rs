@@ -55,6 +55,13 @@ const INIT_DELTA_QP_P: [[(i32, i32); 4]; 3] = [
     [(0,41),(0,63),(0,63),(0,63)],
     [(0,41),(0,63),(0,63),(0,63)],
 ];
+/// `INIT_B8_TYPE_P[model][0][0..5]` — sub_mb_type contexts (P).
+#[rustfmt::skip]
+const INIT_B8_TYPE_P: [[(i32, i32); 5]; 3] = [
+    [(0,0),(12,49),(0,0),(-4,73),(17,50)],
+    [(0,0),(9,50),(0,0),(-3,70),(10,54)],
+    [(0,0),(6,57),(0,0),(-17,73),(14,57)],
+];
 
 /// CABAC contexts for inter-MB header syntax, built once per slice from the
 /// cabac_init_idc model at the slice QP.
@@ -69,6 +76,8 @@ pub struct InterContexts {
     pub transform: [CtxState; 3],
     /// mb_qp_delta (4 ctx).
     pub delta_qp: [CtxState; 4],
+    /// sub_mb_type (b8_type_contexts[0], 5 ctx).
+    pub b8_type: [CtxState; 5],
 }
 
 impl InterContexts {
@@ -79,6 +88,7 @@ impl InterContexts {
         let cbp = &INIT_CBP_P[m];
         let ts = &INIT_TRANSFORM_SIZE_P[m];
         let dq = &INIT_DELTA_QP_P[m];
+        let b8 = &INIT_B8_TYPE_P[m];
         let mk = |(p, q): (i32, i32)| CtxState::init(p, q, slice_qp);
         InterContexts {
             mb_type: std::array::from_fn(|i| mk(row[i])),
@@ -86,7 +96,24 @@ impl InterContexts {
             cbp: std::array::from_fn(|j| std::array::from_fn(|i| mk(cbp[j][i]))),
             transform: std::array::from_fn(|i| mk(ts[i])),
             delta_qp: std::array::from_fn(|i| mk(dq[i])),
+            b8_type: std::array::from_fn(|i| mk(b8[i])),
         }
+    }
+}
+
+/// Decode a P-slice sub_mb_type (JM readB8_typeInfo_CABAC_p_slice):
+/// 0 = P_L0_8x8, 1 = P_L0_8x4, 2 = P_L0_4x8, 3 = P_L0_4x4.
+pub fn decode_sub_mb_type(e: &mut CabacEngine, ctx: &mut InterContexts) -> i64 {
+    if e.decode_decision(&mut ctx.b8_type[1]) == 1 {
+        0
+    } else if e.decode_decision(&mut ctx.b8_type[3]) == 1 {
+        if e.decode_decision(&mut ctx.b8_type[4]) == 1 {
+            2
+        } else {
+            3
+        }
+    } else {
+        1
     }
 }
 

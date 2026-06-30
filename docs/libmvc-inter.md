@@ -61,17 +61,30 @@ frame** the P-slice's motion compensation reads from.
   interpolation on real data**. Uses JM's decoded IDR (frame 0 of
   inter_post.yuv) as the reference, isolating the MC/MV/residual integration.
 
-## Remaining: full P-slice → then dependent view
+- **FULL P-SLICE reconstruction bit-exact** (`examples/decode_pframe`): the
+  whole P-frame — all 48 MBs (32 P_Skip + P_16×16/16×8/8×16/8×8) — decoded
+  and reconstructed, Y+U+V matching JM's `inter_predeblock.bin` exactly. Per-
+  4×4-block grids (`g_mv`/`g_mvd`/`g_ref`) drive the mvd ctxIdxInc and the
+  full `predict_mv` (median + the 16×8/8×16 directional cases) /
+  `predict_skip_mv`; per-MB `cbpv` (cbp neighbour ctx) and **`t8grid`
+  (transform_size_8x8_flag neighbour ctxIdxInc = left.t8 + up.t8)** grids
+  feed the syntax contexts. `decode_sub_mb_type` (INIT_B8_TYPE_P) handles
+  P_8×8 (all P_L0_8×8 here). Partition→MV→MC→residual per partition, chroma
+  MV = luma MV (4:2:0). The mb_type sequence matches the JM trace
+  (2×7,4,3,1,4,3,3,4,1,1). **Lesson (4th time): a hardcoded `transform[0]`
+  context survived the first-MB pixel test but desynced CABAC three MBs after
+  the first transform-8×8 neighbour — only the whole-frame decode caught it.**
 
-1. **Per-MB MV + ref grids** across the slice (the mvd ctxIdxInc needs the
-   neighbour |mvd| grid anyway) so `predict_mv`/`predict_skip_mv` run for
-   every MB.
-2. **Full P-slice decode** — sub_mb_type (P_8x8, INIT_B8_TYPE_P), ref_idx
-   (trivial here), intra MBs in the P-slice (P-model intra contexts), the
-   mvd/cbp grids → whole frame reconstructed + diffed vs `inter_predeblock.bin`.
+## Remaining: own reference → inter deblock → dependent view
+
+1. ~~Per-MB MV + ref grids~~ DONE (`g_mv`/`g_mvd`/`g_ref`).
+2. ~~Full P-slice decode~~ DONE (`decode_pframe`, bit-exact). Caveat: this
+   stream's P-slice has no intra-in-P MBs and all P_8×8 subs are P_L0_8×8 —
+   `decode_pframe` asserts those, so intra-in-P + non-8×8 sub-partitions are
+   still untested (need a stream that exercises them).
 3. **Own reference frame** — refactor the intra-frame reconstruction out of
    `decode_frame_full` into `recon::decode_intra_frame` so libmvc decodes the
-   base IDR itself (currently borrows JM's).
+   base IDR itself (currently borrows JM's `inter_post.yuv` frame 0).
 4. **Inter deblock** (bS now MV/ref/coded-block dependent) → diff vs
    `inter_post.yuv`.
 5. **B-slices**, then the **dependent view** (Annex G inter-view
