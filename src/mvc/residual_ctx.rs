@@ -103,6 +103,12 @@ const ABS_I: [[(i32, i32); 5]; 8] = [
 /// A residual block category, parameterising the significance/level decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidualCat {
+    /// Intra_16x16 luma DC, the 4×4 Hadamard coeffs (JM LUMA_16DC = type 0).
+    Luma16Dc,
+    /// Intra_16x16 luma AC (15 AC coeffs at scan positions 1..16; type 1).
+    Luma16Ac,
+    /// Luma 4×4 transform block (JM LUMA_4x4 = type 5).
+    Luma4x4,
     /// Luma 8×8 transform block (JM LUMA_8x8 = type 2). No coded_block_flag —
     /// presence is inferred from the coded_block_pattern.
     Luma8x8,
@@ -131,6 +137,12 @@ impl ResidualCat {
     /// for this category: (bcbp, map==last, one==abs).
     const fn rows(self) -> (usize, usize, usize) {
         match self {
+            // LUMA_16DC = type 0: bcbp 0, map/last 0, one/abs 0.
+            ResidualCat::Luma16Dc => (0, 0, 0),
+            // LUMA_16AC = type 1: bcbp 1, map/last 1, one/abs 1.
+            ResidualCat::Luma16Ac => (1, 1, 1),
+            // LUMA_4x4 = type 5: bcbp 4, map/last 5, one/abs 4.
+            ResidualCat::Luma4x4 => (4, 5, 4),
             // LUMA_8x8 = type 2: bcbp 2, map/last 2, one/abs 2.
             ResidualCat::Luma8x8 => (2, 2, 2),
             // CHROMA_DC = type 6: bcbp 5, map/last 6, one/abs 5.
@@ -142,6 +154,20 @@ impl ResidualCat {
 
     pub fn desc(self) -> CatDesc {
         match self {
+            // 4×4 DC/luma: full 16 positions, identity 4×4 maps.
+            ResidualCat::Luma16Dc | ResidualCat::Luma4x4 => CatDesc {
+                max_num_coeff: 16,
+                pos2ctx_map: &POS2CTX_MAP4X4,
+                pos2ctx_last: &POS2CTX_LAST4X4,
+                gt1_cap: 4,
+            },
+            // 16AC: scan positions 1..16, so shift the 4×4 maps by one.
+            ResidualCat::Luma16Ac => CatDesc {
+                max_num_coeff: 15,
+                pos2ctx_map: &POS2CTX_MAP4X4[1..16],
+                pos2ctx_last: &POS2CTX_LAST4X4[1..16],
+                gt1_cap: 4,
+            },
             ResidualCat::Luma8x8 => CatDesc {
                 max_num_coeff: 64,
                 pos2ctx_map: &POS2CTX_MAP8X8,
@@ -218,6 +244,25 @@ mod tests {
         assert_eq!(c.last[0], CtxState::init(23, -13, 26));
         assert_eq!(c.level[0], CtxState::init(-3, 75, 26));
         assert_eq!(c.level[5], CtxState::init(-2, 55, 26));
+    }
+
+    #[test]
+    fn intra16x16_and_4x4_categories_use_correct_rows() {
+        // LUMA_16DC (type 0): map/last row 0 entry 0 = (-7, 93); one row 0
+        // entry 0 = (-3, 71); bcbp row 0 entry 0 = (-17, 123).
+        let dc = ResidualCat::Luma16Dc.coeff_contexts(26);
+        assert_eq!(dc.sig[0], CtxState::init(-7, 93, 26));
+        assert_eq!(dc.level[0], CtxState::init(-3, 71, 26));
+        assert_eq!(ResidualCat::Luma16Dc.bcbp_contexts(26)[0], CtxState::init(-17, 123, 26));
+        // LUMA_4x4 (type 5): map/last row 5 entry 0 = (-13, 108); one/abs
+        // row 4 entry 0 = (-12, 92); bcbp row 4 entry 0 = (-3, 70).
+        let l4 = ResidualCat::Luma4x4.coeff_contexts(26);
+        assert_eq!(l4.sig[0], CtxState::init(-13, 108, 26));
+        assert_eq!(l4.level[0], CtxState::init(-12, 92, 26));
+        assert_eq!(ResidualCat::Luma4x4.bcbp_contexts(26)[0], CtxState::init(-3, 70, 26));
+        // 16AC starts at scan position 1.
+        assert_eq!(ResidualCat::Luma16Ac.desc().max_num_coeff, 15);
+        assert_eq!(ResidualCat::Luma16Ac.desc().pos2ctx_map[0], 1);
     }
 
     #[test]
