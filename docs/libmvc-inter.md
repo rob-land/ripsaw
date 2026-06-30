@@ -53,24 +53,29 @@ frame** the P-slice's motion compensation reads from.
   (§ 8.4.1.1). Unit-tested. mv = mvp + mvd. **This completes the inter MB
   decode side.**
 
-## Remaining: the reconstruction integration → first inter pixels
+- **First inter PIXELS bit-exact** (`examples/decode_inter_mb`): the skip
+  prefix (P_Skip, MV 0 → copy the reference) and the first coded MB
+  (P_16×8: `mc_luma`/`mc_chroma` per partition + the inter residual) match
+  JM's P-frame exactly. MB 32's bottom partition has MV (42,0) — a half-pel
+  horizontal position — so it exercises and **validates the 6-tap mc_luma
+  interpolation on real data**. Uses JM's decoded IDR (frame 0 of
+  inter_post.yuv) as the reference, isolating the MC/MV/residual integration.
 
-The decode side is done; what's left is wiring it to pixels (each step
-diffed vs `inter_predeblock.bin`):
-1. **Refactor the intra-frame reconstruction** out of `decode_frame_full`
-   into a reusable `recon::decode_intra_frame(rbsp, sps, pps) -> Frame` (a
-   ~400-line move). The decoded base IDR is the inter reference frame.
-2. **Per-MB MV + ref grids** across the P-slice (the mvd ctxIdxInc needs the
-   neighbour |mvd| grid anyway), so `predict_mv`/`predict_skip_mv` can run.
-3. **Full P-slice decode** for *every* MB (not just MB 32): sub_mb_type
-   (P_8x8, INIT_B8_TYPE_P), ref_idx (trivial here, single ref), intra MBs in
-   the P-slice (P-model intra contexts), the mvd/cbp grids.
-4. **MC + residual reconstruct**: per partition, `mc_luma`/`mc_chroma` from
-   the reference at mv, + the inter residual, clip. Diff vs the JM dump.
+## Remaining: full P-slice → then dependent view
 
-The first meaningful inter pixel is MB 32's bottom 16×8 partition (mvd 42 →
-~10.5px horizontal motion, mvp 0 since its neighbours are MV-0 skips): MC at
-that MV + residual is the real test of the MC interpolation.
+1. **Per-MB MV + ref grids** across the slice (the mvd ctxIdxInc needs the
+   neighbour |mvd| grid anyway) so `predict_mv`/`predict_skip_mv` run for
+   every MB.
+2. **Full P-slice decode** — sub_mb_type (P_8x8, INIT_B8_TYPE_P), ref_idx
+   (trivial here), intra MBs in the P-slice (P-model intra contexts), the
+   mvd/cbp grids → whole frame reconstructed + diffed vs `inter_predeblock.bin`.
+3. **Own reference frame** — refactor the intra-frame reconstruction out of
+   `decode_frame_full` into `recon::decode_intra_frame` so libmvc decodes the
+   base IDR itself (currently borrows JM's).
+4. **Inter deblock** (bS now MV/ref/coded-block dependent) → diff vs
+   `inter_post.yuv`.
+5. **B-slices**, then the **dependent view** (Annex G inter-view
+   prediction) — the 3D payoff and the realtime decider.
 
 ## P-MB decode order (from the trace, MB 32)
 
