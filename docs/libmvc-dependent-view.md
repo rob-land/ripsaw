@@ -67,23 +67,27 @@ L0 reference, diffed vs `*_ViewId0001.yuv`.
 
 ### Probe finding (`examples/decode_mvc_base`)
 
-Running the existing intra decoder on the first base IDR slice gets the
-structure right but **mostly produces zeros** — a concrete gap, not a parse
-failure:
-- **SPS/PPS/slice-header parse is correct** on real content: 1920×1088 (120×68
-  MBs), High profile, CABAC; the slice header ends at **bit 58, matching the
-  JM trace** (16-bit `frame_num`/POC, IDR ref-marking). `pic_init_qp_minus26=0`
-  and `slice_qp_delta=-26` → **slice_qp = 0** (JM uses the same).
-- First MB (from the trace): `mb_type 0` (I_NxN), `transform_size_8x8_flag 1`
-  (I_8x8), then `Luma8x8 DC sng **-3823**` — a *huge* coefficient level.
-- The decode emits 69 550 non-zero / 2 088 960 pixels (sparse), first at
-  (1064, 40): the **slice_qp = 0 / near-lossless path is the gap**. The
-  synthetic tests were all QP 28 (small coefficients, qp_per = qp/6 = 4). At
-  QP 0 (qp_per = 0) the residual levels are enormous and the 4×4/8×8 dequant
-  shift differs; the result over/under-flows and clips to 0. The PPS also
-  carries a **full custom scaling matrix** (`pic_scaling_matrix_present_flag=1`,
-  multiple lists) the dequant must apply.
-- So the next step is **not** parsing — it's the **low-QP dequant + large
-  residual levels** (and the PPS scaling matrix), then multi-slice. Validate
-  against `*_ViewId0000.yuv` (note: JM ground truth is post-deblock; this slice
-  has `disable_deblocking_filter_idc=1`, so pre == post for it).
+Running the intra decoder on the first base IDR slice:
+- **Parse is bit-exact** on real content: 1920×1088 (120×68 MBs), High,
+  CABAC; the slice header ends at **bit 58, matching the JM trace** (16-bit
+  `frame_num`/POC). `pic_init_qp_minus26=0`, `slice_qp_delta=-26` →
+  **slice_qp = 0** (JM uses the same).
+- **CABAC is bit-exact**: MB0 = `mb_type 0`/`transform_size_8x8 1` (I_8x8),
+  first 8×8 coeff level `-3823` — exactly the trace.
+- **The gap was the custom scaling matrix** (now fixed). The PPS carries a
+  full scaling matrix (`pic_scaling_matrix_present_flag=1`); its intra-8×8
+  list has DC weight 6, not 16. At slice_qp=0 the flat-16 dequant over-scaled
+  (−3823 → residual −299, clipped to 0); with the real list the residual is
+  −112 (JM's ~−113). Wiring it in (commit "apply custom scaling matrices")
+  took the base view from 0 → **65+ matching luma rows**.
+- **Remaining gaps** (both needed before the base frame fully decodes):
+  1. A specific intra case — the decode diverges at MB 548, an I_8×8 with
+     `intra4x4_pred_mode 4` (Diagonal_Down_Right), the first occurrence of that
+     mode; likely a mode/derivation or 8×8 reference-filter edge case the
+     synthetic QP-28 frame didn't exercise (value 40 vs JM 21 at MB-local
+     (1,4)). Diff: instrument the MB-548 8×8 prediction vs JM.
+  2. **Multi-slice** (items above) — only slice 0 is decoded; slices 1–5 need
+     `first_mb_in_slice` + per-slice CABAC re-init + cross-slice neighbour
+     unavailability.
+  (`disable_deblocking_filter_idc=1` for these slices, so the JM YUV ground
+  truth is also pre-deblock — a clean target.)
