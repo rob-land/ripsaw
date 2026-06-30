@@ -226,19 +226,25 @@ ffmpeg/x264 test frame (`scripts/gen-intra-test-frame.sh`) that mixes
 I_4×4 / I_8×8 / I_16×16 + chroma residual + deblocking: **3075 elements /
 48 MBs match the JM trace exactly** (`examples/decode_slice_full`).
 
-**Remaining for the PoC:**
-1. *Extend reconstruction to all MB types* — the syntax decode is done and
-   the transform/prediction primitives all exist (`predict_4x4`,
-   `predict_16x16`, `luma_dc_4x4` Hadamard, `chroma_dc_2x2`,
-   `reconstruct_residual_4x4`). Needed: have `decode_mb_residual` return the
-   per-block coefficients, then per MB type apply dequant + transform +
-   prediction (the I_16×16 DC-Hadamard-then-AC combine, chroma QP mapping
-   § 8.5.8, and per-4×4-block predict/reconstruct interleave). Validate the
-   pixels against `test_predeblock.bin`.
-2. *Deblocking orchestration* — filter primitives exist in `deblock.rs`;
-   still needed is the bS computation + edge-iteration loop, then a
-   post-deblock diff against JM's `-o` output (the test frame's deblock is
-   active — 1715 samples change — so it's a real validation target).
+**Full intra-frame reconstruction is bit-exact for every MB type
+(pre-deblock).** `examples/decode_frame_full` reconstructs I_4×4 / I_8×8 /
+I_16×16 luma (per-block predict + residual interleave with a 4×4-granular
+mode grid; I_16×16 whole-MB predict + DC-Hadamard residual) and 4:2:0
+chroma, and **all three planes match JM's pre-deblock dump exactly** on the
+mixed test frame. `decode_mb_residual` returns `MbResidual` (dequant +
+inverse transform per block, the I_16×16 DC-Hadamard/AC combine, chroma
+2×2 DC Hadamard + AC, chroma QP § 8.5.8). One subtlety that bit: an
+available-but-not-Intra_NxN neighbour (I_16×16) contributes mode 2 (DC) to
+mode prediction — distinct from an *unavailable* neighbour.
+
+**Remaining for the PoC:** the deblocking-filter **luma** orchestration.
+The bS/edge/QP loop is built (`decode_frame_full`, `POST=` env) and
+**chroma deblock matches JM exactly**; luma is correct through ~⅔ of the
+frame then a localized off-by-1 at one I_8×8 MB cascades. The luma filter
+primitives were re-verified against JM `loop_filter_normal.c` and match, so
+the remaining bug is a data-dependent edge-ordering detail, not the filter
+math — a focused fix against `test_postdeblock.yuv`. After that, the intra
+decoder produces JM's exact final output for any frame.
 
 The syntax decode and the intra-frame pixel pipeline (luma + chroma) are
 done and proven bit-exact on real data. Deblocking is the last layer for
