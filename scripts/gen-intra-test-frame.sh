@@ -15,7 +15,9 @@
 #   trace_dec.txt          per-element CABAC trace
 #
 # Needs: ffmpeg (libx264), and ldecod-trace built with the DUMP_RECON hook
-# (scripts/build-ldecod-trace.sh + the image.c exit_picture dump).
+# (scripts/build-ldecod-trace.sh + the image.c exit_picture dump). The hook
+# honours DUMP_RECON_APPEND=1 to accumulate every decoded picture's pre-deblock
+# YUV (decode order) instead of overwriting — used for the per-frame B dumps.
 set -euo pipefail
 OUT="${OUT:-$HOME/mvc-test}"
 LDECOD="${LDECOD:-$HOME/.local/bin/ldecod-trace}"
@@ -51,7 +53,12 @@ ffmpeg -y -f lavfi -i "testsrc=size=128x96:rate=4:duration=1" -frames:v 4 \
   -x264-params "cabac=1:keyint=8:bframes=2:b-pyramid=none:ref=2:b-adapt=0" \
   -pix_fmt yuv420p -bsf:v h264_mp4toannexb -f h264 bframe.h264
 DUMP_RECON="$OUT/bframe_predeblock.bin" "$LDECOD" -i bframe.h264 -o bframe_post.yuv >/dev/null
-echo "wrote: bframe.h264 bframe_post.yuv bframe_predeblock.bin (B-frames)"
+# Per-frame pre-deblock dump (DUMP_RECON_APPEND): every decoded picture in
+# DECODE order (I, P, B-POC2, B-POC4), each w*h*3/2 bytes. Isolates each
+# frame's reconstruction from deblock for the B arc's pixel validation.
+rm -f "$OUT/bframe_predeblock_all.bin"
+DUMP_RECON="$OUT/bframe_predeblock_all.bin" DUMP_RECON_APPEND=1 "$LDECOD" -i bframe.h264 -o /dev/null >/dev/null
+echo "wrote: bframe.h264 bframe_post.yuv bframe_predeblock.bin bframe_predeblock_all.bin (B-frames)"
 
 python3 - <<'PY'
 pre=open('test_predeblock.bin','rb').read(); post=open('test_postdeblock.yuv','rb').read()
