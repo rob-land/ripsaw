@@ -35,9 +35,14 @@ frame** the P-slice's motion compensation reads from.
   then the UEG3 magnitude (`unary_exp_golomb_mv`, exp_start 8, EG3 suffix) +
   bypass sign; `mvd_ctx_inc` from the neighbour-|mvd| sum. INIT_MV_RES_P
   transcribed (3 models).
-  `examples/decode_pslice` validates skip prefix + the first coded MB's
-  mb_type + mvd (P_16x8, mvd 0,0,42,0) = **70 elements match JM** (incl. the
-  magnitude-42 EG3 suffix).
+- **Full P-MB residual** (`decode_pslice`): coded_block_pattern (shared
+  `decode_cbp_ctx`), transform_size_8x8_flag, mb_qp_delta (shared
+  `decode_dquant_ctx`), and the inter residual (`decode_mb_residual` with
+  `is_inter`: cbf default_bit 0, 4×4/8×8 dispatch, P-model residual contexts
+  via `ResidualContexts::new(qp, true)`). The first coded MB decodes end to
+  end (skip → mb_type → mvd → cbp → transform → qp → residual →
+  end_of_slice) = **88 elements match JM** (incl. the run/level residual).
+  Tables: INIT_{CBP,TRANSFORM_SIZE,DELTA_QP,BCBP,MAP,LAST,ONE,ABS}_P.
 - **Motion compensation** (`mc.rs`): `mc_luma` (quarter-pel 6-tap, all 16
   fractional positions) + `mc_chroma` (eighth-pel bilinear), border-clamped.
   Unit-tested structurally; the authoritative check is the full-frame pixel
