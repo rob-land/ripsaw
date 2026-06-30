@@ -19,6 +19,7 @@ pub mod residual;
 pub mod residual_ctx;
 pub mod mb_residual;
 pub mod mb_inter;
+pub mod mc;
 pub mod scaling;
 pub mod decoder;
 pub mod ebml;
