@@ -121,19 +121,35 @@ MBs (spatial direct), then coded MBs. The first coded MB is `mb_type 2` with 4
 `mvd_l0` + cbp/residual. mb_type values seen include 0 (B_Direct_16x16), 2, 3,
 13, 22 (B_8x8), and an intra suffix (≥ 23).
 
-What B needs beyond the (done) P inter core:
-- **B `mb_type` CABAC tree** (JM `readMB_typeInfo_CABAC` B branch) → act_sym
-  0..48: B_Direct_16x16, B_{L0,L1,Bi}_{16x16,16x8,8x16}, B_8x8, intra suffix.
-  And **B `sub_mb_type`** (12 types incl. direct/L0/L1/Bi at 8x8/8x4/4x8/4x4).
+### B syntax decode — DONE (bit-exact vs trace, `examples/decode_bslice`)
+
+- **B `mb_type` CABAC tree** (`decode_b_mb_type`, JM `readMB_typeInfo_CABAC`
+  B branch) → act_sym 0..48 incl. the I_16x16 suffix; `interpret_b_mb_type`
+  maps it to partition shape + per-partition pdir (L0/L1/Bi) per
+  `interpret_mb_mode_B`. **B `sub_mb_type`** (`decode_b_sub_mb_type`, 12 types).
+  Contexts: `INIT_MB_TYPE_B` (`mb_type_contexts[2]`), `INIT_B8_TYPE_B`
+  (`b8_type_contexts[1]`); `decode_mb_skip_flag_b` (ctx 7+a+b, inverted).
+- **mvd read order** confirmed from the trace: list-major — all L0 partitions
+  (raster), then all L1; a Bi partition reads in both; B_Direct/B_Skip read
+  none. B_8x8 expands to per-b8 sub-partitions (8×8/8×4/4×8/4×4) per its
+  sub_mb_type's pdir. The first B-slice (282 elements: skip, mb_type,
+  sub_mb_type, mvd, cbp/transform/qp, full residual) matches JM exactly.
+- Two trace conventions pinned: 16×16 single-MB partitions label components
+  `mvd{k}_l{list}` (else `mvd_l{list}`); `end_of_slice_flag` traced only when 0.
+
+### B reconstruction — still TODO (pixels)
+
 - **Two reference lists** L0/L1 with the § 8.2.4.2.3 POC-based default order;
   POC from `pic_order_cnt_lsb` (already parsed).
 - **Spatial direct** (§ 8.4.1.2.2): MVs from spatial neighbours + the
   colZeroFlag test against the **co-located** ref's MV/refIdx → need to store
-  the co-located picture's per-4×4 MV/ref grid (the P-frame's, kept from step
-  4's decode). B_Skip = B_Direct with no residual.
+  the co-located picture's per-4×4 MV/ref grid (the P-frame's). B_Skip =
+  B_Direct with no residual.
 - **Bi-prediction**: average the L0 and L1 `mc_luma`/`mc_chroma` predictions
   (§ 8.4.2.3, default; `weighted_bipred_idc` here 0).
 - **B deblock**: the bS rules extend to two lists (compare both refs/MVs).
+- **Per-B-frame predeblock dump**: extend the DUMP_RECON hook (currently keeps
+  only the last decoded frame) for pixel-exact B validation.
 
 ## P-MB decode order (from the trace, MB 32)
 
