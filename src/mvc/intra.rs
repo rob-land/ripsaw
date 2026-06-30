@@ -210,6 +210,31 @@ pub fn predict_4x4(mode: Intra4x4Mode, n: &Neighbors4x4) -> [[i32; 4]; 4] {
     p
 }
 
+/// Derive a block's actual Intra_4x4 / Intra_8x8 prediction mode from its
+/// neighbours and the decoded syntax (§ 8.3.1.1 / § 8.3.2.1, identical
+/// algorithm). `mode_a` / `mode_b` are the left / above neighbour block's
+/// modes, or `None` when that neighbour is unavailable or not coded as an
+/// Intra_NxN block — in which case `dcPredModePredictedFlag` is set and the
+/// predicted mode is DC (2). `raw` is the decoded value:
+/// −1 for `prev_intra4x4_pred_mode_flag = 1` (use the predicted mode), or
+/// 0..=7 for `rem_intra4x4_pred_mode`.
+pub fn derive_intra_mode(mode_a: Option<u8>, mode_b: Option<u8>, raw: i64) -> u8 {
+    let pred = match (mode_a, mode_b) {
+        (Some(a), Some(b)) => a.min(b),
+        _ => 2, // dcPredModePredictedFlag -> DC
+    };
+    if raw < 0 {
+        pred
+    } else {
+        let rem = raw as u8;
+        if rem < pred {
+            rem
+        } else {
+            rem + 1
+        }
+    }
+}
+
 /// Reference samples for an Intra_8x8 luma block (§ 8.3.2.2). `top` holds
 /// p[0..15][-1] (the row above plus above-right; the caller replicates
 /// p[7][-1] into indices 8..16 when the above-right block is unavailable),
@@ -819,6 +844,26 @@ mod tests {
             corner_avail: false,
         };
         assert_eq!(predict_8x8(Intra4x4Mode::Dc, &raw), [[128; 8]; 8]);
+    }
+
+    #[test]
+    fn derive_intra_mode_rules() {
+        // prev_flag=1 (raw −1): take the predicted mode = min(a, b).
+        assert_eq!(derive_intra_mode(Some(4), Some(6), -1), 4);
+        assert_eq!(derive_intra_mode(Some(6), Some(1), -1), 1);
+        // Either neighbour unavailable -> DC (2) predicted.
+        assert_eq!(derive_intra_mode(None, Some(0), -1), 2);
+        assert_eq!(derive_intra_mode(Some(0), None, -1), 2);
+        assert_eq!(derive_intra_mode(None, None, -1), 2);
+        // rem path: rem < pred -> rem; rem >= pred -> rem + 1.
+        // pred = min(3,5) = 3. rem=2 (<3) -> 2.
+        assert_eq!(derive_intra_mode(Some(3), Some(5), 2), 2);
+        // pred = 3, rem=3 (>=3) -> 4.
+        assert_eq!(derive_intra_mode(Some(3), Some(5), 3), 4);
+        // pred = 3, rem=7 -> 8 (the 9th mode, valid for the larger rem).
+        assert_eq!(derive_intra_mode(Some(3), Some(3), 7), 8);
+        // pred = DC(2) when a neighbour is missing; rem=2 (>=2) -> 3.
+        assert_eq!(derive_intra_mode(None, Some(0), 2), 3);
     }
 
     #[test]
