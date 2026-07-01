@@ -68,6 +68,10 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         .iter()
         .map(|r| (Plane { data: &r.y, w: fw, h: fh }, Plane { data: &r.cb, w: cw, h: ch }, Plane { data: &r.cr, w: cw, h: ch }))
         .collect();
+    // A P-slice needs at least one reference; an empty list means the stream
+    // was entered mid-GOP (no preceding IDR/anchor). Bail cleanly so the
+    // caller falls back rather than indexing an empty ref list.
+    anyhow::ensure!(!ref_planes.is_empty(), "P-slice with no reference (stream doesn't start at a clean GOP?)");
     let scaling = pps.scaling.clone().or_else(|| sps.scaling.clone()).unwrap_or_else(ScalingLists::flat);
 
     let mut y = OutPlane::new(fw, fh);
