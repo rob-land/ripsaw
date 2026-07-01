@@ -102,13 +102,13 @@ fn main() -> anyhow::Result<()> {
                 };
                 let mut r = ripsaw::mvc::bitstream::BitReader::new(&rbsp);
                 match parse_slice_header(&mut r, idr_pic_flag, header.nal_ref_idc, sps, pps) {
-                    Ok(sh) if printed < 8 => {
+                    Ok(sh) if printed < 40 => {
                         printed += 1;
                         eprintln!(
-                            "{} slice: type={:?} first_mb={} frame_num={} poc_lsb={:?} qp_delta={} view_id={:?}",
+                            "{} slice: type={:?} first_mb={} frame_num={} poc_lsb={:?} qp_delta={} num_ref_l0={:?} view_id={:?}",
                             if is_mvc { "MVC" } else { "base" },
                             sh.slice_kind, sh.first_mb_in_slice, sh.frame_num,
-                            sh.pic_order_cnt_lsb, sh.slice_qp_delta,
+                            sh.pic_order_cnt_lsb, sh.slice_qp_delta, sh.num_ref_idx_l0_active_minus1,
                             header.mvc_extension.as_ref().map(|e| e.view_id),
                         );
                     }
