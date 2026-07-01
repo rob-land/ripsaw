@@ -34,6 +34,23 @@ first AU's dependent frame differs from the base by only 4683/3,110,400 bytes
 JM's base MB decode and injects a libavcodec base; for ground truth we just
 want JM to decode everything, hence `DecodeAllLayers=1`.)
 
+## Status: inter-view prediction bit-exact (the 3D payoff)
+
+`examples/decode_mvc_dep` decodes the base IDR (view 0, multi-slice) with
+libmvc, then the **dependent-view anchor's first slice** (view 1, NAL 20 — a
+P-slice whose single L0 reference is the base picture) using the base frame as
+the inter-view reference. **All 176 luma rows of slice 0 match JM's dependent
+ground truth exactly.** Inter-view prediction is sample-only in Stereo High, so
+`recon_inter::decode_p_frame` is reused unchanged. Two things it needed:
+- `decode_p_frame` gained an `idr` param: the dependent anchor is
+  `idr_pic_flag = 1` (idr_pic_id + simple ref marking) yet `slice_type = P`.
+- the dependent slices reference the subset SPS (NAL 15) + their own PPS (the
+  NAL 8 *after* the subset SPS), resolved separately from the base's.
+
+Remaining: multi-slice P (dependent slices 1–5, the same slice-boundary
+threading as the intra multi-slice), then temporal (non-anchor) dependent
+frames + B, then the Ripsaw runner integration.
+
 ## What libmvc needs (the gaps)
 
 The dependent-view decode reuses the **entire inter core** (MC, MV prediction,
