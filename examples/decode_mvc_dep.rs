@@ -72,44 +72,36 @@ fn main() -> anyhow::Result<()> {
     let bok = base.y[..fw * 1080].iter().zip(&bjm[..fw * 1080]).all(|(a, b)| a == b);
     eprintln!("base view (inter-view ref) matches JM: {bok}");
 
-    // Dependent anchor slice 0: a P-slice, single ref = the base picture.
-    let (idc, ref rbsp0) = dep_slices[0];
-    {
-        use ripsaw::mvc::slice_header::parse_slice_header;
-        let mut r = BitReader::new(rbsp0);
-        // The dependent ANCHOR is IDR-marked (non_idr_flag=0) even though it's
-        // a P-slice — the IDR header layout (idr_pic_id + simple ref marking).
-        let sh = parse_slice_header(&mut r, true, idc, dsps, dpps)?;
-        eprintln!(
-            "dep slice0 hdr: type {} first_mb {} qp_delta {} slice_qp {} num_ref_l0 {:?} cabac_idc {:?} header_bits {}",
-            sh.slice_type, sh.first_mb_in_slice, sh.slice_qp_delta, 26 + dpps.pic_init_qp_minus26 + sh.slice_qp_delta,
-            sh.num_ref_idx_l0_active_minus1, sh.cabac_init_idc, r.position_bits()
-        );
-    }
-    let (pf, _mf) = decode_p_frame(rbsp0, idc, true, dsps, dpps, &base)?;
-    eprintln!("decode_p_frame nonzero luma pixels: {}", pf.y.iter().filter(|&&p| p != 0).count());
+    // Dependent anchor: a multi-slice P-frame whose single L0 ref is the base
+    // picture (inter-view). The anchor is IDR-marked (non_idr_flag=0) even
+    // though slice_type=P — the IDR header layout.
+    let idc = dep_slices[0].0;
+    let dref: Vec<&[u8]> = dep_slices.iter().map(|(_, s)| s.as_slice()).collect();
+    eprintln!("dependent anchor: {} slices", dref.len());
+    let (pf, _mf) = decode_p_frame(&dref, idc, true, dsps, dpps, &base)?;
 
-    // Slice 0 covers first_mb_in_slice=0 .. next slice; validate the rows it
-    // filled (non-zero) against the dependent-view ground truth.
+    // Diff the whole dependent frame (luma + chroma, cropped to 1080) vs JM.
     let djm = std::fs::read(&dep_truth)?;
-    let mut matched = 0;
-    let mut bad = None;
-    'outer: for y in 0..1080 {
-        if pf.y[y * fw..(y + 1) * fw].iter().all(|&p| p == 0) {
-            break;
-        }
-        for x in 0..fw {
-            if pf.y[y * fw + x] != djm[y * fw + x] {
-                bad = Some((x, y, pf.y[y * fw + x], djm[y * fw + x]));
-                break 'outer;
+    let (jysz, jcsz) = (fw * 1080, cw * 540);
+    let chk = |name: &str, got: &[u8], w: usize, h: usize, off: usize| -> bool {
+        for yy in 0..h {
+            for xx in 0..w {
+                if got[yy * w + xx] != djm[off + yy * w + xx] {
+                    eprintln!("✗ dep {name} mismatch at ({xx},{yy}) [MB ({},{})]: libmvc {} vs JM {}", xx / 16, yy / 16, got[yy * w + xx], djm[off + yy * w + xx]);
+                    return false;
+                }
             }
         }
-        matched += 1;
-    }
-    let _ = cw;
-    match bad {
-        Some((x, y, g, j)) => eprintln!("✗ dependent slice 0: {matched} luma rows match JM, then ({x},{y}) [MB ({},{})]: libmvc {g} vs JM {j}", x / 16, y / 16),
-        None => eprintln!("✓ dependent anchor slice 0: all {matched} luma rows match JM — INTER-VIEW prediction bit-exact"),
+        eprintln!("  ✓ dep {name}: {h}×{w} match JM");
+        true
+    };
+    let oy = chk("Y", &pf.y, fw, 1080, 0);
+    let ou = chk("U", &pf.cb, cw, 540, jysz);
+    let ov = chk("V", &pf.cr, cw, 540, jysz + jcsz);
+    if oy && ou && ov {
+        eprintln!("✓ FULL dependent view (view 1, {} slices) decoded by libmvc via inter-view prediction — bit-exact vs JM", dref.len());
+    } else {
+        std::process::exit(1);
     }
     Ok(())
 }

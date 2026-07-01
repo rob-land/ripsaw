@@ -48,7 +48,10 @@ fn partitions(mb_type: i64) -> Vec<(usize, usize, usize, usize, Option<Direction
 /// P-slice, `true` for an MVC dependent-view ANCHOR (idr_pic_flag = 1 — still
 /// a P-slice, but IDR-marked: idr_pic_id + simple ref marking). Its single L0
 /// reference is `reference` (the base-view picture, inter-view prediction).
-pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, reference: &Frame) -> anyhow::Result<(Frame, MotionField)> {
+/// `slices` are the P-slice's coded slices in decode order (single-slice
+/// frames pass `&[rbsp]`); slice boundaries break MV prediction / neighbour
+/// contexts (cross-slice neighbours unavailable). See `decode_intra_frame`.
+pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, reference: &Frame) -> anyhow::Result<(Frame, MotionField)> {
     let width = sps.pic_width_in_mbs as usize;
     let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
     let (cw, ch) = (fw / 2, fh / 2);
@@ -58,15 +61,6 @@ pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &
     let rpy = Plane { data: &reference.y, w: fw, h: fh };
     let rpcb = Plane { data: &reference.cb, w: cw, h: ch };
     let rpcr = Plane { data: &reference.cr, w: cw, h: ch };
-
-    let mut sr = BitReader::new(rbsp);
-    let sh = parse_slice_header(&mut sr, idr, nal_ref_idc, sps, pps)?;
-    let slice_qp = 26 + pps.pic_init_qp_minus26 + sh.slice_qp_delta;
-    let idc = sh.cabac_init_idc.unwrap_or(0);
-    let cabac_start = (sr.position_bits() + 7) / 8;
-    let mut e = CabacEngine::new(&rbsp[cabac_start..]);
-    let mut ctx = InterContexts::new(idc, slice_qp);
-    let mut rctx = ResidualContexts::new(slice_qp, true);
     let scaling = pps.scaling.clone().or_else(|| sps.scaling.clone()).unwrap_or_else(ScalingLists::flat);
 
     let mut y = vec![0u8; ysz];
@@ -81,33 +75,52 @@ pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &
     let mut cbpv: Vec<u8> = Vec::new();
     let mut mb_info: Vec<MbInfo> = Vec::new();
     let mut qp_grid: Vec<i32> = Vec::new();
-    let mut last_dquant = 0;
-    let mut qp = slice_qp;
-    let mut addr = 0usize;
+    let mut sh_last = None;
 
-    let nb = |g_mv: &[(i32, i32)], g_ref: &[i32], bx: i32, by: i32| -> Neighbour {
+    // Neighbour accessor: unavailable if out of frame, undecoded, or in an
+    // earlier slice (its MB address < the current slice's first MB).
+    let nb = |g_mv: &[(i32, i32)], g_ref: &[i32], bx: i32, by: i32, slice_start: usize| -> Neighbour {
         if bx < 0 || by < 0 || bx >= bw4 as i32 || by >= bh4 as i32 {
+            return None;
+        }
+        if (by as usize / 4) * width + (bx as usize / 4) < slice_start {
             return None;
         }
         let i = by as usize * bw4 + bx as usize;
         if g_ref[i] < 0 { None } else { Some((g_mv[i].0, g_mv[i].1, g_ref[i])) }
     };
 
+    for rbsp in slices {
+        let mut sr = BitReader::new(rbsp);
+        let sh = parse_slice_header(&mut sr, idr, nal_ref_idc, sps, pps)?;
+        let slice_qp = 26 + pps.pic_init_qp_minus26 + sh.slice_qp_delta;
+        let idc = sh.cabac_init_idc.unwrap_or(0);
+        let slice_start = sh.first_mb_in_slice as usize;
+        let cabac_start = (sr.position_bits() + 7) / 8;
+        let mut e = CabacEngine::new(&rbsp[cabac_start..]);
+        let mut ctx = InterContexts::new(idc, slice_qp);
+        let mut rctx = ResidualContexts::new(slice_qp, true);
+        let mut last_dquant = 0;
+        let mut qp = slice_qp;
+        let mut addr = slice_start;
+        sh_last = Some(sh);
+
     loop {
         let mbx = addr % width;
         let mby = addr / width;
         let (mbx4, mby4) = (mbx * 4, mby * 4);
+        let mb_top = addr >= width && addr - width >= slice_start;
         let left_ns = if mbx != 0 { (!skip_grid[addr - 1]) as u32 } else { 0 };
-        let up_ns = if addr >= width { (!skip_grid[addr - width]) as u32 } else { 0 };
+        let up_ns = if mb_top { (!skip_grid[addr - width]) as u32 } else { 0 };
         let (is_skip, _) = decode_mb_skip_flag(&mut e, &mut ctx, left_ns, up_ns);
         skip_grid.push(is_skip);
 
         if is_skip {
-            let a = nb(&g_mv, &g_ref, mbx4 as i32 - 1, mby4 as i32);
-            let b = nb(&g_mv, &g_ref, mbx4 as i32, mby4 as i32 - 1);
+            let a = nb(&g_mv, &g_ref, mbx4 as i32 - 1, mby4 as i32, slice_start);
+            let b = nb(&g_mv, &g_ref, mbx4 as i32, mby4 as i32 - 1, slice_start);
             let c = {
-                let cc = nb(&g_mv, &g_ref, mbx4 as i32 + 4, mby4 as i32 - 1);
-                if cc.is_some() { cc } else { nb(&g_mv, &g_ref, mbx4 as i32 - 1, mby4 as i32 - 1) }
+                let cc = nb(&g_mv, &g_ref, mbx4 as i32 + 4, mby4 as i32 - 1, slice_start);
+                if cc.is_some() { cc } else { nb(&g_mv, &g_ref, mbx4 as i32 - 1, mby4 as i32 - 1, slice_start) }
             };
             let mv = predict_skip_mv(a, b, c);
             fill(&mut g_mv, &mut g_ref, &mut g_mvd, mbx4, mby4, 4, 4, mv, (0, 0), bw4);
@@ -135,16 +148,16 @@ pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &
         let mut part_mv = Vec::new();
         for &(bx4, by4, w4, h4, dir) in &parts {
             let (gx, gy) = (mbx4 + bx4, mby4 + by4);
-            let lmvd = nb_mvd(&g_mvd, &g_ref, gx as i32 - 1, gy as i32, bw4);
-            let umvd = nb_mvd(&g_mvd, &g_ref, gx as i32, gy as i32 - 1, bw4);
+            let lmvd = nb_mvd(&g_mvd, &g_ref, gx as i32 - 1, gy as i32, bw4, width, slice_start);
+            let umvd = nb_mvd(&g_mvd, &g_ref, gx as i32, gy as i32 - 1, bw4, width, slice_start);
             let incx = mvd_ctx_inc(lmvd.0.abs() + umvd.0.abs());
             let incy = mvd_ctx_inc(lmvd.1.abs() + umvd.1.abs());
             let mvd = (decode_mvd_component(&mut e, &mut ctx, 0, incx) as i32, decode_mvd_component(&mut e, &mut ctx, 1, incy) as i32);
-            let a = nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32);
-            let b = nb(&g_mv, &g_ref, gx as i32, gy as i32 - 1);
+            let a = nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32, slice_start);
+            let b = nb(&g_mv, &g_ref, gx as i32, gy as i32 - 1, slice_start);
             let c = {
-                let cc = nb(&g_mv, &g_ref, gx as i32 + w4 as i32, gy as i32 - 1);
-                if cc.is_some() { cc } else { nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32 - 1) }
+                let cc = nb(&g_mv, &g_ref, gx as i32 + w4 as i32, gy as i32 - 1, slice_start);
+                if cc.is_some() { cc } else { nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32 - 1, slice_start) }
             };
             let mvp = predict_mv(a, b, c, 0, dir);
             let mv = (mvp.0 + mvd.0, mvp.1 + mvd.1);
@@ -152,13 +165,13 @@ pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &
             part_mv.push((bx4, by4, w4, h4, mv));
         }
 
-        let up = if addr >= width { Some(cbpv[addr - width]) } else { None };
+        let up = if mb_top { Some(cbpv[addr - width]) } else { None };
         let left = if mbx != 0 { Some(cbpv[addr - 1]) } else { None };
         let cbp = decode_cbp_ctx(&mut e, &mut ctx.cbp, up, left);
         let mut transform8x8 = false;
         if cbp & 0x0f != 0 && pps.transform_8x8_mode_flag {
             let lt = if mbx != 0 { mb_info[addr - 1].transform8x8 as usize } else { 0 };
-            let ut = if addr >= width { mb_info[addr - width].transform8x8 as usize } else { 0 };
+            let ut = if mb_top { mb_info[addr - width].transform8x8 as usize } else { 0 };
             transform8x8 = e.decode_decision(&mut ctx.transform[lt + ut]) == 1;
         }
         let delta = if cbp != 0 {
@@ -172,7 +185,7 @@ pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &
         let mut rneigh = CbfNeighbours {
             cur: CbpBits::default(),
             left: if mbx != 0 { Some(cbp_grid[addr - 1]) } else { None },
-            up: if addr >= width { Some(cbp_grid[addr - width]) } else { None },
+            up: if mb_top { Some(cbp_grid[addr - width]) } else { None },
         };
         let mut sink = Vec::new();
         let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &scaling, &mut sink);
@@ -197,7 +210,9 @@ pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &
         }
         addr += 1;
     }
+    } // per-slice loop
 
+    let sh = sh_last.expect("at least one slice");
     let frame = Frame {
         y,
         cb,
@@ -229,8 +244,9 @@ fn fill(g_mv: &mut [(i32, i32)], g_ref: &mut [i32], g_mvd: &mut [(i32, i32)], gx
     }
 }
 
-fn nb_mvd(g_mvd: &[(i32, i32)], g_ref: &[i32], bx: i32, by: i32, bw4: usize) -> (i32, i32) {
-    if bx < 0 || by < 0 {
+#[allow(clippy::too_many_arguments)]
+fn nb_mvd(g_mvd: &[(i32, i32)], g_ref: &[i32], bx: i32, by: i32, bw4: usize, width: usize, slice_start: usize) -> (i32, i32) {
+    if bx < 0 || by < 0 || (by as usize / 4) * width + (bx as usize / 4) < slice_start {
         return (0, 0);
     }
     let i = by as usize * bw4 + bx as usize;
