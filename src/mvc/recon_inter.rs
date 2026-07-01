@@ -26,6 +26,7 @@ use crate::mvc::sps::Sps;
 /// Per-4×4-block motion (list-0): MV, ref index (-1 = intra/none), and the
 /// luma nonzero-coefficient flag (for the deblock bS). Co-located source for a
 /// B-slice's spatial-direct colZeroFlag.
+#[derive(Clone)]
 pub struct MotionField {
     pub mv: Vec<(i32, i32)>,
     pub refidx: Vec<i32>,
