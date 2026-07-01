@@ -34,22 +34,29 @@ first AU's dependent frame differs from the base by only 4683/3,110,400 bytes
 JM's base MB decode and injects a libavcodec base; for ground truth we just
 want JM to decode everything, hence `DecodeAllLayers=1`.)
 
-## Status: inter-view prediction bit-exact (the 3D payoff)
+## Status: FULL 3D stereo pair bit-exact (the 3D payoff)
 
-`examples/decode_mvc_dep` decodes the base IDR (view 0, multi-slice) with
-libmvc, then the **dependent-view anchor's first slice** (view 1, NAL 20 — a
-P-slice whose single L0 reference is the base picture) using the base frame as
-the inter-view reference. **All 176 luma rows of slice 0 match JM's dependent
-ground truth exactly.** Inter-view prediction is sample-only in Stereo High, so
-`recon_inter::decode_p_frame` is reused unchanged. Two things it needed:
-- `decode_p_frame` gained an `idr` param: the dependent anchor is
+`examples/decode_mvc_dep` decodes the **entire first access unit's stereo pair**
+of the real disc, bit-exact vs JM's per-view ground truth, with zero JM pixels
+in the decode:
+- **Base view** (view 0): the 6-slice 1920×1080 IDR via `decode_intra_frame`.
+- **Dependent view** (view 1): the full 6-slice P-frame via
+  `recon_inter::decode_p_frame` with the base frame as the inter-view L0
+  reference. Inter-view prediction is sample-only in Stereo High, so the inter
+  core is reused unchanged.
+
+Both the intra and P paths are multi-slice (`&[&[u8]]`, per-slice CABAC re-init
++ cross-slice neighbour unavailability). Two MVC-specific things:
+- `decode_p_frame` has an `idr` param: the dependent anchor is
   `idr_pic_flag = 1` (idr_pic_id + simple ref marking) yet `slice_type = P`.
 - the dependent slices reference the subset SPS (NAL 15) + their own PPS (the
   NAL 8 *after* the subset SPS), resolved separately from the base's.
 
-Remaining: multi-slice P (dependent slices 1–5, the same slice-boundary
-threading as the intra multi-slice), then temporal (non-anchor) dependent
-frames + B, then the Ripsaw runner integration.
+Remaining toward a clip decoder: **temporal frames** (AU1+ — base P/B from the
+base IDR; dependent frames predict inter-view from the base *and* temporally
+from prior dependent) → a DPB (multiple refs, POC ordering, § 8.2.4 ref-list
+construction, per-MB `ref_idx` when num_ref_l0 > 1) + B-slices in both views;
+then the Ripsaw runner integration.
 
 ## What libmvc needs (the gaps)
 
