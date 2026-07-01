@@ -52,11 +52,26 @@ Both the intra and P paths are multi-slice (`&[&[u8]]`, per-slice CABAC re-init
 - the dependent slices reference the subset SPS (NAL 15) + their own PPS (the
   NAL 8 *after* the subset SPS), resolved separately from the base's.
 
-Remaining toward a clip decoder: **temporal frames** (AU1+ — base P/B from the
-base IDR; dependent frames predict inter-view from the base *and* temporally
-from prior dependent) → a DPB (multiple refs, POC ordering, § 8.2.4 ref-list
-construction, per-MB `ref_idx` when num_ref_l0 > 1) + B-slices in both views;
-then the Ripsaw runner integration.
+## Temporal decode — 25/96 frames bit-exact (`examples/decode_mvc_clip`)
+
+The full temporal clip decode with a minimal DPB now works for the first 25
+access units of the real clip — BOTH views, bit-exact vs JM:
+- **base view**: a single-ref P chain, plus a mid-GOP non-IDR I-frame (routed
+  by slice_type). `decode_p_frame` takes a ref LIST and decodes `ref_idx` per
+  partition (per-b8 for P_8x8) — added `mb_inter::decode_ref_idx` /
+  INIT_REF_NO_P; a per-view sliding-window DPB feeds L0.
+- **dependent view**: routed by the MVC extension — `anchor_pic_flag` →
+  inter-view-only `L0 = [base]`; otherwise the temporal 2-ref
+  `L0 = [prev dependent, current base]`. `non_idr_flag` selects the header.
+- P_8x8 now expands all sub_mb_types (8×8/8×4/4×8/4×4).
+
+It graceful-stops at frame 25 on the remaining feature: **intra MBs inside a
+P-slice** (I_NxN / I_16x16 / I_PCM — real P-frames use them; `decode_p_frame`
+returns a clean error). Implementing that (factor recon.rs's per-MB intra
+reconstruction into a reusable fn; add the intra pred-mode contexts to the P
+path; decode the intra header after the P mb_type) should carry the decode
+through the whole clip. Then B-slices if any, then the Ripsaw runner
+integration.
 
 ## What libmvc needs (the gaps)
 
