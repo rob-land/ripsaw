@@ -177,6 +177,9 @@ where
         // ---- base view ---- route by slice_type: I-slices (IDR or not)
         // decode intra; P-slices reference the base DPB.
         let bsh = parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, &bsps, &bpps)?;
+        // libmvc decodes I and P slices; B-slices (hierarchical GOPs) aren't
+        // supported yet. Bail cleanly so the caller can fall back.
+        anyhow::ensure!(bsh.slice_type % 5 != 1, "B-slices not supported by libmvc yet (base view)");
         let base_intra = bsh.slice_type % 5 == 2;
         let bs: Vec<&[u8]> = au.base.iter().map(|s| s.as_slice()).collect();
         let bf = if base_intra {
@@ -193,6 +196,7 @@ where
         // ---- dependent view ---- L0 per the slice's ref_pic_list_modification.
         let ds: Vec<&[u8]> = au.dep.iter().map(|s| s.as_slice()).collect();
         let dsh = parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, &dsps, &dpps)?;
+        anyhow::ensure!(dsh.slice_type % 5 != 1, "B-slices not supported by libmvc yet (dependent view)");
         let dnum = (dsh.num_ref_idx_l0_active_minus1 + 1) as usize;
         let dl0 = build_dep_l0(&dsh.ref_pic_list_modifications.list0, dnum, dep_dpb.len(), au.dep_anchor);
         let drefs: Vec<&Frame> = dl0

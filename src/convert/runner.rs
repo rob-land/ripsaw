@@ -225,33 +225,65 @@ async fn run_mvc_pipeline(
         }
     }
 
-    log(&event_tx, "Writing ldecod configuration...");
-    let cfg = build_decoder_cfg(&h264_path, &yuv_base_stem);
-    tokio::fs::write(&cfg_path, cfg).await.context("writing decoder.cfg")?;
+    // Decode both views natively with libmvc (pure Rust, no external
+    // dependency, bit-exact vs JM on the real disc). The decoder is
+    // synchronous and CPU-bound, so run it on a blocking thread. If it fails
+    // — e.g. the stream uses a feature libmvc doesn't handle yet — fall back
+    // to the JM reference decoder when it's available.
+    log(&event_tx, "Decoding MVC natively (libmvc)…");
+    let native = {
+        let h264 = h264_path.clone();
+        let v0 = view0.clone();
+        let v1 = view1.clone();
+        tokio::task::spawn_blocking(move || -> Result<crate::mvc::clip::ClipInfo> {
+            let data = std::fs::read(&h264)
+                .with_context(|| format!("reading {}", h264.display()))?;
+            crate::mvc::clip::decode_annex_b_to_yuv_files(&data, &v0, &v1)
+        })
+        .await
+        .context("libmvc decode thread panicked")?
+    };
 
-    let ldecod = resolve_ldecod_path()?;
-    log(
-        &event_tx,
-        &format!("Decoding MVC via {} (this is slow, JM reference decoder)…", ldecod.display()),
-    );
-    let mut child = Command::new(&ldecod)
-        .arg("-f")
-        .arg(&cfg_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("spawn ldecod")?;
-    forward_stderr(&mut child, event_tx.clone());
-    forward_stdout(&mut child, event_tx.clone());
-    let status = child.wait().await.context("waiting for ldecod")?;
-    if !status.success() {
-        return Err(anyhow!("ldecod exited with status {}", status));
+    match native {
+        Ok(info) => {
+            log(
+                &event_tx,
+                &format!("Decoded {} frames natively ({}×{} per view)", info.frames, info.width, info.height),
+            );
+        }
+        Err(e) => {
+            log(
+                &event_tx,
+                &format!("libmvc decode failed ({e}); falling back to the JM reference decoder…"),
+            );
+            let cfg = build_decoder_cfg(&h264_path, &yuv_base_stem);
+            tokio::fs::write(&cfg_path, cfg).await.context("writing decoder.cfg")?;
+            let ldecod = resolve_ldecod_path()
+                .with_context(|| format!("libmvc decode failed ({e}) and no JM ldecod fallback found"))?;
+            log(
+                &event_tx,
+                &format!("Decoding MVC via {} (slow, JM reference decoder)…", ldecod.display()),
+            );
+            let mut child = Command::new(&ldecod)
+                .arg("-f")
+                .arg(&cfg_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .context("spawn ldecod")?;
+            forward_stderr(&mut child, event_tx.clone());
+            forward_stdout(&mut child, event_tx.clone());
+            let status = child.wait().await.context("waiting for ldecod")?;
+            if !status.success() {
+                return Err(anyhow!("ldecod exited with status {}", status));
+            }
+        }
     }
 
     if !view0.exists() || !view1.exists() {
         return Err(anyhow!(
-            "ldecod produced no dependent view output -- the source may not contain MVC NALs"
+            "MVC decode produced no dependent view output -- the source may not contain MVC NALs"
         ));
     }
 
