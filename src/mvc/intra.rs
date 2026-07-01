@@ -380,7 +380,9 @@ pub fn predict_8x8(mode: Intra4x4Mode, raw: &Neighbors8x8) -> [[i32; 8]; 8] {
                     } else if z == -1 {
                         avg3(n.l(0), n.t(-1), n.t(0))
                     } else {
-                        avg3(n.l(y - 1), n.l(y - 2), n.l(y - 3))
+                        // zVR < -1 (§ 8.3.2.2.5): left samples at y - 2x - k
+                        // (NOT the 4×4 y-k — 8×8's x reaches this region).
+                        avg3(n.l(y - 2 * x - 1), n.l(y - 2 * x - 2), n.l(y - 2 * x - 3))
                     };
                 }
             }
@@ -396,7 +398,8 @@ pub fn predict_8x8(mode: Intra4x4Mode, raw: &Neighbors8x8) -> [[i32; 8]; 8] {
                     } else if z == -1 {
                         avg3(n.l(0), n.t(-1), n.t(0))
                     } else {
-                        avg3(n.t(x - 1), n.t(x - 2), n.t(x - 3))
+                        // zHD < -1 (§ 8.3.2.2.6): top samples at x - 2y - k.
+                        avg3(n.t(x - 2 * y - 1), n.t(x - 2 * y - 2), n.t(x - 2 * y - 3))
                     };
                 }
             }
