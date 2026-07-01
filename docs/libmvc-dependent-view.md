@@ -78,6 +78,29 @@ frame-25 wall:
 Next: the Ripsaw runner integration (libmvc → compose both views → FSBS or
 other output format → encode).
 
+## Runner integration (done)
+
+`mvc::clip` is the library form of the clip decoder:
+- `decode_annex_b(data, on_frame)` — parse an Annex B MVC elementary stream
+  (base NAL 1/5 + dependent NAL 20, split on AUDs), resolve the base
+  SPS/PPS + subset SPS + dependent PPS, and decode every AU with a per-view
+  sliding-window DPB. Dependent L0 comes from `build_dep_l0` honoring
+  `ref_pic_list_modification`. Calls back with both deblocked views.
+- `decode_annex_b_to_yuv_files(data, view0, view1)` — writes the two per-view
+  cropped planar YUV420 files (the same layout `ldecod` produces).
+
+`convert::runner::run_mvc_pipeline` now decodes natively via that function on
+a blocking thread, feeding the existing ffmpeg compose/encode step unchanged.
+Output is **byte-identical to JM** for the full 96-frame real clip. If the
+native decode fails (e.g. **B-slices** — hierarchical GOPs, which libmvc
+doesn't handle yet; `mvc::clip` detects them and errors cleanly), the pipeline
+falls back to `ldecod` when available. `examples/mvc_decode_yuv` is the
+standalone native decode CLI.
+
+Remaining libmvc gaps for broader coverage: **B-slices** (many retail 3D BDs
+use IBP GOPs), and multi-PPS / long-term-reference streams. The target disc
+(all-I/P) is fully covered.
+
 ## What libmvc needs (the gaps)
 
 The dependent-view decode reuses the **entire inter core** (MC, MV prediction,
