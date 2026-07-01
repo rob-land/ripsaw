@@ -286,7 +286,7 @@ where
     let mut pending: Vec<(i32, Frame, Frame)> = Vec::new();
     let mut frames = 0usize;
 
-    let mut flush = |pending: &mut Vec<(i32, Frame, Frame)>, on_frame: &mut F| -> anyhow::Result<()> {
+    let flush = |pending: &mut Vec<(i32, Frame, Frame)>, on_frame: &mut F| -> anyhow::Result<()> {
         pending.sort_by_key(|(p, ..)| *p);
         for (_, b, d) in pending.drain(..) {
             on_frame(&b, &d, dw, dh)?;
