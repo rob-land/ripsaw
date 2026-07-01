@@ -47,7 +47,7 @@ fn main() -> anyhow::Result<()> {
     let (sps, pps) = (sps.as_ref().unwrap(), pps.as_ref().unwrap());
     eprintln!("base view: {} slices, {}x{}", base_slices.len(), sps.pic_width_in_mbs * 16, sps.pic_height_in_map_units * 16);
     let refs: Vec<&[u8]> = base_slices.iter().map(|s| s.as_slice()).collect();
-    let frame = decode_intra_frame(&refs, nal_ref_idc, sps, pps)?;
+    let frame = decode_intra_frame(&refs, nal_ref_idc, true, sps, pps)?;
 
     // Diff the whole luma+chroma frame (cropped to the coded 1080) vs JM.
     let jm = std::fs::read(&truth)?;

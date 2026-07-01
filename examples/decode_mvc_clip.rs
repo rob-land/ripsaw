@@ -15,6 +15,54 @@ use ripsaw::mvc::rbsp::extract_rbsp;
 use ripsaw::mvc::recon::{decode_intra_frame, Frame};
 use ripsaw::mvc::recon_inter::{deblock_inter, decode_p_frame};
 use ripsaw::mvc::sps::{parse_seq_parameter_set_data, parse_subset_sps_rbsp, Sps};
+use ripsaw::mvc::ref_pic_list_modification::RefPicListModification;
+
+/// One reference-list entry, unresolved: either the single inter-view
+/// candidate (the current base frame) or a temporal candidate indexed into
+/// the dependent-view DPB (recent-first, so index 0 = the most recent).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DRef {
+    InterView,
+    Temporal(usize),
+}
+
+/// Build the dependent view's L0 honoring `ref_pic_list_modification`
+/// (H.264 §8.2.4.3 + Annex G for inter-view IDCs 4/5). The initial list is
+/// the temporal short-term refs (PicNum-descending == DPB recent-first) with
+/// the inter-view ref appended, truncated to `num_ref`; each modification
+/// command then moves its target picture to the running refIdx position.
+fn build_dep_l0(mods: &Option<Vec<RefPicListModification>>, num_ref: usize, dpb_len: usize, anchor: bool) -> Vec<DRef> {
+    use RefPicListModification::*;
+    let mut list: Vec<DRef> = if anchor { Vec::new() } else { (0..dpb_len).map(DRef::Temporal).collect() };
+    list.push(DRef::InterView);
+    list.truncate(num_ref.max(1));
+    if let Some(cmds) = mods {
+        let mut refidx = 0usize;
+        // picNumL0Pred tracked relative to CurrPicNum (0 = current); each
+        // PicNumSub lowers it, and the DPB index of a short-term ref with
+        // PicNum = CurrPicNum + rel is (-rel - 1) since DPB is recent-first.
+        let mut picnum_rel: i64 = 0;
+        for cmd in cmds {
+            let target = match cmd {
+                PicNumSub { abs_diff_pic_num_minus1: d } => {
+                    picnum_rel -= *d as i64 + 1;
+                    DRef::Temporal((-picnum_rel - 1) as usize)
+                }
+                PicNumAdd { abs_diff_pic_num_minus1: d } => {
+                    picnum_rel += *d as i64 + 1;
+                    DRef::Temporal((-picnum_rel - 1).max(0) as usize)
+                }
+                InterViewAdd { .. } | InterViewSub { .. } => DRef::InterView,
+                LongTerm { .. } => continue,
+            };
+            list.retain(|r| *r != target);
+            list.insert(refidx.min(list.len()), target);
+            list.truncate(num_ref);
+            refidx += 1;
+        }
+    }
+    list
+}
 
 #[derive(Default)]
 struct Au {
@@ -138,22 +186,30 @@ fn main() -> anyhow::Result<()> {
                 f
             })
         };
-        let mut bf = match base_res {
+        let bf = match base_res {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("… stopped at frame {k} (base): {e}");
                 break;
             }
         };
-        ok &= cmp("base", &bf, &bjm, k);
-
         // ---- dependent view ----
-        // Anchor: inter-view only (L0 = [base]). Non-anchor: temporal refs
-        // (recent first) then the inter-view base appended.
+        // Build L0 by honoring the slice's ref_pic_list_modification: for this
+        // stream every non-anchor dependent slice carries [InterViewAdd,
+        // PicNumSub], i.e. L0 = [inter-view base, temporal previous dependent].
+        // The anchor is inter-view only (L0 = [base]).
         let ds: Vec<&[u8]> = au.dep.iter().map(|s| s.as_slice()).collect();
-        let mut drefs: Vec<&Frame> = if au.dep_anchor { Vec::new() } else { dep_dpb.iter().collect() };
-        drefs.push(&bf);
-        let mut df = match decode_p_frame(&ds, au.dep_idc, au.dep_idr, dsps, dpps, &drefs) {
+        let dsh0 = ripsaw::mvc::slice_header::parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, dsps, dpps)?;
+        let dnum = (dsh0.num_ref_idx_l0_active_minus1 + 1) as usize;
+        let dl0 = build_dep_l0(&dsh0.ref_pic_list_modifications.list0, dnum, dep_dpb.len(), au.dep_anchor);
+        let drefs: Vec<&Frame> = dl0
+            .iter()
+            .map(|r| match r {
+                DRef::InterView => &bf,
+                DRef::Temporal(i) => &dep_dpb[*i],
+            })
+            .collect();
+        let df = match decode_p_frame(&ds, au.dep_idc, au.dep_idr, dsps, dpps, &drefs) {
             Ok((mut f, mf)) => {
                 deblock_inter(&mut f, &mf, dpps.chroma_qp_index_offset);
                 f
@@ -163,7 +219,7 @@ fn main() -> anyhow::Result<()> {
                 break;
             }
         };
-        ok &= cmp("dep", &df, &djm, k);
+        ok &= cmp("base", &bf, &bjm, k) & cmp("dep", &df, &djm, k);
         if !ok {
             std::process::exit(1);
         }

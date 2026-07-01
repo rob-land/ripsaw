@@ -111,7 +111,15 @@ pub struct InterContexts {
     pub b8_type_b: [CtxState; 4],
     /// ref_idx (ref_no_contexts, 6 ctx).
     pub ref_no: [CtxState; 6],
+    /// intra pred mode (ipr, 2 ctx) + intra chroma pred mode (cipr, 4 ctx),
+    /// for intra MBs inside a P/B slice. Model-independent (== the I tables).
+    pub ipr: [CtxState; 2],
+    pub cipr: [CtxState; 4],
 }
+
+/// intra pred-mode / chroma pred-mode context init (model-independent).
+const INIT_IPR: [(i32, i32); 2] = [(13, 41), (3, 62)];
+const INIT_CIPR: [(i32, i32); 4] = [(-9, 83), (4, 86), (0, 97), (-7, 72)];
 
 impl InterContexts {
     pub fn new(cabac_init_idc: u32, slice_qp: i32) -> Self {
@@ -135,6 +143,8 @@ impl InterContexts {
             mb_type_b: std::array::from_fn(|i| mk(mtb[i])),
             b8_type_b: std::array::from_fn(|i| mk(b8b[i])),
             ref_no: std::array::from_fn(|i| mk(INIT_REF_NO_P[m][i])),
+            ipr: std::array::from_fn(|i| mk(INIT_IPR[i])),
+            cipr: std::array::from_fn(|i| mk(INIT_CIPR[i])),
         }
     }
 }

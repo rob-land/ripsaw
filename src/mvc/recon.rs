@@ -17,7 +17,7 @@ use crate::mvc::intra::{
     Neighbors4x4, Neighbors8x8, NeighborsNxN, PlaneMode,
 };
 use crate::mvc::mb_header::{decode_mb_header, MbHeaderContexts, MbInfo, Neighbors};
-use crate::mvc::mb_residual::{decode_mb_residual, CbfNeighbours, CbpBits, ResidualContexts};
+use crate::mvc::mb_residual::{decode_mb_residual, CbfNeighbours, CbpBits, MbResidual, ResidualContexts};
 use crate::mvc::pps::Pps;
 use crate::mvc::scaling::ScalingLists;
 use crate::mvc::slice_header::parse_slice_header;
@@ -43,16 +43,112 @@ pub struct Frame {
     pub slice_beta_offset_div2: i32,
 }
 
-struct Plane {
-    d: Vec<u8>,
-    w: usize,
+/// A single reconstructed plane (owned samples). Public so the inter decoder
+/// can reuse `reconstruct_intra_mb` for intra MBs inside a P-slice.
+pub struct Plane {
+    pub d: Vec<u8>,
+    pub w: usize,
 }
 impl Plane {
+    pub fn new(w: usize, h: usize) -> Self {
+        Plane { d: vec![0; w * h], w }
+    }
     fn at(&self, x: usize, y: usize) -> i32 {
         self.d[y * self.w + x] as i32
     }
     fn set(&mut self, x: usize, y: usize, v: i32) {
         self.d[y * self.w + x] = v.clamp(0, 255) as u8;
+    }
+}
+
+/// Reconstruct one intra MB (I_4x4 / I_8x8 / I_16x16 + chroma) into the
+/// planes and update the per-4×4 mode grid. Shared by the intra-frame decoder
+/// and the P-slice decoder (intra MBs in a P-slice). `raw` are the decoded
+/// intra pred-mode syntax values (rem/−1) for I_NxN; `mb_top` = the MB above
+/// is in-slice (left is always in-slice for MB-row-contiguous slices).
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_intra_mb(
+    y: &mut Plane,
+    cb: &mut Plane,
+    cr: &mut Plane,
+    modes: &mut [Option<u8>],
+    info: &MbInfo,
+    raw: &[i64],
+    res: &MbResidual,
+    mbx: usize,
+    mby: usize,
+    width: usize,
+    bw4: usize,
+    fw: usize,
+    mb_top: bool,
+) {
+    let (mpx, mpy) = (mbx * 16, mby * 16);
+    if !info.i_nxn {
+        let mode = PlaneMode::from_index(info.i16_pred as u32).unwrap();
+        let n = gather_nxn(y, mpx, mpy, 16, mb_top);
+        let pred = predict_16x16(mode, &n);
+        for yy in 0..16 {
+            for xx in 0..16 {
+                y.set(mpx + xx, mpy + yy, pred[yy][xx] + res.luma[yy][xx]);
+            }
+        }
+        for c in modes_cells(mby, mbx, bw4, 4) {
+            modes[c] = Some(2);
+        }
+    } else if info.transform8x8 {
+        for b8 in 0..4usize {
+            let (bx8, by8) = (b8 & 1, b8 >> 1);
+            let gbx = mbx * 2 + bx8;
+            let gby = mby * 2 + by8;
+            let (cx, cy) = (gbx * 2, gby * 2);
+            let mode = derive_intra_mode(left_cell(modes, cx, cy, bw4), up_cell(modes, cx, cy, bw4, mb_top), raw[b8]);
+            let n = gather_8x8(y, gbx, gby, fw, bw4 / 2, seq8(gbx, gby, width), mb_top);
+            let pred = predict_8x8(Intra4x4Mode::from_index(mode as u32).unwrap(), &n);
+            for yy in 0..8 {
+                for xx in 0..8 {
+                    y.set(gbx * 8 + xx, gby * 8 + yy, pred[yy][xx] + res.luma[by8 * 8 + yy][bx8 * 8 + xx]);
+                }
+            }
+            for sy in 0..2 {
+                for sx in 0..2 {
+                    modes[(cy + sy) * bw4 + cx + sx] = Some(mode);
+                }
+            }
+        }
+    } else {
+        for region in 0..4usize {
+            for sub in 0..4usize {
+                let bx = (region & 1) * 2 + (sub & 1);
+                let by = (region >> 1) * 2 + (sub >> 1);
+                let idx = region * 4 + sub;
+                let (cx, cy) = (mbx * 4 + bx, mby * 4 + by);
+                let mode = derive_intra_mode(left_cell(modes, cx, cy, bw4), up_cell(modes, cx, cy, bw4, mb_top), raw[idx]);
+                let n = gather_4x4(y, cx, cy, fw, bw4, seq4(cx, cy, width), mb_top);
+                let pred = predict_4x4(Intra4x4Mode::from_index(mode as u32).unwrap(), &n);
+                for yy in 0..4 {
+                    for xx in 0..4 {
+                        y.set(cx * 4 + xx, cy * 4 + yy, pred[yy][xx] + res.luma[by * 4 + yy][bx * 4 + xx]);
+                    }
+                }
+                modes[cy * bw4 + cx] = Some(mode);
+            }
+        }
+    }
+
+    let cmode = match info.c_ipred {
+        0 => PlaneMode::Dc,
+        1 => PlaneMode::Horizontal,
+        2 => PlaneMode::Vertical,
+        _ => PlaneMode::Plane,
+    };
+    for (plane, cres) in [(&mut *cb, &res.cb), (&mut *cr, &res.cr)] {
+        let n = gather_nxn(plane, mbx * 8, mby * 8, 8, mb_top);
+        let pred = predict_chroma_8x8(cmode, &n);
+        for yy in 0..8 {
+            for xx in 0..8 {
+                plane.set(mbx * 8 + xx, mby * 8 + yy, pred[yy][xx] + cres[yy][xx]);
+            }
+        }
     }
 }
 
@@ -115,76 +211,7 @@ pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
         };
         let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut neigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut sink);
 
-        // ---- Luma reconstruction ----
-        let (mpx, mpy) = (mbx * 16, mby * 16);
-        if !info.i_nxn {
-            let mode = PlaneMode::from_index(info.i16_pred as u32).unwrap();
-            let n = gather_nxn(&y, mpx, mpy, 16, mb_top);
-            let pred = predict_16x16(mode, &n);
-            for yy in 0..16 {
-                for xx in 0..16 {
-                    y.set(mpx + xx, mpy + yy, pred[yy][xx] + res.luma[yy][xx]);
-                }
-            }
-            for c in modes_cells(mby, mbx, bw4, 4) {
-                modes[c] = Some(2);
-            }
-        } else if info.transform8x8 {
-            for b8 in 0..4usize {
-                let (bx8, by8) = (b8 & 1, b8 >> 1);
-                let gbx = mbx * 2 + bx8;
-                let gby = mby * 2 + by8;
-                let (cx, cy) = (gbx * 2, gby * 2);
-                let mode = derive_intra_mode(left_cell(&modes, cx, cy, bw4), up_cell(&modes, cx, cy, bw4, mb_top), raw[b8]);
-                let n = gather_8x8(&y, gbx, gby, fw, bw4 / 2, seq8(gbx, gby, width), mb_top);
-                let pred = predict_8x8(Intra4x4Mode::from_index(mode as u32).unwrap(), &n);
-                for yy in 0..8 {
-                    for xx in 0..8 {
-                        y.set(gbx * 8 + xx, gby * 8 + yy, pred[yy][xx] + res.luma[by8 * 8 + yy][bx8 * 8 + xx]);
-                    }
-                }
-                for sy in 0..2 {
-                    for sx in 0..2 {
-                        modes[(cy + sy) * bw4 + cx + sx] = Some(mode);
-                    }
-                }
-            }
-        } else {
-            for region in 0..4usize {
-                for sub in 0..4usize {
-                    let bx = (region & 1) * 2 + (sub & 1);
-                    let by = (region >> 1) * 2 + (sub >> 1);
-                    let idx = region * 4 + sub;
-                    let (cx, cy) = (mbx * 4 + bx, mby * 4 + by);
-                    let mode = derive_intra_mode(left_cell(&modes, cx, cy, bw4), up_cell(&modes, cx, cy, bw4, mb_top), raw[idx]);
-                    let n = gather_4x4(&y, cx, cy, fw, bw4, seq4(cx, cy, width), mb_top);
-                    let pred = predict_4x4(Intra4x4Mode::from_index(mode as u32).unwrap(), &n);
-                    for yy in 0..4 {
-                        for xx in 0..4 {
-                            y.set(cx * 4 + xx, cy * 4 + yy, pred[yy][xx] + res.luma[by * 4 + yy][bx * 4 + xx]);
-                        }
-                    }
-                    modes[cy * bw4 + cx] = Some(mode);
-                }
-            }
-        }
-
-        // ---- Chroma reconstruction ----
-        let cmode = match info.c_ipred {
-            0 => PlaneMode::Dc,
-            1 => PlaneMode::Horizontal,
-            2 => PlaneMode::Vertical,
-            _ => PlaneMode::Plane,
-        };
-        for (plane, cres) in [(&mut cb, &res.cb), (&mut cr, &res.cr)] {
-            let n = gather_nxn(plane, mbx * 8, mby * 8, 8, mb_top);
-            let pred = predict_chroma_8x8(cmode, &n);
-            for yy in 0..8 {
-                for xx in 0..8 {
-                    plane.set(mbx * 8 + xx, mby * 8 + yy, pred[yy][xx] + cres[yy][xx]);
-                }
-            }
-        }
+        reconstruct_intra_mb(&mut y, &mut cb, &mut cr, &mut modes, &info, &raw, &res, mbx, mby, width, bw4, fw, mb_top);
 
         let eos = e.decode_terminate();
         grid.push(info);

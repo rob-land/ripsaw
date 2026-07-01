@@ -17,7 +17,7 @@ use crate::mvc::mb_residual::{decode_mb_residual, CbfNeighbours, CbpBits, Residu
 use crate::mvc::mc::{mc_chroma, mc_luma, Plane};
 use crate::mvc::mv::{predict_mv, predict_skip_mv, Directional, Neighbour};
 use crate::mvc::pps::Pps;
-use crate::mvc::recon::Frame;
+use crate::mvc::recon::{reconstruct_intra_mb, Frame, Plane as OutPlane};
 use crate::mvc::scaling::ScalingLists;
 use crate::mvc::slice_header::parse_slice_header;
 use crate::mvc::sps::Sps;
@@ -68,19 +68,23 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         .collect();
     let scaling = pps.scaling.clone().or_else(|| sps.scaling.clone()).unwrap_or_else(ScalingLists::flat);
 
-    let mut y = vec![0u8; ysz];
-    let mut cb = vec![0u8; csz];
-    let mut cr = vec![0u8; csz];
+    let mut y = OutPlane::new(fw, fh);
+    let mut cb = OutPlane::new(cw, ch);
+    let mut cr = OutPlane::new(cw, ch);
     let mut g_mv = vec![(0i32, 0i32); bw4 * bh4];
     let mut g_mvd = vec![(0i32, 0i32); bw4 * bh4];
     let mut g_ref = vec![-1i32; bw4 * bh4];
     let mut nz = vec![false; bw4 * bh4];
+    // Intra pred-mode grid (Some(2)=DC for inter/skip cells, so intra MBs in
+    // the P-slice derive their pred modes correctly).
+    let mut modes = vec![Some(2u8); bw4 * bh4];
     let mut skip_grid: Vec<bool> = Vec::new();
     let mut cbp_grid: Vec<CbpBits> = Vec::new();
     let mut cbpv: Vec<u8> = Vec::new();
     let mut mb_info: Vec<MbInfo> = Vec::new();
     let mut qp_grid: Vec<i32> = Vec::new();
     let mut sh_last = None;
+    let _ = (ysz, csz);
 
     // Neighbour accessor: unavailable if out of frame, undecoded, or in an
     // earlier slice (its MB address < the current slice's first MB).
@@ -131,11 +135,15 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             };
             let mv = predict_skip_mv(a, b, c);
             fill(&mut g_mv, &mut g_ref, &mut g_mvd, mbx4, mby4, 4, 4, mv, (0, 0), 0, bw4);
-            recon_part(&mut y, &mut cb, &mut cr, &ref_planes[0], mbx * 16, mby * 16, 0, 0, 16, 16, mv, &[[0i32; 16]; 16], &[[0i32; 8]; 8], &[[0i32; 8]; 8], fw, cw);
+            recon_part(&mut y.d, &mut cb.d, &mut cr.d, &ref_planes[0], mbx * 16, mby * 16, 0, 0, 16, 16, mv, &[[0i32; 16]; 16], &[[0i32; 8]; 8], &[[0i32; 8]; 8], fw, cw);
             cbp_grid.push(CbpBits::default());
             cbpv.push(0);
             mb_info.push(MbInfo { i_nxn: false, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 });
             qp_grid.push(qp);
+            // A skipped MB infers mb_qp_delta = 0, so the next coded MB's
+            // mb_qp_delta context (ctxIdxInc from the previous MB's delta) must
+            // see 0 here — reset the running prevMbQpDelta.
+            last_dquant = 0;
             if e.decode_terminate() == 1 {
                 break;
             }
@@ -144,10 +152,88 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         }
 
         let mb_type = decode_inter_mb_type(&mut e, &mut ctx);
-        // mb_type ≥ 6 is an intra MB inside the P-slice (I_NxN / I_16x16 /
-        // I_PCM) — not yet reconstructed here (needs the intra pred + residual
-        // path wired in). Real P-frames use them; surface it cleanly.
-        anyhow::ensure!(mb_type <= 4, "intra MB in P-slice not yet supported (mb_type {mb_type})");
+        // mb_type ≥ 6 is an intra MB inside the P-slice (6 = I_NxN, 7..30 =
+        // I_16x16, 31 = I_PCM). Decode its intra header + residual and
+        // reconstruct via the shared intra path.
+        if mb_type >= 6 {
+            anyhow::ensure!(mb_type != 31, "I_PCM in P-slice not supported");
+            let is_i16 = mb_type >= 7;
+            let mut info = MbInfo { i_nxn: !is_i16, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 };
+            if is_i16 {
+                let x = mb_type - 7; // 0..23, same layout as the I-slice numbering
+                info.i16_pred = (x % 4) as u8;
+                let cbp_chroma = ((x / 4) % 3) as u8;
+                let cbp_luma = if x >= 12 { 15u8 } else { 0 };
+                info.cbp = cbp_luma | (cbp_chroma << 4);
+            }
+            let mut raw: Vec<i64> = Vec::new();
+            if !is_i16 {
+                let lt = if mbx != 0 { mb_info[addr - 1].transform8x8 as usize } else { 0 };
+                let ut = if mb_top { mb_info[addr - width].transform8x8 as usize } else { 0 };
+                info.transform8x8 = e.decode_decision(&mut ctx.transform[lt + ut]) == 1;
+                for _ in 0..if info.transform8x8 { 4 } else { 16 } {
+                    raw.push(if e.decode_decision(&mut ctx.ipr[0]) == 1 {
+                        -1
+                    } else {
+                        let b0 = e.decode_decision(&mut ctx.ipr[1]);
+                        let b1 = e.decode_decision(&mut ctx.ipr[1]);
+                        let b2 = e.decode_decision(&mut ctx.ipr[1]);
+                        (b0 | (b1 << 1) | (b2 << 2)) as i64
+                    });
+                }
+            }
+            // intra_chroma_pred_mode (ctx a/b from neighbour c_ipred != 0).
+            let la = if mbx != 0 { (mb_info[addr - 1].c_ipred != 0) as usize } else { 0 };
+            let ua = if mb_top { (mb_info[addr - width].c_ipred != 0) as usize } else { 0 };
+            info.c_ipred = if e.decode_decision(&mut ctx.cipr[la + ua]) == 0 {
+                0
+            } else if e.decode_decision(&mut ctx.cipr[3]) == 0 {
+                1
+            } else if e.decode_decision(&mut ctx.cipr[3]) == 0 {
+                2
+            } else {
+                3
+            };
+            if !is_i16 {
+                let up = if mb_top { Some(cbpv[addr - width]) } else { None };
+                let left = if mbx != 0 { Some(cbpv[addr - 1]) } else { None };
+                info.cbp = decode_cbp_ctx(&mut e, &mut ctx.cbp, up, left) as u8;
+            }
+            let delta = if info.cbp != 0 || is_i16 {
+                decode_dquant_ctx(&mut e, &mut ctx.delta_qp, &mut last_dquant)
+            } else {
+                last_dquant = 0;
+                0
+            };
+            qp = (qp + delta).rem_euclid(52);
+            let mut rneigh = CbfNeighbours {
+                cur: CbpBits::default(),
+                left: if mbx != 0 { Some(cbp_grid[addr - 1]) } else { None },
+                up: if mb_top { Some(cbp_grid[addr - width]) } else { None },
+            };
+            let mut sink = Vec::new();
+            // Intra residual (is_inter=false → cbf default_bit 1, I_16x16 DC path).
+            let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut sink);
+            reconstruct_intra_mb(&mut y, &mut cb, &mut cr, &mut modes, &info, &raw, &res, mbx, mby, width, bw4, fw, mb_top);
+            for by in 0..4u32 {
+                for bx in 0..4u32 {
+                    if rneigh.cur.luma4x4_nonzero(bx, by) {
+                        nz[(mby4 + by as usize) * bw4 + mbx4 + bx as usize] = true;
+                    }
+                }
+            }
+            cbp_grid.push(rneigh.cur);
+            cbpv.push(info.cbp);
+            mb_info.push(info);
+            qp_grid.push(qp);
+            // g_ref/g_mv stay -1/0 for this MB (intra → unavailable for the MV
+            // prediction of subsequent inter MBs).
+            if e.decode_terminate() == 1 {
+                break;
+            }
+            addr += 1;
+            continue;
+        }
         // (bx4, by4, w4, h4, dir, group) — `group` is the ref_idx unit: the
         // b8 for P_8x8, else the partition. P_8x8 sub_mb_type expands to its
         // sub-partitions (8x8/8x4/4x8/4x4), all L0, median prediction.
@@ -254,7 +340,7 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
 
         for (bx4, by4, w4, h4, mv, ridx) in part_mv {
             let (px, py) = (mbx * 16 + bx4 * 4, mby * 16 + by4 * 4);
-            recon_part(&mut y, &mut cb, &mut cr, &ref_planes[ridx as usize], px, py, bx4 * 4, by4 * 4, w4 * 4, h4 * 4, mv, &res.luma, &res.cb, &res.cr, fw, cw);
+            recon_part(&mut y.d, &mut cb.d, &mut cr.d, &ref_planes[ridx as usize], px, py, bx4 * 4, by4 * 4, w4 * 4, h4 * 4, mv, &res.luma, &res.cb, &res.cr, fw, cw);
         }
         if e.decode_terminate() == 1 {
             break;
@@ -265,9 +351,9 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
 
     let sh = sh_last.expect("at least one slice");
     let frame = Frame {
-        y,
-        cb,
-        cr,
+        y: y.d,
+        cb: cb.d,
+        cr: cr.d,
         fw,
         fh,
         cw,
