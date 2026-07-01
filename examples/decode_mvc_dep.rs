@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
     // Base view (inter-view reference). disable_deblock=1 for this stream, so
     // deblock_intra is a no-op — the pre-deblock frame is the reference.
     let refs: Vec<&[u8]> = base_slices.iter().map(|s| s.as_slice()).collect();
-    let mut base = decode_intra_frame(&refs, base_ref_idc, sps, pps)?;
+    let mut base = decode_intra_frame(&refs, base_ref_idc, true, sps, pps)?;
     base.deblock_intra(pps.chroma_qp_index_offset);
     let (fw, cw) = (base.fw, base.cw);
     // Sanity: base matches its ground truth.

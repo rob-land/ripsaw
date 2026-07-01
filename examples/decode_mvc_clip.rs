@@ -23,6 +23,8 @@ struct Au {
     base_idc: u8,
     dep: Vec<Vec<u8>>,
     dep_idc: u8,
+    dep_idr: bool,    // !non_idr_flag — IDR-marked header layout
+    dep_anchor: bool, // anchor_pic_flag — inter-view-only ref list
 }
 
 fn main() -> anyhow::Result<()> {
@@ -66,6 +68,10 @@ fn main() -> anyhow::Result<()> {
             20 => {
                 let au = aus.last_mut().unwrap();
                 au.dep_idc = hdr.nal_ref_idc;
+                if let Some(ext) = &hdr.mvc_extension {
+                    au.dep_idr = !ext.non_idr_flag;
+                    au.dep_anchor = ext.anchor_pic_flag;
+                }
                 au.dep.push(rbsp.to_vec());
             }
             _ => {}
@@ -105,42 +111,72 @@ fn main() -> anyhow::Result<()> {
         true
     };
 
-    let mut prev_base: Option<Frame> = None;
-    let mut prev_dep: Option<Frame> = None;
+    // Per-view sliding-window DPB, most-recent-first (decode order == PicNum
+    // order for this all-P/no-reorder stream). L0 = these, decode_p_frame
+    // takes the first num_ref_idx_l0_active by ref_idx.
+    let max_ref = bsps.max_num_ref_frames.max(1) as usize;
+    let mut base_dpb: Vec<Frame> = Vec::new();
+    let mut dep_dpb: Vec<Frame> = Vec::new();
     let mut ok = true;
+    let mut decoded = 0usize;
     for (k, au) in aus.iter().enumerate() {
-        // ---- base view ----
+        // ---- base view ---- (route by slice_type: I-slices — IDR or not —
+        // decode intra; P-slices reference the DPB).
+        use ripsaw::mvc::slice_header::parse_slice_header;
+        let bsh = parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, bsps, bpps)?;
+        let base_intra = bsh.slice_type % 5 == 2;
         let bs: Vec<&[u8]> = au.base.iter().map(|s| s.as_slice()).collect();
-        let mut bf = if au.base_idr {
-            let mut f = decode_intra_frame(&bs, au.base_idc, bsps, bpps)?;
-            f.deblock_intra(bpps.chroma_qp_index_offset);
-            f
+        let base_res = if base_intra {
+            decode_intra_frame(&bs, au.base_idc, au.base_idr, bsps, bpps).map(|mut f| {
+                f.deblock_intra(bpps.chroma_qp_index_offset);
+                f
+            })
         } else {
-            let (mut f, mf) = decode_p_frame(&bs, au.base_idc, false, bsps, bpps, &[prev_base.as_ref().unwrap()])?;
-            deblock_inter(&mut f, &mf, bpps.chroma_qp_index_offset);
-            f
+            let refs: Vec<&Frame> = base_dpb.iter().collect();
+            decode_p_frame(&bs, au.base_idc, false, bsps, bpps, &refs).map(|(mut f, mf)| {
+                deblock_inter(&mut f, &mf, bpps.chroma_qp_index_offset);
+                f
+            })
+        };
+        let mut bf = match base_res {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("… stopped at frame {k} (base): {e}");
+                break;
+            }
         };
         ok &= cmp("base", &bf, &bjm, k);
 
         // ---- dependent view ----
+        // Anchor: inter-view only (L0 = [base]). Non-anchor: temporal refs
+        // (recent first) then the inter-view base appended.
         let ds: Vec<&[u8]> = au.dep.iter().map(|s| s.as_slice()).collect();
-        let (mut df, mf) = if au.base_idr {
-            // Anchor: inter-view from the base only (IDR-marked P).
-            decode_p_frame(&ds, au.dep_idc, true, dsps, dpps, &[&bf])?
-        } else {
-            // Temporal: L0 = [previous dependent, current base (inter-view)].
-            decode_p_frame(&ds, au.dep_idc, false, dsps, dpps, &[prev_dep.as_ref().unwrap(), &bf])?
+        let mut drefs: Vec<&Frame> = if au.dep_anchor { Vec::new() } else { dep_dpb.iter().collect() };
+        drefs.push(&bf);
+        let mut df = match decode_p_frame(&ds, au.dep_idc, au.dep_idr, dsps, dpps, &drefs) {
+            Ok((mut f, mf)) => {
+                deblock_inter(&mut f, &mf, dpps.chroma_qp_index_offset);
+                f
+            }
+            Err(e) => {
+                eprintln!("… stopped at frame {k} (dep): {e}");
+                break;
+            }
         };
-        deblock_inter(&mut df, &mf, dpps.chroma_qp_index_offset);
         ok &= cmp("dep", &df, &djm, k);
+        if !ok {
+            std::process::exit(1);
+        }
+        decoded += 1;
 
-        eprintln!("frame {k}: base {} dep {}", if au.base_idr { "IDR" } else { "P" }, if au.base_idr { "anchor" } else { "P(2ref)" });
-        prev_base = Some(bf);
-        prev_dep = Some(df);
+        // Update DPBs (sliding window, newest at front).
+        base_dpb.insert(0, bf);
+        base_dpb.truncate(max_ref);
+        dep_dpb.insert(0, df);
+        dep_dpb.truncate(max_ref);
     }
-    if ok {
-        eprintln!("✓ MVC clip: both views, {} frames, decoded bit-exact vs JM (temporal + inter-view)", aus.len());
-    } else {
+    eprintln!("✓ MVC clip: both views, {decoded}/{} frames decoded bit-exact vs JM (temporal + inter-view)", aus.len());
+    if decoded == 0 {
         std::process::exit(1);
     }
     Ok(())

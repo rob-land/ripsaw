@@ -112,6 +112,7 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         sh_last = Some(sh);
 
     loop {
+        anyhow::ensure!(addr < width * (fh / 16), "decode ran past the frame (desync — unsupported feature?) at addr {addr}");
         let mbx = addr % width;
         let mby = addr / width;
         let (mbx4, mby4) = (mbx * 4, mby * 4);
@@ -143,39 +144,60 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         }
 
         let mb_type = decode_inter_mb_type(&mut e, &mut ctx);
-        let parts: Vec<(usize, usize, usize, usize, Option<Directional>)> = if mb_type == 4 {
+        // mb_type ≥ 6 is an intra MB inside the P-slice (I_NxN / I_16x16 /
+        // I_PCM) — not yet reconstructed here (needs the intra pred + residual
+        // path wired in). Real P-frames use them; surface it cleanly.
+        anyhow::ensure!(mb_type <= 4, "intra MB in P-slice not yet supported (mb_type {mb_type})");
+        // (bx4, by4, w4, h4, dir, group) — `group` is the ref_idx unit: the
+        // b8 for P_8x8, else the partition. P_8x8 sub_mb_type expands to its
+        // sub-partitions (8x8/8x4/4x8/4x4), all L0, median prediction.
+        let (parts, ngroups): (Vec<(usize, usize, usize, usize, Option<Directional>, usize)>, usize) = if mb_type == 4 {
             let subs: Vec<i64> = (0..4).map(|_| decode_sub_mb_type(&mut e, &mut ctx)).collect();
-            assert!(subs.iter().all(|&s| s == 0), "only P_L0_8x8 sub-partitions handled");
-            vec![(0, 0, 2, 2, None), (2, 0, 2, 2, None), (0, 2, 2, 2, None), (2, 2, 2, 2, None)]
+            let mut parts = Vec::new();
+            for b8 in 0..4usize {
+                let (gx0, gy0) = ((b8 & 1) * 2, (b8 >> 1) * 2);
+                let sp: &[(usize, usize, usize, usize)] = match subs[b8] {
+                    0 => &[(0, 0, 2, 2)],
+                    1 => &[(0, 0, 2, 1), (0, 1, 2, 1)],
+                    2 => &[(0, 0, 1, 2), (1, 0, 1, 2)],
+                    _ => &[(0, 0, 1, 1), (1, 0, 1, 1), (0, 1, 1, 1), (1, 1, 1, 1)],
+                };
+                for &(dx, dy, w4, h4) in sp {
+                    parts.push((gx0 + dx, gy0 + dy, w4, h4, None, b8));
+                }
+            }
+            (parts, 4)
         } else {
-            partitions(mb_type)
+            let base = partitions(mb_type);
+            let n = base.len();
+            (base.into_iter().enumerate().map(|(i, (a, b, c, d, e))| (a, b, c, d, e, i)).collect(), n)
         };
 
-        // ref_idx_l0 for each partition (all before the mvds — § 7.3.5.1),
-        // when more than one L0 reference. Fill g_ref so later partitions'
-        // and MBs' ref_idx contexts + MV prediction see it.
-        let mut part_ref: Vec<i32> = Vec::new();
-        for &(bx4, by4, _, _, _) in &parts {
-            let (gx, gy) = (mbx4 + bx4, mby4 + by4);
-            let ridx = if num_ref > 1 {
+        // ref_idx_l0 per group (before the mvds — § 7.3.5.1), when > 1 L0
+        // reference. Fill g_ref so later groups'/MBs' ref_idx contexts + MV
+        // prediction see it.
+        let mut group_ref = vec![0i32; ngroups];
+        if num_ref > 1 {
+            for g in 0..ngroups {
+                let &(bx4, by4, ..) = parts.iter().find(|p| p.5 == g).unwrap();
+                let (gx, gy) = (mbx4 + bx4, mby4 + by4);
                 let la = nref(&g_ref, gx as i32 - 1, gy as i32, slice_start, width, bw4);
                 let ub = nref(&g_ref, gx as i32, gy as i32 - 1, slice_start, width, bw4);
-                decode_ref_idx(&mut e, &mut ctx, (la > 0) as u32, if ub > 0 { 2 } else { 0 }) as i32
-            } else {
-                0
-            };
-            part_ref.push(ridx);
-            let (pw, ph) = parts.iter().find(|p| p.0 == bx4 && p.1 == by4).map(|p| (p.2, p.3)).unwrap();
-            for j in 0..ph {
-                for i in 0..pw {
-                    g_ref[(gy + j) * bw4 + gx + i] = ridx;
+                let ridx = decode_ref_idx(&mut e, &mut ctx, (la > 0) as u32, if ub > 0 { 2 } else { 0 }) as i32;
+                group_ref[g] = ridx;
+                for &(pbx, pby, pw, ph, _, _) in parts.iter().filter(|p| p.5 == g) {
+                    for j in 0..ph {
+                        for i in 0..pw {
+                            g_ref[(mby4 + pby + j) * bw4 + mbx4 + pbx + i] = ridx;
+                        }
+                    }
                 }
             }
         }
 
         let mut part_mv = Vec::new();
-        for (pi, &(bx4, by4, w4, h4, dir)) in parts.iter().enumerate() {
-            let ridx = part_ref[pi];
+        for &(bx4, by4, w4, h4, dir, group) in &parts {
+            let ridx = group_ref[group];
             let (gx, gy) = (mbx4 + bx4, mby4 + by4);
             let lmvd = nb_mvd(&g_mvd, &g_ref, gx as i32 - 1, gy as i32, bw4, width, slice_start);
             let umvd = nb_mvd(&g_mvd, &g_ref, gx as i32, gy as i32 - 1, bw4, width, slice_start);

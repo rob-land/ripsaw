@@ -61,7 +61,7 @@ impl Plane {
 /// increasing). A single-slice frame is `&[rbsp]`; a multi-slice frame passes
 /// all its slices. Slice boundaries break intra prediction (cross-slice
 /// neighbours are unavailable). Pre-deblock.
-pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, sps: &Sps, pps: &Pps) -> anyhow::Result<Frame> {
+pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps) -> anyhow::Result<Frame> {
     let width = sps.pic_width_in_mbs as usize;
     let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
     let (cw, ch) = (fw / 2, fh / 2);
@@ -82,7 +82,7 @@ pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, sps: &Sps, pps: &Pp
 
     for rbsp in slices {
         let mut r = BitReader::new(rbsp);
-        let sh = parse_slice_header(&mut r, true, nal_ref_idc, sps, pps)?;
+        let sh = parse_slice_header(&mut r, idr, nal_ref_idc, sps, pps)?;
         let slice_qp = 26 + pps.pic_init_qp_minus26 + sh.slice_qp_delta;
         let slice_start = sh.first_mb_in_slice as usize;
         let cabac_start = (r.position_bits() + 7) / 8;

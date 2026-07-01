@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
             }
             5 => {
                 let (sps, pps) = (sps.as_ref().unwrap(), pps.as_ref().unwrap());
-                let mut frame = decode_intra_frame(&[&rbsp[..]], hdr.nal_ref_idc, sps, pps)?;
+                let mut frame = decode_intra_frame(&[&rbsp[..]], hdr.nal_ref_idc, true, sps, pps)?;
                 frame.deblock_intra(pps.chroma_qp_index_offset);
                 let jm = std::fs::read(&jm_yuv)?;
                 let (ysz, csz) = (frame.fw * frame.fh, frame.cw * frame.ch);
