@@ -19,7 +19,7 @@ use crate::mvc::nal::parse_nal_unit_header;
 use crate::mvc::pps::{parse_pic_parameter_set, Pps};
 use crate::mvc::rbsp::extract_rbsp;
 use crate::mvc::recon::{decode_intra_frame, Frame};
-use crate::mvc::recon_inter::{deblock_inter, decode_p_frame};
+use crate::mvc::recon_inter::{deblock_b, deblock_inter, decode_b_frame, decode_p_frame, MotionField};
 use crate::mvc::ref_pic_list_modification::RefPicListModification;
 use crate::mvc::slice_header::parse_slice_header;
 use crate::mvc::sps::{parse_seq_parameter_set_data, parse_subset_sps_rbsp, Sps};
@@ -167,6 +167,19 @@ where
     F: FnMut(&Frame, &Frame, u32, u32) -> anyhow::Result<()>,
 {
     let (aus, bsps, bpps, dsps, dpps) = parse_stream(data)?;
+    // Route by GOP structure: an all-I/P stream (decode order == display
+    // order, dependent L0 built from ref_pic_list_modification) uses the
+    // sliding-window path below; a hierarchical stream with B-slices uses the
+    // POC-ordered path (temporal L0/L1, display-order reorder).
+    let has_b = aus.iter().any(|au| {
+        parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, &bsps, &bpps)
+            .map(|sh| sh.slice_type % 5 == 1)
+            .unwrap_or(false)
+    });
+    if has_b {
+        return decode_annex_b_hierarchical(&aus, &bsps, &bpps, &dsps, &dpps, on_frame);
+    }
+
     let (dw, dh) = (bsps.width, bsps.height);
     let max_ref = bsps.max_num_ref_frames.max(1) as usize;
     let mut base_dpb: Vec<Frame> = Vec::new();
@@ -220,6 +233,137 @@ where
     }
 
     Ok(ClipInfo { width: bsps.width, height: bsps.height, frames })
+}
+
+/// One view's short-term reference: display POC, deblocked frame, L0 motion
+/// field (co-located source for a B-slice's spatial direct).
+type ViewRef = (i32, Frame, MotionField);
+
+/// Decode one hierarchical-GOP view frame. `inter_view` = the base frame for a
+/// dependent anchor (inter-view L0); otherwise `refs` are temporal. B uses
+/// L0 = nearest-past, L1 = nearest-future (num_ref 1; empty
+/// ref_pic_list_modification → default temporal list).
+#[allow(clippy::too_many_arguments)]
+fn decode_hier_view(slices: &[&[u8]], idr: bool, idc: u8, st: u32, poc: i32, sps: &Sps, pps: &Pps, refs: &[ViewRef], inter_view: Option<&Frame>) -> anyhow::Result<(Frame, Option<MotionField>)> {
+    if st == 2 {
+        let mut f = decode_intra_frame(slices, idc, idr, sps, pps)?;
+        f.deblock_intra(pps.chroma_qp_index_offset);
+        Ok((f, None))
+    } else if st == 0 {
+        let reff: &Frame = if let Some(iv) = inter_view {
+            iv
+        } else {
+            &refs.iter().filter(|(p, ..)| *p < poc).max_by_key(|(p, ..)| *p).ok_or_else(|| anyhow::anyhow!("no past ref for P"))?.1
+        };
+        let (mut f, mf) = decode_p_frame(slices, idc, idr, sps, pps, &[reff])?;
+        deblock_inter(&mut f, &mf, pps.chroma_qp_index_offset);
+        Ok((f, Some(mf)))
+    } else {
+        let l0 = refs.iter().filter(|(p, ..)| *p < poc).max_by_key(|(p, ..)| *p).ok_or_else(|| anyhow::anyhow!("no L0 for B"))?;
+        let l1 = refs.iter().filter(|(p, ..)| *p > poc).min_by_key(|(p, ..)| *p).ok_or_else(|| anyhow::anyhow!("no L1 for B"))?;
+        let (mut f, bmf) = decode_b_frame(slices, idc, idr, sps, pps, &[(&l0.1, l0.0)], &[(&l1.1, l1.0)], &l1.2, (32, 32))?;
+        deblock_b(&mut f, &bmf, pps.chroma_qp_index_offset);
+        Ok((f, None))
+    }
+}
+
+/// POC-ordered decode for a hierarchical (B-slice) MVC stream, emitting frame
+/// pairs in DISPLAY order. Per-view DPBs are reset at each GOP boundary (base
+/// IDR / dependent anchor); a per-GOP reorder buffer flushes in POC order at
+/// each new GOP. The dependent view's anchor is inter-view-predicted from the
+/// base frame of the same access unit; its later P/B frames are temporal.
+fn decode_annex_b_hierarchical<F>(aus: &[Au], bsps: &Sps, bpps: &Pps, dsps: &Sps, dpps: &Pps, mut on_frame: F) -> anyhow::Result<ClipInfo>
+where
+    F: FnMut(&Frame, &Frame, u32, u32) -> anyhow::Result<()>,
+{
+    let (dw, dh) = (bsps.width, bsps.height);
+    let max_lsb = 1i32 << (bsps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+    let mut brefs: Vec<ViewRef> = Vec::new();
+    let mut drefs: Vec<ViewRef> = Vec::new();
+    let (mut pmsb, mut plsb) = (0i32, 0i32);
+    // Per-GOP reorder buffer: (display POC, base, dep). Flushed in POC order at
+    // each IDR and at end.
+    let mut pending: Vec<(i32, Frame, Frame)> = Vec::new();
+    let mut frames = 0usize;
+
+    let mut flush = |pending: &mut Vec<(i32, Frame, Frame)>, on_frame: &mut F| -> anyhow::Result<()> {
+        pending.sort_by_key(|(p, ..)| *p);
+        for (_, b, d) in pending.drain(..) {
+            on_frame(&b, &d, dw, dh)?;
+        }
+        Ok(())
+    };
+
+    for au in aus {
+        let bsh = parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, bsps, bpps)?;
+        let lsb = bsh.pic_order_cnt_lsb.unwrap_or(0) as i32;
+        if au.base_idr {
+            flush(&mut pending, &mut on_frame)?;
+            brefs.clear();
+            drefs.clear();
+            pmsb = 0;
+            plsb = 0;
+        }
+        // Full POC (§8.2.1.1): resolve the LSB wrap against the last ref pic.
+        let msb = if au.base_idr {
+            0
+        } else if lsb < plsb && plsb - lsb >= max_lsb / 2 {
+            pmsb + max_lsb
+        } else if lsb > plsb && lsb - plsb > max_lsb / 2 {
+            pmsb - max_lsb
+        } else {
+            pmsb
+        };
+        let poc = msb + lsb;
+        if au.base_idc != 0 {
+            pmsb = msb;
+            plsb = lsb;
+        }
+
+        // Base view.
+        let bs: Vec<&[u8]> = au.base.iter().map(|s| s.as_slice()).collect();
+        let (bf, bmf) = decode_hier_view(&bs, au.base_idr, au.base_idc, bsh.slice_type % 5, poc, bsps, bpps, &brefs, None)?;
+
+        // Dependent view: anchor is inter-view from the base just decoded.
+        let ds: Vec<&[u8]> = au.dep.iter().map(|s| s.as_slice()).collect();
+        let dsh = parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, dsps, dpps)?;
+        let inter_view = if au.dep_anchor { Some(&bf) } else { None };
+        let (df, dmf) = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dsh.slice_type % 5, poc, dsps, dpps, &drefs, inter_view)?;
+
+        if au.base_idc != 0 {
+            brefs.push((poc, clone_frame(&bf), bmf.unwrap_or_else(empty_motion_field)));
+        }
+        if au.dep_idc != 0 {
+            drefs.push((poc, clone_frame(&df), dmf.unwrap_or_else(empty_motion_field)));
+        }
+        pending.push((poc, bf, df));
+        frames += 1;
+    }
+    flush(&mut pending, &mut on_frame)?;
+
+    Ok(ClipInfo { width: bsps.width, height: bsps.height, frames })
+}
+
+fn empty_motion_field() -> MotionField {
+    MotionField { mv: Vec::new(), refidx: Vec::new(), nz: Vec::new(), bw4: 0, bh4: 0 }
+}
+
+fn clone_frame(f: &Frame) -> Frame {
+    Frame {
+        y: f.y.clone(),
+        cb: f.cb.clone(),
+        cr: f.cr.clone(),
+        fw: f.fw,
+        fh: f.fh,
+        cw: f.cw,
+        ch: f.ch,
+        width_mbs: f.width_mbs,
+        mb_info: f.mb_info.clone(),
+        qp: f.qp.clone(),
+        disable_deblock_idc: f.disable_deblock_idc,
+        slice_alpha_c0_offset_div2: f.slice_alpha_c0_offset_div2,
+        slice_beta_offset_div2: f.slice_beta_offset_div2,
+    }
 }
 
 /// Decode an MVC Annex B stream to two cropped planar YUV 4:2:0 files — view
