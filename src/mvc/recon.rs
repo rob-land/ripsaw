@@ -414,21 +414,19 @@ fn seq4(cx: usize, cy: usize, width: usize) -> usize {
     ((mby * width + mbx) * 4 + region) * 4 + sub
 }
 
-fn gather_nxn<'a>(p: &Plane, px: usize, py: usize, n: usize, mb_top: bool) -> NeighborsNxN<'a> {
+fn gather_nxn(p: &Plane, px: usize, py: usize, n: usize, mb_top: bool) -> NeighborsNxN {
     // The whole-MB (16×16 / chroma 8×8) block's top edge is always the MB
     // boundary, so its top is available only if the MB above is in-slice.
     let top_avail = py > 0 && mb_top;
     let left_avail = px > 0;
-    let top: Vec<i32> = (0..n).map(|i| if top_avail { p.at(px + i, py - 1) } else { 0 }).collect();
-    let left: Vec<i32> = (0..n).map(|j| if left_avail { p.at(px - 1, py + j) } else { 0 }).collect();
-    let corner = if top_avail && left_avail { p.at(px - 1, py - 1) } else { 0 };
-    NeighborsNxN {
-        top: Box::leak(top.into_boxed_slice()),
-        left: Box::leak(left.into_boxed_slice()),
-        corner,
-        top_avail,
-        left_avail,
+    let mut top = [0i32; 16];
+    let mut left = [0i32; 16];
+    for i in 0..n {
+        top[i] = if top_avail { p.at(px + i, py - 1) } else { 0 };
+        left[i] = if left_avail { p.at(px - 1, py + i) } else { 0 };
     }
+    let corner = if top_avail && left_avail { p.at(px - 1, py - 1) } else { 0 };
+    NeighborsNxN { top, left, corner, top_avail, left_avail }
 }
 
 fn gather_8x8(p: &Plane, gbx: usize, gby: usize, fw: usize, bw: usize, cur_seq: usize, mb_top: bool) -> Neighbors8x8 {

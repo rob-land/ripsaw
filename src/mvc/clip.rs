@@ -278,11 +278,19 @@ where
 {
     let (dw, dh) = (bsps.width, bsps.height);
     let max_lsb = 1i32 << (bsps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+    // Bound memory to a handful of frames regardless of GOP length: keep only
+    // the most-recent references (a P references the previous anchor; a B its
+    // two surrounding anchors — all recent in decode order), and hold at most
+    // `reorder_cap` frames in the reorder buffer. Both are sized by the DPB
+    // bound (max_num_ref_frames), which upper-bounds the real reference count
+    // and reorder depth for these streams.
+    let ref_window = (bsps.max_num_ref_frames as usize).max(2);
+    let reorder_cap = (bsps.max_num_ref_frames as usize).max(2);
     let mut brefs: Vec<ViewRef> = Vec::new();
     let mut drefs: Vec<ViewRef> = Vec::new();
     let (mut pmsb, mut plsb) = (0i32, 0i32);
-    // Per-GOP reorder buffer: (display POC, base, dep). Flushed in POC order at
-    // each IDR and at end.
+    // Reorder buffer: (display POC, base, dep). Frames are bump-emitted in
+    // display order as it fills; flushed at each IDR (POC resets there) + end.
     let mut pending: Vec<(i32, Frame, Frame)> = Vec::new();
     let mut frames = 0usize;
 
@@ -332,11 +340,24 @@ where
 
         if au.base_idc != 0 {
             brefs.push((poc, clone_frame(&bf), bmf.unwrap_or_else(empty_motion_field)));
+            if brefs.len() > ref_window {
+                brefs.remove(0); // drop the oldest (lowest-POC) reference
+            }
         }
         if au.dep_idc != 0 {
             drefs.push((poc, clone_frame(&df), dmf.unwrap_or_else(empty_motion_field)));
+            if drefs.len() > ref_window {
+                drefs.remove(0);
+            }
         }
         pending.push((poc, bf, df));
+        // Bump the lowest-POC frame out once the buffer exceeds the reorder
+        // depth — keeps memory bounded instead of holding a whole GOP.
+        while pending.len() > reorder_cap {
+            let i = pending.iter().enumerate().min_by_key(|(_, (p, ..))| *p).map(|(i, _)| i).unwrap();
+            let (_, b, d) = pending.remove(i);
+            on_frame(&b, &d, dw, dh)?;
+        }
         frames += 1;
     }
     flush(&mut pending, &mut on_frame)?;

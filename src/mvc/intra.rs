@@ -464,9 +464,10 @@ impl PlaneMode {
 
 /// Neighbours for an N×N whole-block predictor (N = 16 luma, 8 chroma).
 /// `top`/`left` are the N samples above/left; `corner` is `p[-1][-1]`.
-pub struct NeighborsNxN<'a> {
-    pub top: &'a [i32],
-    pub left: &'a [i32],
+pub struct NeighborsNxN {
+    /// N samples above / left (N = 16 luma, 8 chroma; unused tail is 0).
+    pub top: [i32; 16],
+    pub left: [i32; 16],
     pub corner: i32,
     pub top_avail: bool,
     pub left_avail: bool,
@@ -559,7 +560,7 @@ pub fn predict_chroma_8x8(mode: PlaneMode, n: &NeighborsNxN) -> [[i32; 8]; 8] {
     p
 }
 
-impl<'a> NeighborsNxN<'a> {
+impl NeighborsNxN {
     #[inline]
     fn top_or_corner(&self, i: i32) -> i32 {
         if i < 0 {
@@ -733,14 +734,19 @@ mod tests {
         assert_eq!(p[0], [avg2(0, 4), avg2(4, 8), avg2(8, 12), avg2(12, 16)]);
     }
 
-    fn nxn(top: Vec<i32>, left: Vec<i32>, corner: i32) -> (Vec<i32>, Vec<i32>, i32) {
-        (top, left, corner)
+    fn arr16(v: &[i32]) -> [i32; 16] {
+        let mut a = [0i32; 16];
+        a[..v.len()].copy_from_slice(v);
+        a
+    }
+    fn nxn(top: Vec<i32>, left: Vec<i32>, corner: i32) -> ([i32; 16], [i32; 16], i32) {
+        (arr16(&top), arr16(&left), corner)
     }
 
     #[test]
     fn pred16_vertical_horizontal_dc() {
         let (t, l, c) = nxn(vec![3; 16], vec![7; 16], 0);
-        let n = NeighborsNxN { top: &t, left: &l, corner: c, top_avail: true, left_avail: true };
+        let n = NeighborsNxN { top: t, left: l, corner: c, top_avail: true, left_avail: true };
         assert_eq!(predict_16x16(PlaneMode::Vertical, &n)[5], [3; 16]);
         assert_eq!(predict_16x16(PlaneMode::Horizontal, &n)[5], [7; 16]);
         // DC both: (16*3 + 16*7 + 16) >> 5 = (48+112+16)/32 = 5.
@@ -751,7 +757,7 @@ mod tests {
     fn pred16_plane_constant_field_is_constant() {
         // Uniform neighbourhood -> H=V=0, a=32p, pred=(32p+16)>>5 = p.
         let (t, l, c) = nxn(vec![100; 16], vec![100; 16], 100);
-        let n = NeighborsNxN { top: &t, left: &l, corner: c, top_avail: true, left_avail: true };
+        let n = NeighborsNxN { top: t, left: l, corner: c, top_avail: true, left_avail: true };
         assert_eq!(predict_16x16(PlaneMode::Plane, &n), [[100; 16]; 16]);
     }
 
@@ -760,9 +766,7 @@ mod tests {
         // top = 0..8 scaled, left = constant; check the four 4×4 DCs pick
         // the right neighbours. top[0..4]=10 each, top[4..8]=20 each;
         // left all = 40.
-        let t = vec![10, 10, 10, 10, 20, 20, 20, 20];
-        let l = vec![40; 8];
-        let n = NeighborsNxN { top: &t, left: &l, corner: 0, top_avail: true, left_avail: true };
+        let n = NeighborsNxN { top: arr16(&[10, 10, 10, 10, 20, 20, 20, 20]), left: arr16(&[40; 8]), corner: 0, top_avail: true, left_avail: true };
         let p = predict_chroma_8x8(PlaneMode::Dc, &n);
         // Block (0,0): both -> (40 + 160 + 4)>>3 = 25.
         assert_eq!(p[0][0], (40 + 160 + 4) >> 3);
@@ -776,9 +780,7 @@ mod tests {
 
     #[test]
     fn chroma_plane_constant_field_is_constant() {
-        let t = vec![55; 8];
-        let l = vec![55; 8];
-        let n = NeighborsNxN { top: &t, left: &l, corner: 55, top_avail: true, left_avail: true };
+        let n = NeighborsNxN { top: arr16(&[55; 8]), left: arr16(&[55; 8]), corner: 55, top_avail: true, left_avail: true };
         assert_eq!(predict_chroma_8x8(PlaneMode::Plane, &n), [[55; 8]; 8]);
     }
 
