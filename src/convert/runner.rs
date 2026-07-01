@@ -231,17 +231,24 @@ async fn run_mvc_pipeline(
     // — e.g. the stream uses a feature libmvc doesn't handle yet — fall back
     // to the JM reference decoder when it's available.
     log(&event_tx, "Decoding MVC natively (libmvc)…");
-    let native = {
+    let native: Result<crate::mvc::clip::ClipInfo> = {
         let h264 = h264_path.clone();
         let v0 = view0.clone();
         let v1 = view1.clone();
-        tokio::task::spawn_blocking(move || -> Result<crate::mvc::clip::ClipInfo> {
+        // A panic inside libmvc (e.g. an index-out-of-bounds on an
+        // unsupported bitstream feature) must be treated as a decode failure
+        // and fall back to ldecod, NOT abort the conversion — so flatten the
+        // JoinError into the same Err path as a clean decode error.
+        match tokio::task::spawn_blocking(move || -> Result<crate::mvc::clip::ClipInfo> {
             let data = std::fs::read(&h264)
                 .with_context(|| format!("reading {}", h264.display()))?;
             crate::mvc::clip::decode_annex_b_to_yuv_files(&data, &v0, &v1)
         })
         .await
-        .context("libmvc decode thread panicked")?
+        {
+            Ok(inner) => inner,
+            Err(join_err) => Err(anyhow!("libmvc panicked while decoding: {join_err}")),
+        }
     };
 
     match native {

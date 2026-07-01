@@ -128,6 +128,15 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         let mby = addr / width;
         let (mbx4, mby4) = (mbx * 4, mby * 4);
         let mb_top = addr >= width && addr - width >= slice_start;
+        // The per-MB grids are pushed in decode order, so a neighbour is only
+        // reachable if it was already decoded. A CABAC desync that ends a slice
+        // early leaves a gap before the next slice's first_mb; detect it here
+        // and bail cleanly (the caller falls back) instead of indexing past the
+        // grid.
+        anyhow::ensure!(
+            (mbx == 0 || addr - 1 < skip_grid.len()) && (!mb_top || addr - width < skip_grid.len()),
+            "slice desync — neighbour MB not decoded (unsupported feature?) at addr {addr}"
+        );
         let left_ns = if mbx != 0 { (!skip_grid[addr - 1]) as u32 } else { 0 };
         let up_ns = if mb_top { (!skip_grid[addr - width]) as u32 } else { 0 };
         let (is_skip, _) = decode_mb_skip_flag(&mut e, &mut ctx, left_ns, up_ns);
@@ -585,6 +594,10 @@ pub fn decode_b_frame(
             let (mbx, mby) = (addr % width, addr / width);
             let (mbx4, mby4) = (mbx * 4, mby * 4);
             let mb_top = addr >= width && addr - width >= slice_start;
+            anyhow::ensure!(
+                (mbx == 0 || addr - 1 < skip_grid.len()) && (!mb_top || addr - width < skip_grid.len()),
+                "slice desync — neighbour MB not decoded (unsupported feature?) at addr {addr}"
+            );
             let left_ns = if mbx != 0 { (!skip_grid[addr - 1]) as u32 } else { 0 };
             let up_ns = if mb_top { (!skip_grid[addr - width]) as u32 } else { 0 };
             let (is_skip, _) = decode_mb_skip_flag_b(&mut e, &mut ctx, left_ns, up_ns);
