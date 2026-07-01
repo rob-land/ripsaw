@@ -92,14 +92,28 @@ other output format → encode).
 `convert::runner::run_mvc_pipeline` now decodes natively via that function on
 a blocking thread, feeding the existing ffmpeg compose/encode step unchanged.
 Output is **byte-identical to JM** for the full 96-frame real clip. If the
-native decode fails (e.g. **B-slices** — hierarchical GOPs, which libmvc
-doesn't handle yet; `mvc::clip` detects them and errors cleanly), the pipeline
-falls back to `ldecod` when available. `examples/mvc_decode_yuv` is the
-standalone native decode CLI.
+native decode fails (a feature libmvc doesn't handle yet), the pipeline falls
+back to `ldecod` when available. `examples/mvc_decode_yuv` is the standalone
+native decode CLI.
 
-Remaining libmvc gaps for broader coverage: **B-slices** (many retail 3D BDs
-use IBP GOPs), and multi-PPS / long-term-reference streams. The target disc
-(all-I/P) is fully covered.
+## B-slices / hierarchical GOPs (done)
+
+`decode_b_frame` + `deblock_b` (`recon_inter.rs`) add the B-slice decoder
+(multi-slice, spatial direct, explicit L0/L1/Bi partitions, implicit weighted
+bi-pred, intra-in-B, two-list deblock bS). `mvc::clip::decode_annex_b` now
+routes by GOP structure: all-I/P streams keep the sliding-window path; streams
+with B-slices take a POC-ordered path (`decode_annex_b_hierarchical`) that
+derives full POC, reorders output to display order (per-GOP reorder buffer),
+and decodes both views — the dependent anchor inter-view-predicted from the
+base, later dependent P/B temporal. Verified **byte-identical to JM** on a real
+IBP MVC stream (both views, 48 frames incl. inter-view; `examples/decode_bclip`
+base-only and `examples/decode_bclip_mvc` both-view are the validators).
+
+So both all-I/P (Friday-13th disc) and hierarchical IBP MVC now decode
+natively. Remaining gaps for broader coverage: multi-PPS, long-term
+references, and B-streams whose dependent view uses non-default
+ref_pic_list_modification (the hierarchical path assumes default temporal
+dependent lists; the I/P path honors the modification).
 
 ## What libmvc needs (the gaps)
 
