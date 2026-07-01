@@ -52,26 +52,31 @@ Both the intra and P paths are multi-slice (`&[&[u8]]`, per-slice CABAC re-init
 - the dependent slices reference the subset SPS (NAL 15) + their own PPS (the
   NAL 8 *after* the subset SPS), resolved separately from the base's.
 
-## Temporal decode — 25/96 frames bit-exact (`examples/decode_mvc_clip`)
+## Temporal decode — FULL 96/96 frames bit-exact (`examples/decode_mvc_clip`)
 
-The full temporal clip decode with a minimal DPB now works for the first 25
-access units of the real clip — BOTH views, bit-exact vs JM:
+The whole real clip (96 access units) now decodes bit-exact vs JM's per-view
+ground truth — BOTH views, temporal + inter-view. Three pieces got past the
+frame-25 wall:
 - **base view**: a single-ref P chain, plus a mid-GOP non-IDR I-frame (routed
   by slice_type). `decode_p_frame` takes a ref LIST and decodes `ref_idx` per
-  partition (per-b8 for P_8x8) — added `mb_inter::decode_ref_idx` /
-  INIT_REF_NO_P; a per-view sliding-window DPB feeds L0.
-- **dependent view**: routed by the MVC extension — `anchor_pic_flag` →
-  inter-view-only `L0 = [base]`; otherwise the temporal 2-ref
-  `L0 = [prev dependent, current base]`. `non_idr_flag` selects the header.
-- P_8x8 now expands all sub_mb_types (8×8/8×4/4×8/4×4).
+  partition (per-b8 for P_8x8) — `mb_inter::decode_ref_idx` / INIT_REF_NO_P;
+  a per-view sliding-window DPB feeds L0. P_8x8 expands all sub_mb_types.
+- **intra MBs inside a P-slice** (I_NxN / I_16x16): `recon.rs`'s per-MB intra
+  reconstruction is factored into `reconstruct_intra_mb`; `decode_p_frame`
+  decodes the intra header after `mb_type ≥ 6`, with ipr/cipr pred-mode
+  contexts. (Real P-frames use these; they were the graceful-stop at frame 25.)
+- **mb_qp_delta context**: a skipped MB infers `mb_qp_delta = 0`, so the
+  running `last_dquant` (the ctxIdxInc predictor) must reset on skip — else
+  the first coded MB after a nonzero-delta MB + skip run desyncs CABAC.
+- **dependent-view reference list**: every non-anchor dependent slice carries
+  `ref_pic_list_modification` `[InterViewAdd, PicNumSub]`, i.e. **L0 =
+  [inter-view base, temporal previous dependent]**. The modification is
+  parsed *and now honored* (`build_dep_l0`, §8.2.4.3 + Annex G). Using the
+  default list order silently passed early frames (low-disparity/low-motion
+  content made the wrong refs identical) then drifted ±1 from frame 25.
 
-It graceful-stops at frame 25 on the remaining feature: **intra MBs inside a
-P-slice** (I_NxN / I_16x16 / I_PCM — real P-frames use them; `decode_p_frame`
-returns a clean error). Implementing that (factor recon.rs's per-MB intra
-reconstruction into a reusable fn; add the intra pred-mode contexts to the P
-path; decode the intra header after the P mb_type) should carry the decode
-through the whole clip. Then B-slices if any, then the Ripsaw runner
-integration.
+Next: the Ripsaw runner integration (libmvc → compose both views → FSBS or
+other output format → encode).
 
 ## What libmvc needs (the gaps)
 
