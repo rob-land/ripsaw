@@ -124,7 +124,7 @@ fn main() -> anyhow::Result<()> {
             }
             5 => {
                 let (sps, pps) = (sps.as_ref().unwrap(), pps.as_ref().unwrap());
-                let mut f = decode_intra_frame(&rbsp, hdr.nal_ref_idc, sps, pps)?;
+                let mut f = decode_intra_frame(&[&rbsp[..]], hdr.nal_ref_idc, sps, pps)?;
                 f.deblock_intra(pps.chroma_qp_index_offset);
                 refs.push((0, f)); // IDR POC 0
                 slice_no += 1;

@@ -1,9 +1,8 @@
-// Probe: how close is libmvc's intra decoder to real 1080p Blu-ray content?
-// Decode the FIRST base-view IDR slice of a real MVC stream and diff the region
-// it covers against JM's per-view ground truth. The first slice has
-// first_mb_in_slice = 0, so it decodes standalone (no cross-slice neighbour
-// issue) — this isolates "does the intra decode handle real content" from the
-// multi-slice work. Reports how far it gets.
+// Decode the full base-view IDR of a real MVC stream (6 slices at 1080p) with
+// libmvc's multi-slice intra decoder, and diff the whole frame against JM's
+// per-view ground truth. Validates real 1920x1080 Blu-ray intra content: the
+// custom scaling matrix, the I_8x8 modes, and cross-slice neighbour
+// unavailability.
 //
 //   cargo run --release --example decode_mvc_base -- au0.h264 mvc_ViewId0000.yuv
 
@@ -21,6 +20,9 @@ fn main() -> anyhow::Result<()> {
     let data = std::fs::read(&h264)?;
     let (mut sps, mut pps): (Option<Sps>, Option<Pps>) = (None, None);
 
+    // Collect the base view's IDR slices (NAL 5); stop at the dependent view.
+    let mut base_slices: Vec<Vec<u8>> = Vec::new();
+    let mut nal_ref_idc = 0;
     for nal in NalSplitter::new(&data) {
         if nal.is_empty() {
             continue;
@@ -28,72 +30,49 @@ fn main() -> anyhow::Result<()> {
         let Ok((hdr, consumed)) = parse_nal_unit_header(nal) else { continue };
         let rbsp = extract_rbsp(&nal[consumed..]);
         match hdr.nal_unit_type {
-            7 => {
-                let s = parse_seq_parameter_set_data(&mut BitReader::new(&rbsp))?;
-                eprintln!("SPS: {}x{} (mbs {}x{}), chroma {}, profile {}", s.pic_width_in_mbs * 16, s.pic_height_in_map_units * 16, s.pic_width_in_mbs, s.pic_height_in_map_units, s.chroma_format_idc, s.profile_idc);
-                sps = Some(s);
-            }
-            8 => {
-                let chroma = sps.as_ref().map(|s| s.chroma_format_idc).unwrap_or(1);
+            7 => sps = Some(parse_seq_parameter_set_data(&mut BitReader::new(&rbsp))?),
+            8 if sps.is_some() && pps.is_none() => {
+                let chroma = sps.as_ref().unwrap().chroma_format_idc;
                 pps = Some(parse_pic_parameter_set(&mut BitReader::new(&rbsp), chroma)?);
             }
             5 => {
-                // First base-view IDR slice.
-                let (sps, pps) = (sps.as_ref().unwrap(), pps.as_ref().unwrap());
-                {
-                    use ripsaw::mvc::slice_header::parse_slice_header;
-                    let mut r = BitReader::new(&rbsp);
-                    match parse_slice_header(&mut r, true, hdr.nal_ref_idc, sps, pps) {
-                        Ok(sh) => {
-                            let slice_qp = 26 + pps.pic_init_qp_minus26 + sh.slice_qp_delta;
-                            eprintln!("slice hdr: first_mb {}, type {}, qp_delta {}, slice_qp {slice_qp} (pic_init_qp_minus26 {}), disable_deblock {}, header ends at bit {}", sh.first_mb_in_slice, sh.slice_type, sh.slice_qp_delta, pps.pic_init_qp_minus26, sh.disable_deblocking_filter_idc, r.position_bits());
-                        }
-                        Err(e) => eprintln!("slice header parse error: {e}"),
-                    }
-                }
-                eprintln!("decoding first base IDR slice ({} bytes rbsp)…", rbsp.len());
-                let frame = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_intra_frame(&rbsp, hdr.nal_ref_idc, sps, pps))) {
-                    Ok(Ok(f)) => f,
-                    Ok(Err(e)) => {
-                        eprintln!("✗ decode error: {e}");
-                        std::process::exit(1);
-                    }
-                    Err(_) => {
-                        eprintln!("✗ decode panicked (unsupported real-content feature)");
-                        std::process::exit(1);
-                    }
-                };
-                // The slice covers some MB rows from the top. Diff luma row by
-                // row vs the ground truth (cropped to 1080) until the first
-                // all-zero (undecoded) row, reporting how far it matched.
-                let jm = std::fs::read(&truth)?;
-                let nz = frame.y.iter().filter(|&&p| p != 0).count();
-                eprintln!("frame.y nonzero pixels: {nz} / {}; first nonzero at {:?}", frame.y.len(), frame.y.iter().position(|&p| p != 0).map(|i| (i % frame.fw, i / frame.fw)));
-                let fw = frame.fw;
-                let mut matched_rows = 0;
-                let mut first_bad = None;
-                'outer: for y in 0..frame.fh.min(1080) {
-                    let row = &frame.y[y * fw..(y + 1) * fw];
-                    if row.iter().all(|&p| p == 0) {
-                        break; // past the slice's extent
-                    }
-                    for x in 0..fw {
-                        if frame.y[y * fw + x] != jm[y * fw + x] {
-                            first_bad = Some((x, y, frame.y[y * fw + x], jm[y * fw + x]));
-                            break 'outer;
-                        }
-                    }
-                    matched_rows += 1;
-                }
-                if let Some((x, y, g, j)) = first_bad {
-                    eprintln!("✗ first base slice: {matched_rows} luma rows match JM, then mismatch at ({x},{y}): libmvc {g} vs JM {j}");
-                } else {
-                    eprintln!("✓ first base slice: all {matched_rows} decoded luma rows match JM ground truth (pre-deblock vs JM final — deblock not yet applied here)");
-                }
-                break;
+                nal_ref_idc = hdr.nal_ref_idc;
+                base_slices.push(rbsp.to_vec());
             }
+            15 | 20 => break, // dependent view — base access unit done
             _ => {}
         }
+    }
+
+    let (sps, pps) = (sps.as_ref().unwrap(), pps.as_ref().unwrap());
+    eprintln!("base view: {} slices, {}x{}", base_slices.len(), sps.pic_width_in_mbs * 16, sps.pic_height_in_map_units * 16);
+    let refs: Vec<&[u8]> = base_slices.iter().map(|s| s.as_slice()).collect();
+    let frame = decode_intra_frame(&refs, nal_ref_idc, sps, pps)?;
+
+    // Diff the whole luma+chroma frame (cropped to the coded 1080) vs JM.
+    let jm = std::fs::read(&truth)?;
+    let (fw, cw, ch) = (frame.fw, frame.cw, frame.ch);
+    let ok = |name: &str, got: &[u8], w: usize, h: usize, off: usize| -> bool {
+        for yy in 0..h {
+            for xx in 0..w {
+                if got[yy * w + xx] != jm[off + yy * w + xx] {
+                    eprintln!("✗ {name} mismatch at ({xx},{yy}) [MB ({},{})]: libmvc {} vs JM {}", xx / 16, yy / 16, got[yy * w + xx], jm[off + yy * w + xx]);
+                    return false;
+                }
+            }
+        }
+        eprintln!("  ✓ {name}: {h}×{w} match JM");
+        true
+    };
+    let ( jysz, jcsz) = (fw * 1080, cw * 540);
+    let oy = ok("Y", &frame.y, fw, 1080, 0);
+    let ou = ok("U", &frame.cb, cw, 540, jysz);
+    let ov = ok("V", &frame.cr, cw, 540, jysz + jcsz);
+    let _ = ch;
+    if oy && ou && ov {
+        eprintln!("✓ full base IDR ({}×1080, {} slices) decoded by libmvc matches JM ground truth", fw, refs.len());
+    } else {
+        std::process::exit(1);
     }
     Ok(())
 }

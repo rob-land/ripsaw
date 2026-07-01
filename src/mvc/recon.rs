@@ -57,23 +57,16 @@ impl Plane {
 }
 
 /// Decode one intra (IDR or I) slice's RBSP into a reconstructed frame.
-/// Single-slice-per-frame streams only (the test/PoC harness). Pre-deblock.
-pub fn decode_intra_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps) -> anyhow::Result<Frame> {
+/// One IDR/I access unit's slices (`slices` in decode order, `first_mb_in_slice`
+/// increasing). A single-slice frame is `&[rbsp]`; a multi-slice frame passes
+/// all its slices. Slice boundaries break intra prediction (cross-slice
+/// neighbours are unavailable). Pre-deblock.
+pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, sps: &Sps, pps: &Pps) -> anyhow::Result<Frame> {
     let width = sps.pic_width_in_mbs as usize;
     let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
     let (cw, ch) = (fw / 2, fh / 2);
-
-    let mut r = BitReader::new(rbsp);
-    let sh = parse_slice_header(&mut r, true, nal_ref_idc, sps, pps)?;
-    let slice_qp = 26 + pps.pic_init_qp_minus26 + sh.slice_qp_delta;
-    let cabac_start = (r.position_bits() + 7) / 8;
-    let mut e = CabacEngine::new(&rbsp[cabac_start..]);
-    let mut hctx = MbHeaderContexts::new(slice_qp);
-    let mut rctx = ResidualContexts::new(slice_qp, false);
     // Inverse-quant scaling lists: PPS overrides SPS overrides flat.
     let scaling = pps.scaling.clone().or_else(|| sps.scaling.clone()).unwrap_or_else(ScalingLists::flat);
-    let mut last_dquant = 0;
-    let mut qp = slice_qp;
 
     let mut y = Plane { d: vec![0; fw * fh], w: fw };
     let mut cb = Plane { d: vec![0; cw * ch], w: cw };
@@ -83,13 +76,31 @@ pub fn decode_intra_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps) ->
     let mut grid: Vec<MbInfo> = Vec::new();
     let mut cbp_grid: Vec<CbpBits> = Vec::new();
     let mut qp_grid: Vec<i32> = Vec::new();
-    let mut addr = 0usize;
     let mut sink = Vec::new();
+    // Deblock params come from the last slice header parsed (all equal here).
+    let mut sh_last = None;
+
+    for rbsp in slices {
+        let mut r = BitReader::new(rbsp);
+        let sh = parse_slice_header(&mut r, true, nal_ref_idc, sps, pps)?;
+        let slice_qp = 26 + pps.pic_init_qp_minus26 + sh.slice_qp_delta;
+        let slice_start = sh.first_mb_in_slice as usize;
+        let cabac_start = (r.position_bits() + 7) / 8;
+        let mut e = CabacEngine::new(&rbsp[cabac_start..]);
+        let mut hctx = MbHeaderContexts::new(slice_qp);
+        let mut rctx = ResidualContexts::new(slice_qp, false);
+        let mut last_dquant = 0;
+        let mut qp = slice_qp;
+        let mut addr = slice_start;
+        sh_last = Some(sh);
 
     loop {
         let (mbx, mby) = (addr % width, addr / width);
+        // Cross-slice neighbours (earlier slice) are unavailable. Slices are
+        // MB-contiguous, so only the top neighbour can cross a boundary.
+        let mb_top = addr >= width && addr - width >= slice_start;
         let left_i = if mbx != 0 { grid.get(addr - 1).copied() } else { None };
-        let up_i = if addr >= width { grid.get(addr - width).copied() } else { None };
+        let up_i = if mb_top { grid.get(addr - width).copied() } else { None };
         let mut header: Vec<(String, i64)> = Vec::new();
         let info = decode_mb_header(&mut e, &mut hctx, &Neighbors { left: left_i, up: up_i }, &mut last_dquant, &mut header);
         if let Some((_, d)) = header.iter().find(|(n, _)| n == "mb_qp_delta") {
@@ -100,7 +111,7 @@ pub fn decode_intra_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps) ->
         let mut neigh = CbfNeighbours {
             cur: CbpBits::default(),
             left: if mbx != 0 { cbp_grid.get(addr - 1).copied() } else { None },
-            up: if addr >= width { cbp_grid.get(addr - width).copied() } else { None },
+            up: if mb_top { cbp_grid.get(addr - width).copied() } else { None },
         };
         let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut neigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut sink);
 
@@ -108,7 +119,7 @@ pub fn decode_intra_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps) ->
         let (mpx, mpy) = (mbx * 16, mby * 16);
         if !info.i_nxn {
             let mode = PlaneMode::from_index(info.i16_pred as u32).unwrap();
-            let n = gather_nxn(&y, mpx, mpy, 16);
+            let n = gather_nxn(&y, mpx, mpy, 16, mb_top);
             let pred = predict_16x16(mode, &n);
             for yy in 0..16 {
                 for xx in 0..16 {
@@ -124,8 +135,8 @@ pub fn decode_intra_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps) ->
                 let gbx = mbx * 2 + bx8;
                 let gby = mby * 2 + by8;
                 let (cx, cy) = (gbx * 2, gby * 2);
-                let mode = derive_intra_mode(left_cell(&modes, cx, cy, bw4), up_cell(&modes, cx, cy, bw4), raw[b8]);
-                let n = gather_8x8(&y, gbx, gby, fw, bw4 / 2, seq8(gbx, gby, width));
+                let mode = derive_intra_mode(left_cell(&modes, cx, cy, bw4), up_cell(&modes, cx, cy, bw4, mb_top), raw[b8]);
+                let n = gather_8x8(&y, gbx, gby, fw, bw4 / 2, seq8(gbx, gby, width), mb_top);
                 let pred = predict_8x8(Intra4x4Mode::from_index(mode as u32).unwrap(), &n);
                 for yy in 0..8 {
                     for xx in 0..8 {
@@ -145,8 +156,8 @@ pub fn decode_intra_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps) ->
                     let by = (region >> 1) * 2 + (sub >> 1);
                     let idx = region * 4 + sub;
                     let (cx, cy) = (mbx * 4 + bx, mby * 4 + by);
-                    let mode = derive_intra_mode(left_cell(&modes, cx, cy, bw4), up_cell(&modes, cx, cy, bw4), raw[idx]);
-                    let n = gather_4x4(&y, cx, cy, fw, bw4, seq4(cx, cy, width));
+                    let mode = derive_intra_mode(left_cell(&modes, cx, cy, bw4), up_cell(&modes, cx, cy, bw4, mb_top), raw[idx]);
+                    let n = gather_4x4(&y, cx, cy, fw, bw4, seq4(cx, cy, width), mb_top);
                     let pred = predict_4x4(Intra4x4Mode::from_index(mode as u32).unwrap(), &n);
                     for yy in 0..4 {
                         for xx in 0..4 {
@@ -166,7 +177,7 @@ pub fn decode_intra_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps) ->
             _ => PlaneMode::Plane,
         };
         for (plane, cres) in [(&mut cb, &res.cb), (&mut cr, &res.cr)] {
-            let n = gather_nxn(plane, mbx * 8, mby * 8, 8);
+            let n = gather_nxn(plane, mbx * 8, mby * 8, 8, mb_top);
             let pred = predict_chroma_8x8(cmode, &n);
             for yy in 0..8 {
                 for xx in 0..8 {
@@ -184,7 +195,9 @@ pub fn decode_intra_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps) ->
         }
         addr += 1;
     }
+    } // per-slice loop
 
+    let sh = sh_last.expect("at least one slice");
     Ok(Frame {
         y: y.d,
         cb: cb.d,
@@ -354,8 +367,14 @@ fn modes_cells(mby: usize, mbx: usize, bw4: usize, n: usize) -> Vec<usize> {
 fn left_cell(modes: &[Option<u8>], cx: usize, cy: usize, bw4: usize) -> Option<u8> {
     if cx == 0 { None } else { modes[cy * bw4 + cx - 1] }
 }
-fn up_cell(modes: &[Option<u8>], cx: usize, cy: usize, bw4: usize) -> Option<u8> {
-    if cy == 0 { None } else { modes[(cy - 1) * bw4 + cx] }
+fn up_cell(modes: &[Option<u8>], cx: usize, cy: usize, bw4: usize, mb_top: bool) -> Option<u8> {
+    // A cell in the MB's top row (cy % 4 == 0) reads its up-mode from the MB
+    // above — unavailable across a slice boundary.
+    if cy == 0 || (cy % 4 == 0 && !mb_top) {
+        None
+    } else {
+        modes[(cy - 1) * bw4 + cx]
+    }
 }
 fn seq8(gbx: usize, gby: usize, width: usize) -> usize {
     (gby / 2 * width + gbx / 2) * 4 + (gby & 1) * 2 + (gbx & 1)
@@ -368,8 +387,10 @@ fn seq4(cx: usize, cy: usize, width: usize) -> usize {
     ((mby * width + mbx) * 4 + region) * 4 + sub
 }
 
-fn gather_nxn<'a>(p: &Plane, px: usize, py: usize, n: usize) -> NeighborsNxN<'a> {
-    let top_avail = py > 0;
+fn gather_nxn<'a>(p: &Plane, px: usize, py: usize, n: usize, mb_top: bool) -> NeighborsNxN<'a> {
+    // The whole-MB (16×16 / chroma 8×8) block's top edge is always the MB
+    // boundary, so its top is available only if the MB above is in-slice.
+    let top_avail = py > 0 && mb_top;
     let left_avail = px > 0;
     let top: Vec<i32> = (0..n).map(|i| if top_avail { p.at(px + i, py - 1) } else { 0 }).collect();
     let left: Vec<i32> = (0..n).map(|j| if left_avail { p.at(px - 1, py + j) } else { 0 }).collect();
@@ -383,10 +404,12 @@ fn gather_nxn<'a>(p: &Plane, px: usize, py: usize, n: usize) -> NeighborsNxN<'a>
     }
 }
 
-fn gather_8x8(p: &Plane, gbx: usize, gby: usize, fw: usize, bw: usize, cur_seq: usize) -> Neighbors8x8 {
+fn gather_8x8(p: &Plane, gbx: usize, gby: usize, fw: usize, bw: usize, cur_seq: usize, mb_top: bool) -> Neighbors8x8 {
     let (px, py) = (gbx * 8, gby * 8);
     let left_avail = gbx > 0;
-    let top_avail = gby > 0;
+    // Top-row 8×8 blocks of the MB (gby even) take their top from the MB
+    // above; gate on the MB above being in-slice.
+    let top_avail = gby > 0 && (gby & 1 == 1 || mb_top);
     let corner_avail = left_avail && top_avail;
     let ar = top_avail && gbx + 1 < bw && seq8(gbx + 1, gby - 1, fw / 16) < cur_seq;
     let mut top = [0i32; 16];
@@ -411,10 +434,12 @@ fn gather_8x8(p: &Plane, gbx: usize, gby: usize, fw: usize, bw: usize, cur_seq: 
     Neighbors8x8 { top, left, corner, top_avail, left_avail, corner_avail }
 }
 
-fn gather_4x4(p: &Plane, cx: usize, cy: usize, fw: usize, bw4: usize, cur_seq: usize) -> Neighbors4x4 {
+fn gather_4x4(p: &Plane, cx: usize, cy: usize, fw: usize, bw4: usize, cur_seq: usize, mb_top: bool) -> Neighbors4x4 {
     let (px, py) = (cx * 4, cy * 4);
     let left_avail = cx > 0;
-    let top_avail = cy > 0;
+    // Top-row 4×4 cells of the MB (cy % 4 == 0) take their top from the MB
+    // above; gate on the MB above being in-slice.
+    let top_avail = cy > 0 && (cy % 4 != 0 || mb_top);
     let corner = if left_avail && top_avail { p.at(px - 1, py - 1) } else { 0 };
     let ar = top_avail && cx + 1 < bw4 && seq4(cx + 1, cy - 1, fw / 16) < cur_seq;
     let mut top = [0i32; 8];
