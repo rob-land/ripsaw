@@ -78,7 +78,7 @@ fn main() -> anyhow::Result<()> {
     let idc = dep_slices[0].0;
     let dref: Vec<&[u8]> = dep_slices.iter().map(|(_, s)| s.as_slice()).collect();
     eprintln!("dependent anchor: {} slices", dref.len());
-    let (pf, _mf) = decode_p_frame(&dref, idc, true, dsps, dpps, &base)?;
+    let (pf, _mf) = decode_p_frame(&dref, idc, true, dsps, dpps, &[&base])?;
 
     // Diff the whole dependent frame (luma + chroma, cropped to 1080) vs JM.
     let djm = std::fs::read(&dep_truth)?;

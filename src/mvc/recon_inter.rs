@@ -11,7 +11,7 @@ use crate::mvc::bitstream::BitReader;
 use crate::mvc::cabac::CabacEngine;
 use crate::mvc::mb_header::{decode_cbp_ctx, decode_dquant_ctx, MbInfo};
 use crate::mvc::mb_inter::{
-    decode_inter_mb_type, decode_mb_skip_flag, decode_mvd_component, decode_sub_mb_type, mvd_ctx_inc, InterContexts,
+    decode_inter_mb_type, decode_mb_skip_flag, decode_mvd_component, decode_ref_idx, decode_sub_mb_type, mvd_ctx_inc, InterContexts,
 };
 use crate::mvc::mb_residual::{decode_mb_residual, CbfNeighbours, CbpBits, ResidualContexts};
 use crate::mvc::mc::{mc_chroma, mc_luma, Plane};
@@ -51,16 +51,21 @@ fn partitions(mb_type: i64) -> Vec<(usize, usize, usize, usize, Option<Direction
 /// `slices` are the P-slice's coded slices in decode order (single-slice
 /// frames pass `&[rbsp]`); slice boundaries break MV prediction / neighbour
 /// contexts (cross-slice neighbours unavailable). See `decode_intra_frame`.
-pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, reference: &Frame) -> anyhow::Result<(Frame, MotionField)> {
+/// `refs` is L0 (index = ref_idx): one frame for single-ref, `[temporal,
+/// inter-view]` for the MVC dependent temporal P (ref_idx decoded per
+/// partition when num_ref_idx_l0_active > 1).
+pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, refs: &[&Frame]) -> anyhow::Result<(Frame, MotionField)> {
     let width = sps.pic_width_in_mbs as usize;
     let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
     let (cw, ch) = (fw / 2, fh / 2);
     let (bw4, bh4) = (fw / 4, fh / 4);
     let (ysz, csz) = (fw * fh, cw * ch);
 
-    let rpy = Plane { data: &reference.y, w: fw, h: fh };
-    let rpcb = Plane { data: &reference.cb, w: cw, h: ch };
-    let rpcr = Plane { data: &reference.cr, w: cw, h: ch };
+    // Per-ref-index L0 reference planes.
+    let ref_planes: Vec<(Plane, Plane, Plane)> = refs
+        .iter()
+        .map(|r| (Plane { data: &r.y, w: fw, h: fh }, Plane { data: &r.cb, w: cw, h: ch }, Plane { data: &r.cr, w: cw, h: ch }))
+        .collect();
     let scaling = pps.scaling.clone().or_else(|| sps.scaling.clone()).unwrap_or_else(ScalingLists::flat);
 
     let mut y = vec![0u8; ysz];
@@ -100,6 +105,7 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         let mut e = CabacEngine::new(&rbsp[cabac_start..]);
         let mut ctx = InterContexts::new(idc, slice_qp);
         let mut rctx = ResidualContexts::new(slice_qp, true);
+        let num_ref = (sh.num_ref_idx_l0_active_minus1 + 1) as usize;
         let mut last_dquant = 0;
         let mut qp = slice_qp;
         let mut addr = slice_start;
@@ -123,8 +129,8 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
                 if cc.is_some() { cc } else { nb(&g_mv, &g_ref, mbx4 as i32 - 1, mby4 as i32 - 1, slice_start) }
             };
             let mv = predict_skip_mv(a, b, c);
-            fill(&mut g_mv, &mut g_ref, &mut g_mvd, mbx4, mby4, 4, 4, mv, (0, 0), bw4);
-            recon_part(&mut y, &mut cb, &mut cr, &rpy, &rpcb, &rpcr, mbx * 16, mby * 16, 0, 0, 16, 16, mv, &[[0i32; 16]; 16], &[[0i32; 8]; 8], &[[0i32; 8]; 8], fw, cw);
+            fill(&mut g_mv, &mut g_ref, &mut g_mvd, mbx4, mby4, 4, 4, mv, (0, 0), 0, bw4);
+            recon_part(&mut y, &mut cb, &mut cr, &ref_planes[0], mbx * 16, mby * 16, 0, 0, 16, 16, mv, &[[0i32; 16]; 16], &[[0i32; 8]; 8], &[[0i32; 8]; 8], fw, cw);
             cbp_grid.push(CbpBits::default());
             cbpv.push(0);
             mb_info.push(MbInfo { i_nxn: false, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 });
@@ -145,8 +151,31 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             partitions(mb_type)
         };
 
+        // ref_idx_l0 for each partition (all before the mvds — § 7.3.5.1),
+        // when more than one L0 reference. Fill g_ref so later partitions'
+        // and MBs' ref_idx contexts + MV prediction see it.
+        let mut part_ref: Vec<i32> = Vec::new();
+        for &(bx4, by4, _, _, _) in &parts {
+            let (gx, gy) = (mbx4 + bx4, mby4 + by4);
+            let ridx = if num_ref > 1 {
+                let la = nref(&g_ref, gx as i32 - 1, gy as i32, slice_start, width, bw4);
+                let ub = nref(&g_ref, gx as i32, gy as i32 - 1, slice_start, width, bw4);
+                decode_ref_idx(&mut e, &mut ctx, (la > 0) as u32, if ub > 0 { 2 } else { 0 }) as i32
+            } else {
+                0
+            };
+            part_ref.push(ridx);
+            let (pw, ph) = parts.iter().find(|p| p.0 == bx4 && p.1 == by4).map(|p| (p.2, p.3)).unwrap();
+            for j in 0..ph {
+                for i in 0..pw {
+                    g_ref[(gy + j) * bw4 + gx + i] = ridx;
+                }
+            }
+        }
+
         let mut part_mv = Vec::new();
-        for &(bx4, by4, w4, h4, dir) in &parts {
+        for (pi, &(bx4, by4, w4, h4, dir)) in parts.iter().enumerate() {
+            let ridx = part_ref[pi];
             let (gx, gy) = (mbx4 + bx4, mby4 + by4);
             let lmvd = nb_mvd(&g_mvd, &g_ref, gx as i32 - 1, gy as i32, bw4, width, slice_start);
             let umvd = nb_mvd(&g_mvd, &g_ref, gx as i32, gy as i32 - 1, bw4, width, slice_start);
@@ -159,10 +188,10 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
                 let cc = nb(&g_mv, &g_ref, gx as i32 + w4 as i32, gy as i32 - 1, slice_start);
                 if cc.is_some() { cc } else { nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32 - 1, slice_start) }
             };
-            let mvp = predict_mv(a, b, c, 0, dir);
+            let mvp = predict_mv(a, b, c, ridx, dir);
             let mv = (mvp.0 + mvd.0, mvp.1 + mvd.1);
-            fill(&mut g_mv, &mut g_ref, &mut g_mvd, gx, gy, w4, h4, mv, mvd, bw4);
-            part_mv.push((bx4, by4, w4, h4, mv));
+            fill(&mut g_mv, &mut g_ref, &mut g_mvd, gx, gy, w4, h4, mv, mvd, ridx, bw4);
+            part_mv.push((bx4, by4, w4, h4, mv, ridx));
         }
 
         let up = if mb_top { Some(cbpv[addr - width]) } else { None };
@@ -201,9 +230,9 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             }
         }
 
-        for (bx4, by4, w4, h4, mv) in part_mv {
+        for (bx4, by4, w4, h4, mv, ridx) in part_mv {
             let (px, py) = (mbx * 16 + bx4 * 4, mby * 16 + by4 * 4);
-            recon_part(&mut y, &mut cb, &mut cr, &rpy, &rpcb, &rpcr, px, py, bx4 * 4, by4 * 4, w4 * 4, h4 * 4, mv, &res.luma, &res.cb, &res.cr, fw, cw);
+            recon_part(&mut y, &mut cb, &mut cr, &ref_planes[ridx as usize], px, py, bx4 * 4, by4 * 4, w4 * 4, h4 * 4, mv, &res.luma, &res.cb, &res.cr, fw, cw);
         }
         if e.decode_terminate() == 1 {
             break;
@@ -233,15 +262,25 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
 }
 
 #[allow(clippy::too_many_arguments)]
-fn fill(g_mv: &mut [(i32, i32)], g_ref: &mut [i32], g_mvd: &mut [(i32, i32)], gx: usize, gy: usize, w4: usize, h4: usize, mv: (i32, i32), mvd: (i32, i32), bw4: usize) {
+fn fill(g_mv: &mut [(i32, i32)], g_ref: &mut [i32], g_mvd: &mut [(i32, i32)], gx: usize, gy: usize, w4: usize, h4: usize, mv: (i32, i32), mvd: (i32, i32), ref_idx: i32, bw4: usize) {
     for j in 0..h4 {
         for i in 0..w4 {
             let idx = (gy + j) * bw4 + gx + i;
             g_mv[idx] = mv;
-            g_ref[idx] = 0;
+            g_ref[idx] = ref_idx;
             g_mvd[idx] = mvd;
         }
     }
+}
+
+/// Neighbour ref_idx (for the ref_idx context) — -1 if out of frame or in an
+/// earlier slice.
+fn nref(g_ref: &[i32], bx: i32, by: i32, slice_start: usize, width: usize, bw4: usize) -> i32 {
+    if bx < 0 || by < 0 || (by as usize / 4) * width + (bx as usize / 4) < slice_start {
+        return -1;
+    }
+    let i = by as usize * bw4 + bx as usize;
+    if i >= g_ref.len() { -1 } else { g_ref[i] }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -256,10 +295,11 @@ fn nb_mvd(g_mvd: &[(i32, i32)], g_ref: &[i32], bx: i32, by: i32, bw4: usize, wid
 #[allow(clippy::too_many_arguments)]
 fn recon_part(
     y: &mut [u8], cb: &mut [u8], cr: &mut [u8],
-    rpy: &Plane, rpcb: &Plane, rpcr: &Plane,
+    rp: &(Plane, Plane, Plane),
     px: usize, py: usize, rx: usize, ry: usize, w: usize, h: usize, mv: (i32, i32),
     luma: &[[i32; 16]; 16], rcb: &[[i32; 8]; 8], rcr: &[[i32; 8]; 8], fw: usize, cw: usize,
 ) {
+    let (rpy, rpcb, rpcr) = (&rp.0, &rp.1, &rp.2);
     let pred = mc_luma(rpy, px as i32, py as i32, mv.0, mv.1, w, h);
     for j in 0..h {
         for i in 0..w {

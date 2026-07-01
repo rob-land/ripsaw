@@ -81,6 +81,15 @@ const INIT_B8_TYPE_B: [[(i32, i32); 4]; 3] = [
     [(-6,93),(-14,88),(-6,44),(4,55)],
 ];
 
+/// `INIT_REF_NO_P[model][0]` — ref_idx contexts (6): [0..3] the bin-0 ctx
+/// (ctxIdxInc = a + b), [4]/[5] the unary suffix. Same table for P and B.
+#[rustfmt::skip]
+const INIT_REF_NO_P: [[(i32, i32); 6]; 3] = [
+    [(-7,67),(-5,74),(-4,74),(-5,80),(-7,72),(1,58)],
+    [(-1,66),(-1,77),(1,70),(-2,86),(-5,72),(0,61)],
+    [(3,55),(-4,79),(-2,75),(-12,97),(-7,50),(1,60)],
+];
+
 /// CABAC contexts for inter-MB header syntax, built once per slice from the
 /// cabac_init_idc model at the slice QP.
 pub struct InterContexts {
@@ -100,6 +109,8 @@ pub struct InterContexts {
     pub mb_type_b: [CtxState; 11],
     /// B sub_mb_type (b8_type_contexts[1], 4 ctx).
     pub b8_type_b: [CtxState; 4],
+    /// ref_idx (ref_no_contexts, 6 ctx).
+    pub ref_no: [CtxState; 6],
 }
 
 impl InterContexts {
@@ -123,8 +134,26 @@ impl InterContexts {
             b8_type: std::array::from_fn(|i| mk(b8[i])),
             mb_type_b: std::array::from_fn(|i| mk(mtb[i])),
             b8_type_b: std::array::from_fn(|i| mk(b8b[i])),
+            ref_no: std::array::from_fn(|i| mk(INIT_REF_NO_P[m][i])),
         }
     }
+}
+
+/// Decode a ref_idx_lX (JM readRefFrame_CABAC). `a`/`b` = left/up neighbour
+/// ref_idx > 0 (as 1 / 2 for the ctxIdxInc). bin-0 on `ref_no[a+b]`, then a
+/// truncated-unary suffix on `ref_no[4]` (first) / `ref_no[5]` (rest).
+pub fn decode_ref_idx(e: &mut CabacEngine, ctx: &mut InterContexts, a: u32, b: u32) -> i64 {
+    if e.decode_decision(&mut ctx.ref_no[(a + b) as usize]) == 0 {
+        return 0;
+    }
+    if e.decode_decision(&mut ctx.ref_no[4]) == 0 {
+        return 1;
+    }
+    let mut sym = 2;
+    while e.decode_decision(&mut ctx.ref_no[5]) == 1 {
+        sym += 1;
+    }
+    sym
 }
 
 /// Decode a P-slice sub_mb_type (JM readB8_typeInfo_CABAC_p_slice):

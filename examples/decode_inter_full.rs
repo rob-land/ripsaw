@@ -71,7 +71,7 @@ fn main() -> anyhow::Result<()> {
             1 => {
                 let (sps, pps) = (sps.as_ref().unwrap(), pps.as_ref().unwrap());
                 let reff = reference.as_ref().expect("P-slice before IDR");
-                let (mut pframe, mf) = decode_p_frame(&[&rbsp[..]], hdr.nal_ref_idc, false, sps, pps, reff)?;
+                let (mut pframe, mf) = decode_p_frame(&[&rbsp[..]], hdr.nal_ref_idc, false, sps, pps, &[reff])?;
                 let (ysz, csz) = (pframe.fw * pframe.fh, pframe.cw * pframe.ch);
 
                 let pre = std::fs::read(&jm_p)?;
