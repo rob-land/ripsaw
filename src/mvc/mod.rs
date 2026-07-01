@@ -11,6 +11,7 @@
 pub mod annexb;
 pub mod bitstream;
 pub mod cabac;
+pub mod clip;
 pub mod trace;
 pub mod transform;
 pub mod intra;
