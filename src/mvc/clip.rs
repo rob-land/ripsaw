@@ -328,15 +328,25 @@ where
             plsb = lsb;
         }
 
-        // Base view.
         let bs: Vec<&[u8]> = au.base.iter().map(|s| s.as_slice()).collect();
-        let (bf, bmf) = decode_hier_view(&bs, au.base_idr, au.base_idc, bsh.slice_type % 5, poc, bsps, bpps, &brefs, None)?;
-
-        // Dependent view: anchor is inter-view from the base just decoded.
         let ds: Vec<&[u8]> = au.dep.iter().map(|s| s.as_slice()).collect();
         let dsh = parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, dsps, dpps)?;
-        let inter_view = if au.dep_anchor { Some(&bf) } else { None };
-        let (df, dmf) = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dsh.slice_type % 5, poc, dsps, dpps, &drefs, inter_view)?;
+        let (bst, dst) = (bsh.slice_type % 5, dsh.slice_type % 5);
+        // Base and dependent views are independent to decode EXCEPT at a
+        // dependent anchor (inter-view predicted from the base of the same
+        // AU). Decode the two views in parallel where possible.
+        let ((bf, bmf), (df, dmf)) = if au.dep_anchor {
+            let base = decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bsps, bpps, &brefs, None)?;
+            let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dsps, dpps, &drefs, Some(&base.0))?;
+            (base, dep)
+        } else {
+            std::thread::scope(|scope| -> anyhow::Result<_> {
+                let bh = scope.spawn(|| decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bsps, bpps, &brefs, None));
+                let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dsps, dpps, &drefs, None)?;
+                let base = bh.join().map_err(|_| anyhow::anyhow!("base-view decode thread panicked"))??;
+                Ok((base, dep))
+            })?
+        };
 
         if au.base_idc != 0 {
             brefs.push((poc, clone_frame(&bf), bmf.unwrap_or_else(empty_motion_field)));
