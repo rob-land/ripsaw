@@ -138,7 +138,7 @@ fn main() -> anyhow::Result<()> {
                 if sh.slice_type % 5 == 0 {
                     // P-slice: decode against the most-recent ref (POC 0 IDR).
                     let reff = &refs.iter().max_by_key(|(p, _)| *p).unwrap().1;
-                    let (mut pf, mf) = decode_p_frame(&rbsp, hdr.nal_ref_idc, sps, pps, reff)?;
+                    let (mut pf, mf) = decode_p_frame(&rbsp, hdr.nal_ref_idc, false, sps, pps, reff)?;
                     deblock_inter(&mut pf, &mf, pps.chroma_qp_index_offset);
                     refs.push((poc, pf));
                     col = Some(mf);

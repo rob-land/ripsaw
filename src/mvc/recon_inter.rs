@@ -44,7 +44,11 @@ fn partitions(mb_type: i64) -> Vec<(usize, usize, usize, usize, Option<Direction
 
 /// Decode a single-reference P-slice's RBSP into a (pre-deblock) `Frame` plus
 /// its motion field. `reference` is the post-deblock frame the MC reads from.
-pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps, reference: &Frame) -> anyhow::Result<(Frame, MotionField)> {
+/// `idr` selects the slice-header ref-marking layout: `false` for a temporal
+/// P-slice, `true` for an MVC dependent-view ANCHOR (idr_pic_flag = 1 — still
+/// a P-slice, but IDR-marked: idr_pic_id + simple ref marking). Its single L0
+/// reference is `reference` (the base-view picture, inter-view prediction).
+pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, reference: &Frame) -> anyhow::Result<(Frame, MotionField)> {
     let width = sps.pic_width_in_mbs as usize;
     let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
     let (cw, ch) = (fw / 2, fh / 2);
@@ -56,7 +60,7 @@ pub fn decode_p_frame(rbsp: &[u8], nal_ref_idc: u8, sps: &Sps, pps: &Pps, refere
     let rpcr = Plane { data: &reference.cr, w: cw, h: ch };
 
     let mut sr = BitReader::new(rbsp);
-    let sh = parse_slice_header(&mut sr, false, nal_ref_idc, sps, pps)?;
+    let sh = parse_slice_header(&mut sr, idr, nal_ref_idc, sps, pps)?;
     let slice_qp = 26 + pps.pic_init_qp_minus26 + sh.slice_qp_delta;
     let idc = sh.cabac_init_idc.unwrap_or(0);
     let cabac_start = (sr.position_bits() + 7) / 8;
