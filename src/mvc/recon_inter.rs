@@ -87,8 +87,13 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
     let mut sh_last = None;
     let _ = (ysz, csz);
 
-    // Neighbour accessor: unavailable if out of frame, undecoded, or in an
-    // earlier slice (its MB address < the current slice's first MB).
+    // Neighbour accessor: `None` only when the neighbour MB is truly
+    // unavailable — out of frame or in an earlier slice (MB address <
+    // the current slice's first MB). An available-but-intra neighbour returns
+    // `Some((0, 0, -1))` (its grid cells hold mv 0, ref -1): the median MV
+    // prediction treats it as a zero-MV non-match, and — crucially — the P_Skip
+    // zero-condition and the "B,C unavailable → A" rule (§8.4.1.1 / §8.4.1.3.2)
+    // must distinguish "MB not available" from "MB is intra".
     let nb = |g_mv: &[(i32, i32)], g_ref: &[i32], bx: i32, by: i32, slice_start: usize| -> Neighbour {
         if bx < 0 || by < 0 || bx >= bw4 as i32 || by >= bh4 as i32 {
             return None;
@@ -97,7 +102,7 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             return None;
         }
         let i = by as usize * bw4 + bx as usize;
-        if g_ref[i] < 0 { None } else { Some((g_mv[i].0, g_mv[i].1, g_ref[i])) }
+        Some((g_mv[i].0, g_mv[i].1, g_ref[i]))
     };
 
     for rbsp in slices {
@@ -442,8 +447,12 @@ impl BGrids {
         if (by as usize / 4) * self.width + (bx as usize / 4) < slice_start {
             return None;
         }
+        // `None` only for a truly-unavailable MB; an available neighbour that
+        // is intra or doesn't use this list returns `Some((0, 0, -1))` (its
+        // cell holds mv 0, ref -1) — so the median treats it as a zero-MV
+        // non-match rather than as "not available".
         let i = by as usize * self.bw4 + bx as usize;
-        if self.refi[list][i] < 0 { None } else { Some((self.mv[list][i].0, self.mv[list][i].1, self.refi[list][i])) }
+        Some((self.mv[list][i].0, self.mv[list][i].1, self.refi[list][i]))
     }
     fn nb_mvd(&self, list: usize, bx: i32, by: i32, slice_start: usize) -> (i32, i32) {
         if bx < 0 || by < 0 || (by as usize / 4) * self.width + (bx as usize / 4) < slice_start {
@@ -952,7 +961,7 @@ pub fn deblock_inter(frame: &mut Frame, mf: &MotionField, chroma_off: i32) {
     if frame.disable_deblock_idc == 1 {
         return;
     }
-    use crate::mvc::deblock::{filter_chroma, filter_luma_normal, ALPHA, BETA, TC0};
+    use crate::mvc::deblock::{filter_chroma, filter_luma_normal, filter_luma_strong, ALPHA, BETA, TC0};
     let off_a = frame.slice_alpha_c0_offset_div2 * 2;
     let off_b = frame.slice_beta_offset_div2 * 2;
     let (fw, cw, width) = (frame.fw, frame.cw, frame.width_mbs);
@@ -961,8 +970,13 @@ pub fn deblock_inter(frame: &mut Frame, mf: &MotionField, chroma_off: i32) {
     let (mv, refg, nz) = (&mf.mv, &mf.refidx, &mf.nz);
     let qp_grid = &frame.qp;
 
-    let bs_of = |pi: usize, qi: usize| -> usize {
-        if nz[pi] || nz[qi] {
+    // An intra cell (ref -1) forces bS 4 on a macroblock edge, 3 internally
+    // (intra MBs occur inside P-slices via mb_type ≥ 6). Otherwise 2 for
+    // nonzero coeffs, 1 for differing ref/MV, else 0.
+    let bs_of = |pi: usize, qi: usize, mb_edge: bool| -> usize {
+        if refg[pi] < 0 || refg[qi] < 0 {
+            if mb_edge { 4 } else { 3 }
+        } else if nz[pi] || nz[qi] {
             2
         } else if refg[pi] != refg[qi] || (mv[pi].0 - mv[qi].0).abs() >= 4 || (mv[pi].1 - mv[qi].1).abs() >= 4 {
             1
@@ -1006,7 +1020,7 @@ pub fn deblock_inter(frame: &mut Frame, mf: &MotionField, chroma_off: i32) {
                     for seg in 0..4usize {
                         let (qbx, qby) = if horiz { (mbx * 4 + seg, mby * 4 + ofs / 4) } else { (mbx * 4 + ofs / 4, mby * 4 + seg) };
                         let (pbx, pby) = if horiz { (qbx, qby - 1) } else { (qbx - 1, qby) };
-                        let bs = bs_of(pby * bw4 + pbx, qby * bw4 + qbx);
+                        let bs = bs_of(pby * bw4 + pbx, qby * bw4 + qbx, ofs == 0);
                         if bs == 0 {
                             continue;
                         }
@@ -1017,7 +1031,11 @@ pub fn deblock_inter(frame: &mut Frame, mf: &MotionField, chroma_off: i32) {
                             for (k, sl) in s.iter_mut().enumerate() {
                                 *sl = if horiz { at(y, fw, bx, by - 4 + k) } else { at(y, fw, bx - 4 + k, by) };
                             }
-                            filter_luma_normal(&mut s, alpha, beta, TC0[ia][bs - 1]);
+                            if bs == 4 {
+                                filter_luma_strong(&mut s, alpha, beta);
+                            } else {
+                                filter_luma_normal(&mut s, alpha, beta, TC0[ia][bs - 1]);
+                            }
                             for (k, &v) in s.iter().enumerate() {
                                 let (px, py) = if horiz { (bx, by - 4 + k) } else { (bx - 4 + k, by) };
                                 y[py * fw + px] = v.clamp(0, 255) as u8;
@@ -1056,7 +1074,7 @@ pub fn deblock_inter(frame: &mut Frame, mf: &MotionField, chroma_off: i32) {
                             let seg = t / 2;
                             let (qbx, qby) = if horiz { (mbx * 4 + seg, mby * 4 + lofs / 4) } else { (mbx * 4 + lofs / 4, mby * 4 + seg) };
                             let (pbx, pby) = if horiz { (qbx, qby - 1) } else { (qbx - 1, qby) };
-                            let bs = bs_of(pby * bw4 + pbx, qby * bw4 + qbx);
+                            let bs = bs_of(pby * bw4 + pbx, qby * bw4 + qbx, cofs == 0);
                             if bs == 0 {
                                 continue;
                             }
@@ -1065,7 +1083,8 @@ pub fn deblock_inter(frame: &mut Frame, mf: &MotionField, chroma_off: i32) {
                             for (k, sl) in s.iter_mut().enumerate() {
                                 *sl = if horiz { at(plane, cw, bx, by - 4 + k) } else { at(plane, cw, bx - 4 + k, by) };
                             }
-                            filter_chroma(&mut s, alpha, beta, TC0[ia][bs - 1], false);
+                            let tc0 = if bs == 4 { 0 } else { TC0[ia][bs - 1] };
+                            filter_chroma(&mut s, alpha, beta, tc0, bs == 4);
                             for (k, &v) in s.iter().enumerate() {
                                 let (px, py) = if horiz { (bx, by - 4 + k) } else { (bx - 4 + k, by) };
                                 plane[py * cw + px] = v.clamp(0, 255) as u8;

@@ -4,11 +4,10 @@
 //
 //   decode_bclip -- clip.h264 out_ViewId0000.yuv
 //
-// Status (WIP): the I-frame decodes + deblocks bit-exact (after the tc0-table
-// fix). The P-frame recon has a narrow residual (7 MBs, ±3) and the B-frame a
-// wider one on this real multi-slice content — still being chased. Diagnostic
-// env knobs: RP_COUNT (per-frame diff count), RP_FIND (best-match JM frame),
-// RP_PRE=<dump> (compare pre-deblock recon vs JM's DUMP_RECON, decode order).
+// Status: all 48 base-view frames (I/P/B, multi-slice) decode bit-exact vs JM
+// post-deblock. Diagnostic env knobs: RP_COUNT (per-frame diff count), RP_FIND
+// (best-match JM frame), RP_PRE=<dump> (compare pre-deblock recon vs JM's
+// DUMP_RECON, decode order).
 
 use ripsaw::mvc::annexb::NalSplitter;
 use ripsaw::mvc::bitstream::BitReader;
