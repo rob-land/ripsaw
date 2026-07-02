@@ -25,6 +25,13 @@ impl Plane<'_> {
         let y = y.clamp(0, self.h as i32 - 1) as usize;
         self.data[y * self.w + x] as i32
     }
+    /// Un-clamped direct sample — valid only when the caller has verified the
+    /// coordinate (with its filter taps) is inside the plane (the interior fast
+    /// path). No per-sample clamp branch, so the hot loops vectorise.
+    #[inline]
+    fn raw(&self, x: i32, y: i32) -> i32 {
+        self.data[y as usize * self.w + x as usize] as i32
+    }
     /// Un-rounded horizontal 6-tap (the `b1` intermediate, § 8.4.2.2.1).
     #[inline]
     fn h6(&self, x: i32, y: i32) -> i32 {
@@ -69,41 +76,67 @@ pub fn mc_luma(refp: &Plane, bx: i32, by: i32, mvx: i32, mvy: i32, bw: usize, bh
     let (fx, fy) = (mvx & 3, mvy & 3);
     let (ox, oy) = (bx + (mvx >> 2), by + (mvy >> 2));
     let mut out = vec![0u8; bw * bh];
-    for j in 0..bh as i32 {
-        for i in 0..bw as i32 {
-            let (x, y) = (ox + i, oy + j);
-            let v = luma_sample(refp, x, y, fx, fy);
-            out[j as usize * bw + i as usize] = v;
-        }
+    // Interior blocks (the common case) index the reference directly — no
+    // per-sample border clamp — via `raw`. The 6-tap reads columns/rows
+    // ox-2 .. ox+bw+2, so require a 2-sample margin on the low side and 3 on
+    // the high side. Border blocks keep the clamped `at`.
+    let (w, h) = (refp.w as i32, refp.h as i32);
+    let interior = ox >= 2 && oy >= 2 && ox + bw as i32 + 3 <= w && oy + bh as i32 + 3 <= h;
+    if interior {
+        luma_block(&|x, y| refp.raw(x, y), ox, oy, fx, fy, bw, bh, &mut out);
+    } else {
+        luma_block(&|x, y| refp.at(x, y), ox, oy, fx, fy, bw, bh, &mut out);
     }
     out
 }
 
-/// One luma sample at integer base (`x`,`y`) and fractional position
-/// (`fx`,`fy`) ∈ {0..3}² (§ 8.4.2.2.1, Figure 8-4 / Table 8-12).
-fn luma_sample(p: &Plane, x: i32, y: i32, fx: i32, fy: i32) -> u8 {
-    let g = || p.at(x, y);
-    let hh = |dx: i32| p.half_h(x, y + dx); // horizontal half in row y+dx (b / s)
-    let hv = |dy: i32| p.half_v(x + dy, y); // vertical half in col x+dy (h / m)
+/// Fill a `bw`×`bh` luma block for a fixed fractional position (`fx`,`fy`) ∈
+/// {0..3}² (§ 8.4.2.2.1, Figure 8-4 / Table 8-12). `s(x, y)` samples the
+/// reference; monomorphised into an un-clamped direct read (interior) or a
+/// border-clamped read. The fractional case is chosen ONCE, so each arm is a
+/// single tight per-pixel loop that vectorises.
+#[inline]
+fn luma_block<S: Fn(i32, i32) -> i32>(s: &S, ox: i32, oy: i32, fx: i32, fy: i32, bw: usize, bh: usize, out: &mut [u8]) {
+    let h6 = |x: i32, y: i32| s(x - 2, y) - 5 * s(x - 1, y) + 20 * s(x, y) + 20 * s(x + 1, y) - 5 * s(x + 2, y) + s(x + 3, y);
+    let v6 = |x: i32, y: i32| s(x, y - 2) - 5 * s(x, y - 1) + 20 * s(x, y) + 20 * s(x, y + 1) - 5 * s(x, y + 2) + s(x, y + 3);
+    let hh = |x: i32, y: i32| clip1((h6(x, y) + 16) >> 5) as i32; // horizontal half (b/s)
+    let hv = |x: i32, y: i32| clip1((v6(x, y) + 16) >> 5) as i32; // vertical half (h/m)
+    let center = |x: i32, y: i32| {
+        let j1 = h6(x, y - 2) - 5 * h6(x, y - 1) + 20 * h6(x, y) + 20 * h6(x, y + 1) - 5 * h6(x, y + 2) + h6(x, y + 3);
+        clip1((j1 + 512) >> 10) as i32
+    };
     let avg = |a: i32, b: i32| ((a + b + 1) >> 1) as u8;
     match (fx, fy) {
-        (0, 0) => g() as u8,
-        (1, 0) => avg(g(), hh(0)),
-        (2, 0) => hh(0) as u8,
-        (3, 0) => avg(p.at(x + 1, y), hh(0)),
-        (0, 1) => avg(g(), hv(0)),
-        (0, 2) => hv(0) as u8,
-        (0, 3) => avg(p.at(x, y + 1), hv(0)),
-        (2, 2) => p.center(x, y) as u8,
-        (1, 1) => avg(hh(0), hv(0)),
-        (3, 1) => avg(hh(0), hv(1)),
-        (1, 3) => avg(hh(1), hv(0)),
-        (3, 3) => avg(hh(1), hv(1)),
-        (2, 1) => avg(hh(0), p.center(x, y)),
-        (2, 3) => avg(hh(1), p.center(x, y)),
-        (1, 2) => avg(hv(0), p.center(x, y)),
-        (3, 2) => avg(hv(1), p.center(x, y)),
+        (0, 0) => run_luma(ox, oy, bw, bh, out, |x, y| s(x, y) as u8),
+        (1, 0) => run_luma(ox, oy, bw, bh, out, |x, y| avg(s(x, y), hh(x, y))),
+        (2, 0) => run_luma(ox, oy, bw, bh, out, |x, y| hh(x, y) as u8),
+        (3, 0) => run_luma(ox, oy, bw, bh, out, |x, y| avg(s(x + 1, y), hh(x, y))),
+        (0, 1) => run_luma(ox, oy, bw, bh, out, |x, y| avg(s(x, y), hv(x, y))),
+        (0, 2) => run_luma(ox, oy, bw, bh, out, |x, y| hv(x, y) as u8),
+        (0, 3) => run_luma(ox, oy, bw, bh, out, |x, y| avg(s(x, y + 1), hv(x, y))),
+        (2, 2) => run_luma(ox, oy, bw, bh, out, |x, y| center(x, y) as u8),
+        (1, 1) => run_luma(ox, oy, bw, bh, out, |x, y| avg(hh(x, y), hv(x, y))),
+        (3, 1) => run_luma(ox, oy, bw, bh, out, |x, y| avg(hh(x, y), hv(x + 1, y))),
+        (1, 3) => run_luma(ox, oy, bw, bh, out, |x, y| avg(hh(x, y + 1), hv(x, y))),
+        (3, 3) => run_luma(ox, oy, bw, bh, out, |x, y| avg(hh(x, y + 1), hv(x + 1, y))),
+        (2, 1) => run_luma(ox, oy, bw, bh, out, |x, y| avg(hh(x, y), center(x, y))),
+        (2, 3) => run_luma(ox, oy, bw, bh, out, |x, y| avg(hh(x, y + 1), center(x, y))),
+        (1, 2) => run_luma(ox, oy, bw, bh, out, |x, y| avg(hv(x, y), center(x, y))),
+        (3, 2) => run_luma(ox, oy, bw, bh, out, |x, y| avg(hv(x + 1, y), center(x, y))),
         _ => unreachable!(),
+    }
+}
+
+/// One tight per-pixel loop for a chosen fractional case: `px(x, y)` is
+/// monomorphised + inlined and has no branch, so it vectorises.
+#[inline]
+fn run_luma<P: Fn(i32, i32) -> u8>(ox: i32, oy: i32, bw: usize, bh: usize, out: &mut [u8], px: P) {
+    for j in 0..bh {
+        let y = oy + j as i32;
+        let row = &mut out[j * bw..j * bw + bw];
+        for (i, o) in row.iter_mut().enumerate() {
+            *o = px(ox + i as i32, y);
+        }
     }
 }
 
@@ -114,23 +147,31 @@ pub fn mc_chroma(refp: &Plane, bx: i32, by: i32, mvx: i32, mvy: i32, bw: usize, 
     let (fx, fy) = (mvx & 7, mvy & 7);
     let (ox, oy) = (bx + (mvx >> 3), by + (mvy >> 3));
     let mut out = vec![0u8; bw * bh];
-    for j in 0..bh as i32 {
-        for i in 0..bw as i32 {
-            let (x, y) = (ox + i, oy + j);
-            let a = refp.at(x, y);
-            let b = refp.at(x + 1, y);
-            let c = refp.at(x, y + 1);
-            let d = refp.at(x + 1, y + 1);
-            let v = ((8 - fx) * (8 - fy) * a
-                + fx * (8 - fy) * b
-                + (8 - fx) * fy * c
-                + fx * fy * d
-                + 32)
-                >> 6;
-            out[j as usize * bw + i as usize] = v as u8;
-        }
+    // Bilinear reads (x,y)..(x+1,y+1); interior needs a 1-sample high margin.
+    let (w, h) = (refp.w as i32, refp.h as i32);
+    let interior = ox >= 0 && oy >= 0 && ox + bw as i32 + 1 <= w && oy + bh as i32 + 1 <= h;
+    if interior {
+        chroma_block(&|x, y| refp.raw(x, y), ox, oy, fx, fy, bw, bh, &mut out);
+    } else {
+        chroma_block(&|x, y| refp.at(x, y), ox, oy, fx, fy, bw, bh, &mut out);
     }
     out
+}
+
+/// Fill a `bw`×`bh` chroma block: bilinear over eighth-pel positions with the
+/// four weights hoisted out of the loop. `s` is the interior (direct) or border
+/// (clamped) sampler.
+#[inline]
+fn chroma_block<S: Fn(i32, i32) -> i32>(s: &S, ox: i32, oy: i32, fx: i32, fy: i32, bw: usize, bh: usize, out: &mut [u8]) {
+    let (w00, w10, w01, w11) = ((8 - fx) * (8 - fy), fx * (8 - fy), (8 - fx) * fy, fx * fy);
+    for j in 0..bh {
+        let y = oy + j as i32;
+        let row = &mut out[j * bw..j * bw + bw];
+        for i in 0..bw {
+            let x = ox + i as i32;
+            row[i] = ((w00 * s(x, y) + w10 * s(x + 1, y) + w01 * s(x, y + 1) + w11 * s(x + 1, y + 1) + 32) >> 6) as u8;
+        }
+    }
 }
 
 #[cfg(test)]
