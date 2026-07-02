@@ -194,9 +194,14 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             }
             let mut raw: Vec<i64> = Vec::new();
             if !is_i16 {
-                let lt = if mbx != 0 { mb_info[addr - 1].transform8x8 as usize } else { 0 };
-                let ut = if mb_top { mb_info[addr - width].transform8x8 as usize } else { 0 };
-                info.transform8x8 = e.decode_decision(&mut ctx.transform[lt + ut]) == 1;
+                // transform_size_8x8_flag is present only when the PPS enables
+                // the 8x8 transform (§ 7.3.5); otherwise it's absent and reading
+                // it would desync CABAC (same gate as the I-slice header).
+                if pps.transform_8x8_mode_flag {
+                    let lt = if mbx != 0 { mb_info[addr - 1].transform8x8 as usize } else { 0 };
+                    let ut = if mb_top { mb_info[addr - width].transform8x8 as usize } else { 0 };
+                    info.transform8x8 = e.decode_decision(&mut ctx.transform[lt + ut]) == 1;
+                }
                 for _ in 0..if info.transform8x8 { 4 } else { 16 } {
                     raw.push(if e.decode_decision(&mut ctx.ipr[0]) == 1 {
                         -1
@@ -366,6 +371,12 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
 
         for (bx4, by4, w4, h4, mv, ridx) in part_mv {
             let (px, py) = (mbx * 16 + bx4 * 4, mby * 16 + by4 * 4);
+            // A ref_idx past the supplied reference list means this P-slice uses
+            // more L0 references than the caller built — currently the case for a
+            // hierarchical MVC dependent-view P-frame with num_ref > 1 (inter-view
+            // base + temporal), which decode_hier_view doesn't yet assemble. Bail
+            // cleanly so the caller falls back rather than panicking on the index.
+            anyhow::ensure!((ridx as usize) < ref_planes.len(), "P-slice ref_idx {ridx} exceeds {} built references (multi-ref dependent-view L0 not supported yet)", ref_planes.len());
             recon_part(&mut y, &mut cb, &mut cr, &ref_planes[ridx as usize], px, py, bx4 * 4, by4 * 4, w4 * 4, h4 * 4, mv, &res.luma, &res.cb, &res.cr, fw, cw);
         }
         if e.decode_terminate() == 1 {
@@ -756,9 +767,13 @@ fn decode_b_frame_one(
                 }
                 let mut raw: Vec<i64> = Vec::new();
                 if !is_i16 {
-                    let lt = if mbx != 0 { mb_info[addr - 1].transform8x8 as usize } else { 0 };
-                    let ut = if mb_top { mb_info[addr - width].transform8x8 as usize } else { 0 };
-                    info.transform8x8 = e.decode_decision(&mut ctx.transform[lt + ut]) == 1;
+                    // transform_size_8x8_flag only present when the PPS enables
+                    // the 8x8 transform (§ 7.3.5) — otherwise reading it desyncs.
+                    if pps.transform_8x8_mode_flag {
+                        let lt = if mbx != 0 { mb_info[addr - 1].transform8x8 as usize } else { 0 };
+                        let ut = if mb_top { mb_info[addr - width].transform8x8 as usize } else { 0 };
+                        info.transform8x8 = e.decode_decision(&mut ctx.transform[lt + ut]) == 1;
+                    }
                     for _ in 0..if info.transform8x8 { 4 } else { 16 } {
                         raw.push(if e.decode_decision(&mut ctx.ipr[0]) == 1 {
                             -1

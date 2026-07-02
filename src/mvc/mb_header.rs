@@ -92,6 +92,7 @@ pub fn decode_mb_header(
     ctx: &mut MbHeaderContexts,
     neigh: &Neighbors,
     last_dquant: &mut i32,
+    transform_8x8_mode: bool,
     out: &mut Vec<Element>,
 ) -> MbInfo {
     // --- mb_type (I slice) ---
@@ -120,12 +121,16 @@ pub fn decode_mb_header(
     }
 
     if i_nxn {
-        // --- transform_size_8x8_flag ---
-        let a = neigh.left.map_or(0, |i| i.transform8x8 as i32);
-        let b = neigh.up.map_or(0, |i| i.transform8x8 as i32);
-        let t = e.decode_decision(&mut ctx.transform[(a + b) as usize]);
-        info.transform8x8 = t == 1;
-        out.push(("transform_size_8x8_flag".into(), t as i64));
+        // --- transform_size_8x8_flag --- present only when the PPS enables the
+        // 8x8 transform (§ 7.3.5); otherwise I_NxN is always I_4x4 and the flag
+        // is absent from the bitstream (reading it would desync CABAC).
+        if transform_8x8_mode {
+            let a = neigh.left.map_or(0, |i| i.transform8x8 as i32);
+            let b = neigh.up.map_or(0, |i| i.transform8x8 as i32);
+            let t = e.decode_decision(&mut ctx.transform[(a + b) as usize]);
+            info.transform8x8 = t == 1;
+            out.push(("transform_size_8x8_flag".into(), t as i64));
+        }
 
         // --- intra prediction modes (4 luma 8x8 blocks, or 16 4x4) ---
         let blocks = if info.transform8x8 { 4 } else { 16 };

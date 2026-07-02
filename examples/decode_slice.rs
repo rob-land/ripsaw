@@ -117,7 +117,7 @@ fn main() -> anyhow::Result<()> {
                     let neigh = Neighbors { left, up };
 
                     let mut header: Vec<(String, i64)> = Vec::new();
-                    let info = decode_mb_header(&mut e, &mut ctx, &neigh, &mut last_dquant, &mut header);
+                    let info = decode_mb_header(&mut e, &mut ctx, &neigh, &mut last_dquant, pps.transform_8x8_mode_flag, &mut header);
                     decoded.extend(header.into_iter().map(|(n, v)| (n, v, None)));
 
                     // Residual. Only the I_8x8 luma path is built; bail out

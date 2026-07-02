@@ -253,7 +253,7 @@ fn decode_intra_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
         let left_i = if mbx != 0 { Some(grid[addr - 1]) } else { None };
         let up_i = if mb_top { Some(grid[addr - width]) } else { None };
         let mut header: Vec<(String, i64)> = Vec::new();
-        let info = decode_mb_header(&mut e, &mut hctx, &Neighbors { left: left_i, up: up_i }, &mut last_dquant, &mut header);
+        let info = decode_mb_header(&mut e, &mut hctx, &Neighbors { left: left_i, up: up_i }, &mut last_dquant, pps.transform_8x8_mode_flag, &mut header);
         if let Some((_, d)) = header.iter().find(|(n, _)| n == "mb_qp_delta") {
             qp = (qp + *d as i32).rem_euclid(52);
         }

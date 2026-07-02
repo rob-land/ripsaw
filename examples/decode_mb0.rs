@@ -63,7 +63,7 @@ fn main() -> anyhow::Result<()> {
 
                 // MB 0: top-left, no neighbours.
                 let neigh = Neighbors::default();
-                decode_mb_header(&mut e, &mut ctx, &neigh, &mut last_dquant, &mut decoded);
+                decode_mb_header(&mut e, &mut ctx, &neigh, &mut last_dquant, pps.transform_8x8_mode_flag, &mut decoded);
                 // end_of_slice_flag follows the MB's data; for MB 0 it is 0.
                 decoded.push(("end_of_slice_flag".into(), e.decode_terminate() as i64));
                 break;

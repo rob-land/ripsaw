@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
                 let mut header: Vec<(String, i64)> = Vec::new();
 
                 let neigh = Neighbors::default();
-                let info = decode_mb_header(&mut e, &mut ctx, &neigh, &mut last_dquant, &mut header);
+                let info = decode_mb_header(&mut e, &mut ctx, &neigh, &mut last_dquant, pps.transform_8x8_mode_flag, &mut header);
                 eprintln!("MB 0: i_nxn={}, transform8x8={}, cbp={}", info.i_nxn, info.transform8x8, info.cbp);
 
                 // I_8x8 with cbp bit 0 set -> decode the one coded 8×8 luma

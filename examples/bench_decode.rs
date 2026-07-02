@@ -103,7 +103,7 @@ fn decode_one_slice(rbsp: &[u8], sps: &Sps, pps: &Pps, nal_ref_idc: u8, width: u
         let left = if mbx != 0 { grid.get(addr - 1).copied() } else { None };
         let up = if addr >= width { grid.get(addr - width).copied() } else { None };
         let mut header: Vec<(String, i64)> = Vec::new();
-        let info = decode_mb_header(&mut e, &mut ctx, &Neighbors { left, up }, &mut last_dquant, &mut header);
+        let info = decode_mb_header(&mut e, &mut ctx, &Neighbors { left, up }, &mut last_dquant, pps.transform_8x8_mode_flag, &mut header);
         if info.cbp != 0 && (!info.i_nxn || !info.transform8x8 || info.cbp & 0x30 != 0) {
             break;
         }

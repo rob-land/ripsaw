@@ -68,7 +68,7 @@ fn main() -> anyhow::Result<()> {
                     let left_i = if mbx != 0 { grid.get(addr - 1).copied() } else { None };
                     let up_i = if addr >= width { grid.get(addr - width).copied() } else { None };
                     let mut header: Vec<(String, i64)> = Vec::new();
-                    let info = decode_mb_header(&mut e, &mut hctx, &Neighbors { left: left_i, up: up_i }, &mut last_dquant, &mut header);
+                    let info = decode_mb_header(&mut e, &mut hctx, &Neighbors { left: left_i, up: up_i }, &mut last_dquant, pps.transform_8x8_mode_flag, &mut header);
                     decoded.extend(header.iter().map(|(n, v)| (n.clone(), *v, None)));
                     if let Some((_, d)) = header.iter().find(|(n, _)| n == "mb_qp_delta") {
                         qp = (qp + *d as i32).rem_euclid(52);
