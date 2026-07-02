@@ -45,19 +45,68 @@ pub struct Frame {
 
 /// A single reconstructed plane (owned samples). Public so the inter decoder
 /// can reuse `reconstruct_intra_mb` for intra MBs inside a P-slice.
-pub struct Plane {
-    pub d: Vec<u8>,
-    pub w: usize,
+/// A mutable view into a contiguous *band* of a larger buffer, indexed by the
+/// element's GLOBAL position. `base` is the global index of the band's first
+/// element; every index subtracts it. This lets the parallel per-slice decoders
+/// each write a disjoint MB-row band of one shared allocation using their
+/// unchanged global-coordinate indexing — no per-slice buffer, no merge. Safe:
+/// `split_at_mut` hands out non-overlapping `&mut` bands, and `Index`/`IndexMut`
+/// are bounds-checked (an out-of-band index — e.g. a mid-slice desync writing
+/// past its rows — underflows/overflows into a panic, caught as a thread error).
+pub struct Band<'a, T> {
+    d: &'a mut [T],
+    base: usize,
 }
-impl Plane {
-    pub fn new(w: usize, h: usize) -> Self {
-        Plane { d: vec![0; w * h], w }
+impl<'a, T> Band<'a, T> {
+    pub fn new(d: &'a mut [T], base: usize) -> Self {
+        Band { d, base }
     }
-    fn at(&self, x: usize, y: usize) -> i32 {
-        self.d[y * self.w + x] as i32
+}
+impl<T> std::ops::Index<usize> for Band<'_, T> {
+    type Output = T;
+    #[inline]
+    fn index(&self, i: usize) -> &T {
+        &self.d[i - self.base]
     }
-    fn set(&mut self, x: usize, y: usize, v: i32) {
-        self.d[y * self.w + x] = v.clamp(0, 255) as u8;
+}
+impl<T> std::ops::IndexMut<usize> for Band<'_, T> {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut T {
+        &mut self.d[i - self.base]
+    }
+}
+
+/// Split `buf` into `bounds.len()` contiguous sub-slices at the ascending
+/// element boundaries `bounds = [end0, end1, …, endN=buf.len()]` (band `k` is
+/// `[bounds[k-1], bounds[k])`, band 0 is `[0, bounds[0])`). Used to hand each
+/// parallel slice decoder a disjoint MB-row band of one shared allocation.
+pub fn split_bands<'a, T>(buf: &'a mut [T], bounds: &[usize]) -> Vec<&'a mut [T]> {
+    let mut rest = buf;
+    let mut out = Vec::with_capacity(bounds.len());
+    let mut prev = 0;
+    for &b in bounds {
+        let (head, tail) = rest.split_at_mut(b - prev);
+        out.push(head);
+        rest = tail;
+        prev = b;
+    }
+    out
+}
+
+/// A reconstructed luma/chroma plane as a borrowed band (see [`Band`]) — the
+/// current frame's samples, addressed by global pixel coordinate. `base` is the
+/// global sample offset of the band's first row.
+pub struct Plane<'a> {
+    pub d: &'a mut [u8],
+    pub w: usize,
+    pub base: usize,
+}
+impl Plane<'_> {
+    pub(crate) fn at(&self, x: usize, y: usize) -> i32 {
+        self.d[y * self.w + x - self.base] as i32
+    }
+    pub(crate) fn set(&mut self, x: usize, y: usize, v: i32) {
+        self.d[y * self.w + x - self.base] = v.clamp(0, 255) as u8;
     }
 }
 
@@ -67,11 +116,11 @@ impl Plane {
 /// intra pred-mode syntax values (rem/−1) for I_NxN; `mb_top` = the MB above
 /// is in-slice (left is always in-slice for MB-row-contiguous slices).
 #[allow(clippy::too_many_arguments)]
-pub fn reconstruct_intra_mb(
-    y: &mut Plane,
-    cb: &mut Plane,
-    cr: &mut Plane,
-    modes: &mut [Option<u8>],
+pub fn reconstruct_intra_mb<'a>(
+    y: &mut Plane<'a>,
+    cb: &mut Plane<'a>,
+    cr: &mut Plane<'a>,
+    modes: &mut Band<Option<u8>>,
     info: &MbInfo,
     raw: &[i64],
     res: &MbResidual,
@@ -152,29 +201,31 @@ pub fn reconstruct_intra_mb(
     }
 }
 
+/// The per-slice band views ([`Band`]/[`Plane`]) an intra-slice decoder writes
+/// into — disjoint MB-row bands of the frame's shared buffers (no merge).
+struct IBufs<'a> {
+    y: Plane<'a>,
+    cb: Plane<'a>,
+    cr: Plane<'a>,
+    modes: Band<'a, Option<u8>>,
+    grid: Band<'a, MbInfo>,
+    cbp_grid: Band<'a, CbpBits>,
+    qp_grid: Band<'a, i32>,
+}
+
 /// Decode one intra (IDR or I) slice's RBSP into a reconstructed frame.
 /// One IDR/I access unit's slices (`slices` in decode order, `first_mb_in_slice`
 /// increasing). A single-slice frame is `&[rbsp]`; a multi-slice frame passes
 /// all its slices. Slice boundaries break intra prediction (cross-slice
 /// neighbours are unavailable). Pre-deblock.
-fn decode_intra_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps) -> anyhow::Result<(Frame, usize)> {
+fn decode_intra_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, bufs: IBufs) -> anyhow::Result<(usize, (u32, i32, i32))> {
     let width = sps.pic_width_in_mbs as usize;
-    let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
-    let (cw, ch) = (fw / 2, fh / 2);
+    let fw = width * 16;
     // Inverse-quant scaling lists: PPS overrides SPS overrides flat.
     let scaling = pps.scaling.clone().or_else(|| sps.scaling.clone()).unwrap_or_else(ScalingLists::flat);
 
-    let mut y = Plane { d: vec![0; fw * fh], w: fw };
-    let mut cb = Plane { d: vec![0; cw * ch], w: cw };
-    let mut cr = Plane { d: vec![0; cw * ch], w: cw };
+    let IBufs { mut y, mut cb, mut cr, mut modes, mut grid, mut cbp_grid, mut qp_grid } = bufs;
     let bw4 = width * 4;
-    let mut modes = vec![None::<u8>; bw4 * fh / 4];
-    // Per-MB grids indexed by MB address (see recon_inter::decode_p_frame).
-    let num_mbs = width * (fh / 16);
-    let default_mb = MbInfo { i_nxn: false, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 };
-    let mut grid = vec![default_mb; num_mbs];
-    let mut cbp_grid = vec![CbpBits::default(); num_mbs];
-    let mut qp_grid = vec![0i32; num_mbs];
     let mut decoded_mbs = 0usize;
     let mut sink = Vec::new();
     // Deblock params come from the last slice header parsed (all equal here).
@@ -229,66 +280,104 @@ fn decode_intra_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
     }
     } // per-slice loop
 
-    let _ = num_mbs;
     let sh = sh_last.expect("at least one slice");
-    Ok((
-        Frame {
-            y: y.d,
-            cb: cb.d,
-            cr: cr.d,
-            fw,
-            fh,
-            cw,
-            ch,
-            width_mbs: width,
-            mb_info: grid,
-            qp: qp_grid,
-            disable_deblock_idc: sh.disable_deblocking_filter_idc,
-            slice_alpha_c0_offset_div2: sh.slice_alpha_c0_offset_div2,
-            slice_beta_offset_div2: sh.slice_beta_offset_div2,
-        },
-        decoded_mbs,
-    ))
+    Ok((decoded_mbs, (sh.disable_deblocking_filter_idc, sh.slice_alpha_c0_offset_div2, sh.slice_beta_offset_div2)))
 }
 
-/// Decode an intra (I) frame (pre-deblock), decoding independent slices in
-/// parallel and merging their disjoint MB-row bands. Verifies full coverage.
+/// Decode an intra (I) frame (pre-deblock). The frame's buffers are allocated
+/// once and split into disjoint per-slice MB-row bands ([`split_bands`]); the
+/// independent slices decode into their bands in parallel, assembling the frame
+/// directly with no merge. Single-slice frames decode inline. Verifies coverage.
 pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps) -> anyhow::Result<Frame> {
     let width = sps.pic_width_in_mbs as usize;
-    let num_mbs = width * sps.pic_height_in_map_units as usize;
-    if slices.len() < 2 {
-        let (frame, n) = decode_intra_frame_one(slices, nal_ref_idc, idr, sps, pps)?;
-        anyhow::ensure!(n == num_mbs, "intra slice desync — {n}/{num_mbs} MBs decoded");
-        return Ok(frame);
-    }
-    let firsts: Vec<usize> = slices
-        .iter()
-        .map(|sl| Ok::<_, anyhow::Error>(parse_slice_header(&mut BitReader::new(sl), idr, nal_ref_idc, sps, pps)?.first_mb_in_slice as usize))
-        .collect::<Result<_, _>>()?;
-    let partials: Vec<anyhow::Result<(Frame, usize)>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = slices.iter().map(|sl| scope.spawn(|| decode_intra_frame_one(std::slice::from_ref(sl), nal_ref_idc, idr, sps, pps))).collect();
-        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("intra-slice decode thread panicked")))).collect()
-    });
-    let mut parts: Vec<(Frame, usize)> = Vec::with_capacity(partials.len());
-    for p in partials {
-        parts.push(p?);
-    }
-    let mut it = parts.into_iter();
-    let (mut frame, mut total) = it.next().ok_or_else(|| anyhow::anyhow!("no slices"))?;
-    let (fw, cw) = (frame.fw, frame.cw);
-    for (i, (fk, nk)) in it.enumerate() {
-        let k = i + 1;
-        let (r0, r1) = (firsts[k] / width, firsts.get(k + 1).copied().unwrap_or(num_mbs) / width);
-        let (start, end) = (firsts[k], firsts.get(k + 1).copied().unwrap_or(num_mbs));
-        frame.y[r0 * 16 * fw..r1 * 16 * fw].copy_from_slice(&fk.y[r0 * 16 * fw..r1 * 16 * fw]);
-        frame.cb[r0 * 8 * cw..r1 * 8 * cw].copy_from_slice(&fk.cb[r0 * 8 * cw..r1 * 8 * cw]);
-        frame.cr[r0 * 8 * cw..r1 * 8 * cw].copy_from_slice(&fk.cr[r0 * 8 * cw..r1 * 8 * cw]);
-        frame.mb_info[start..end].copy_from_slice(&fk.mb_info[start..end]);
-        frame.qp[start..end].copy_from_slice(&fk.qp[start..end]);
-        total += nk;
-    }
-    anyhow::ensure!(total == num_mbs, "intra slice desync — {total}/{num_mbs} MBs decoded");
-    Ok(frame)
+    let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
+    let (cw, ch) = (fw / 2, fh / 2);
+    let bw4 = width * 4;
+    let num_mbs = width * (fh / 16);
+
+    let mut y = vec![0u8; fw * fh];
+    let mut cb = vec![0u8; cw * ch];
+    let mut cr = vec![0u8; cw * ch];
+    let mut modes = vec![None::<u8>; bw4 * (fh / 4)];
+    let default_mb = MbInfo { i_nxn: false, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 };
+    let mut grid = vec![default_mb; num_mbs];
+    let mut cbp_grid = vec![CbpBits::default(); num_mbs];
+    let mut qp_grid = vec![0i32; num_mbs];
+
+    let (n_total, dp) = {
+        let firsts: Vec<usize> = slices
+            .iter()
+            .map(|sl| Ok::<_, anyhow::Error>(parse_slice_header(&mut BitReader::new(sl), idr, nal_ref_idc, sps, pps)?.first_mb_in_slice as usize))
+            .collect::<Result<_, _>>()?;
+        anyhow::ensure!(firsts.iter().all(|&f| f % width == 0), "non-MB-row-aligned slice (unsupported)");
+        let row_ends: Vec<usize> = (0..slices.len()).map(|k| firsts.get(k + 1).copied().unwrap_or(num_mbs) / width).collect();
+        let yb: Vec<usize> = row_ends.iter().map(|&r| r * 16 * fw).collect();
+        let cbnd: Vec<usize> = row_ends.iter().map(|&r| r * 8 * cw).collect();
+        let g4: Vec<usize> = row_ends.iter().map(|&r| r * 4 * bw4).collect();
+        let mbb: Vec<usize> = row_ends.iter().map(|&r| r * width).collect();
+
+        let mut yv = split_bands(&mut y, &yb).into_iter();
+        let mut cbv = split_bands(&mut cb, &cbnd).into_iter();
+        let mut crv = split_bands(&mut cr, &cbnd).into_iter();
+        let mut modv = split_bands(&mut modes, &g4).into_iter();
+        let mut grv = split_bands(&mut grid, &mbb).into_iter();
+        let mut cbgv = split_bands(&mut cbp_grid, &mbb).into_iter();
+        let mut qpv = split_bands(&mut qp_grid, &mbb).into_iter();
+
+        let mut bufs_list: Vec<IBufs> = Vec::with_capacity(slices.len());
+        for &f in &firsts {
+            let r0 = f / width;
+            bufs_list.push(IBufs {
+                y: Plane { d: yv.next().unwrap(), w: fw, base: r0 * 16 * fw },
+                cb: Plane { d: cbv.next().unwrap(), w: cw, base: r0 * 8 * cw },
+                cr: Plane { d: crv.next().unwrap(), w: cw, base: r0 * 8 * cw },
+                modes: Band::new(modv.next().unwrap(), r0 * 4 * bw4),
+                grid: Band::new(grv.next().unwrap(), r0 * width),
+                cbp_grid: Band::new(cbgv.next().unwrap(), r0 * width),
+                qp_grid: Band::new(qpv.next().unwrap(), r0 * width),
+            });
+        }
+
+        if slices.len() < 2 {
+            let bufs = bufs_list.pop().unwrap();
+            decode_intra_frame_one(slices, nal_ref_idc, idr, sps, pps, bufs)?
+        } else {
+            let results: Vec<anyhow::Result<(usize, (u32, i32, i32))>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = slices
+                    .iter()
+                    .zip(bufs_list)
+                    .map(|(sl, bufs)| scope.spawn(move || decode_intra_frame_one(std::slice::from_ref(sl), nal_ref_idc, idr, sps, pps, bufs)))
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("intra-slice decode thread panicked")))).collect()
+            });
+            let mut total = 0usize;
+            let mut dp = (0u32, 0i32, 0i32);
+            for r in results {
+                let (n, d) = r?;
+                total += n;
+                dp = d;
+            }
+            (total, dp)
+        }
+    };
+    anyhow::ensure!(n_total == num_mbs, "intra slice desync — {n_total}/{num_mbs} MBs decoded");
+
+    let (disable, alpha, beta) = dp;
+    Ok(Frame {
+        y,
+        cb,
+        cr,
+        fw,
+        fh,
+        cw,
+        ch,
+        width_mbs: width,
+        mb_info: grid,
+        qp: qp_grid,
+        disable_deblock_idc: disable,
+        slice_alpha_c0_offset_div2: alpha,
+        slice_beta_offset_div2: beta,
+    })
 }
 
 impl Frame {
@@ -304,13 +393,11 @@ impl Frame {
         let off_a = self.slice_alpha_c0_offset_div2 * 2;
         let off_b = self.slice_beta_offset_div2 * 2;
         let (fw, cw, width) = (self.fw, self.cw, self.width_mbs);
-        let mut y = Plane { d: std::mem::take(&mut self.y), w: fw };
-        let mut cb = Plane { d: std::mem::take(&mut self.cb), w: cw };
-        let mut cr = Plane { d: std::mem::take(&mut self.cr), w: cw };
+        // Deblock runs on the whole assembled frame — base 0 (identity offset).
+        let mut y = Plane { d: &mut self.y, w: fw, base: 0 };
+        let mut cb = Plane { d: &mut self.cb, w: cw, base: 0 };
+        let mut cr = Plane { d: &mut self.cr, w: cw, base: 0 };
         deblock_intra(&mut y, &mut cb, &mut cr, &self.mb_info, &self.qp, width, chroma_off, off_a, off_b);
-        self.y = y.d;
-        self.cb = cb.d;
-        self.cr = cr.d;
     }
 }
 
@@ -321,7 +408,7 @@ fn chroma_qp_jm(qpy: i32, offset: i32) -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn deblock_intra(y: &mut Plane, cb: &mut Plane, cr: &mut Plane, grid: &[MbInfo], qp_grid: &[i32], width: usize, chroma_off: i32, off_a: i32, off_b: i32) {
+fn deblock_intra<'a>(y: &mut Plane<'a>, cb: &mut Plane<'a>, cr: &mut Plane<'a>, grid: &[MbInfo], qp_grid: &[i32], width: usize, chroma_off: i32, off_a: i32, off_b: i32) {
     use crate::mvc::deblock::{filter_chroma, filter_luma_normal, filter_luma_strong, ALPHA, BETA, TC0};
     let height = grid.len() / width;
 
@@ -440,10 +527,10 @@ fn modes_cells(mby: usize, mbx: usize, bw4: usize, n: usize) -> Vec<usize> {
     }
     v
 }
-fn left_cell(modes: &[Option<u8>], cx: usize, cy: usize, bw4: usize) -> Option<u8> {
+fn left_cell(modes: &Band<Option<u8>>, cx: usize, cy: usize, bw4: usize) -> Option<u8> {
     if cx == 0 { None } else { modes[cy * bw4 + cx - 1] }
 }
-fn up_cell(modes: &[Option<u8>], cx: usize, cy: usize, bw4: usize, mb_top: bool) -> Option<u8> {
+fn up_cell(modes: &Band<Option<u8>>, cx: usize, cy: usize, bw4: usize, mb_top: bool) -> Option<u8> {
     // A cell in the MB's top row (cy % 4 == 0) reads its up-mode from the MB
     // above — unavailable across a slice boundary.
     if cy == 0 || (cy % 4 == 0 && !mb_top) {
