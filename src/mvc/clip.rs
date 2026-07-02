@@ -11,9 +11,9 @@
 // with an explicit ref_pic_list_modification. One active base SPS / subset
 // SPS / base PPS / dependent PPS at a time (as these streams carry).
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
-use crate::mvc::annexb::NalSplitter;
+use crate::mvc::annexb::NalReader;
 use crate::mvc::bitstream::BitReader;
 use crate::mvc::nal::parse_nal_unit_header;
 use crate::mvc::pps::{parse_pic_parameter_set, Pps};
@@ -97,47 +97,66 @@ fn build_dep_l0(mods: &Option<Vec<RefPicListModification>>, num_ref: usize, dpb_
 /// Split an Annex B byte stream into access units, tracking the active
 /// parameter sets. Returns the AUs plus the resolved (base SPS, base PPS,
 /// dependent subset-SPS, dependent PPS).
-fn parse_stream(data: &[u8]) -> anyhow::Result<(Vec<Au>, Sps, Pps, Sps, Pps)> {
-    let (mut bsps, mut bpps): (Option<Sps>, Option<Pps>) = (None, None);
-    let (mut dsps, mut dpps): (Option<Sps>, Option<Pps>) = (None, None);
-    let mut seen_subset = false;
-    let mut aus: Vec<Au> = Vec::new();
+/// Streaming access-unit assembler: fed NALs one at a time, it parses the
+/// stream's SPS / PPS / subset-SPS / dependent-PPS and groups slice NALs into
+/// access units, emitting a completed [`Au`] when the next one begins. Same
+/// grouping as the former whole-buffer parse, but incremental — nothing beyond
+/// the current AU (and the four header sets) is ever held.
+#[derive(Default)]
+struct AuAssembler {
+    bsps: Option<Sps>,
+    bpps: Option<Pps>,
+    dsps: Option<Sps>,
+    dpps: Option<Pps>,
+    seen_subset: bool,
+    cur: Option<Au>,
+}
 
-    for nal in NalSplitter::new(data) {
-        if nal.is_empty() {
-            continue;
-        }
-        let Ok((hdr, consumed)) = parse_nal_unit_header(nal) else { continue };
+impl AuAssembler {
+    /// Feed one NAL. Returns the just-completed access unit if this NAL begins a
+    /// new one (an AUD, or a base slice while the current AU already holds both
+    /// views); SPS/PPS NALs update header state and return `None`.
+    fn feed(&mut self, nal: &[u8]) -> anyhow::Result<Option<Au>> {
+        let Ok((hdr, consumed)) = parse_nal_unit_header(nal) else { return Ok(None) };
         let rbsp = extract_rbsp(&nal[consumed..]);
         match hdr.nal_unit_type {
-            9 => aus.push(Au::default()), // access unit delimiter
-            7 => bsps = Some(parse_seq_parameter_set_data(&mut BitReader::new(&rbsp))?),
+            9 => {
+                // Access unit delimiter — the current AU (if coded) is complete.
+                let done = self.cur.take().filter(|a| !a.base.is_empty());
+                self.cur = Some(Au::default());
+                return Ok(done);
+            }
+            7 => self.bsps = Some(parse_seq_parameter_set_data(&mut BitReader::new(&rbsp))?),
             15 => {
-                dsps = Some(parse_subset_sps_rbsp(&rbsp)?.sps);
-                seen_subset = true;
+                self.dsps = Some(parse_subset_sps_rbsp(&rbsp)?.sps);
+                self.seen_subset = true;
             }
             8 => {
-                let chroma = bsps.as_ref().map(|s| s.chroma_format_idc).unwrap_or(1);
+                let chroma = self.bsps.as_ref().map(|s| s.chroma_format_idc).unwrap_or(1);
                 let p = parse_pic_parameter_set(&mut BitReader::new(&rbsp), chroma)?;
                 // The dependent PPS is the NAL 8 that follows the subset SPS.
-                if seen_subset {
-                    dpps = Some(p);
+                if self.seen_subset {
+                    self.dpps = Some(p);
                 } else {
-                    bpps = Some(p);
+                    self.bpps = Some(p);
                 }
             }
             5 | 1 => {
-                // A slice with no preceding AUD starts a fresh AU.
-                if aus.last().map(|a| !a.base.is_empty() && !a.dep.is_empty()).unwrap_or(true) {
-                    aus.push(Au::default());
+                // A base slice starts a fresh AU when the current one already
+                // has both views (or there is none) — i.e. no preceding AUD.
+                let mut done = None;
+                if self.cur.as_ref().map(|a| !a.base.is_empty() && !a.dep.is_empty()).unwrap_or(true) {
+                    done = self.cur.take().filter(|a| !a.base.is_empty());
+                    self.cur = Some(Au::default());
                 }
-                let au = aus.last_mut().unwrap();
+                let au = self.cur.get_or_insert_with(Au::default);
                 au.base_idr = hdr.nal_unit_type == 5;
                 au.base_idc = hdr.nal_ref_idc;
                 au.base.push(rbsp.to_vec());
+                return Ok(done);
             }
             20 => {
-                let au = aus.last_mut().unwrap();
+                let au = self.cur.get_or_insert_with(Au::default);
                 au.dep_idc = hdr.nal_ref_idc;
                 if let Some(ext) = &hdr.mvc_extension {
                     au.dep_idr = !ext.non_idr_flag;
@@ -147,68 +166,157 @@ fn parse_stream(data: &[u8]) -> anyhow::Result<(Vec<Au>, Sps, Pps, Sps, Pps)> {
             }
             _ => {}
         }
+        Ok(None)
     }
-    aus.retain(|a| !a.base.is_empty());
 
-    let bsps = bsps.ok_or_else(|| anyhow::anyhow!("no base SPS (NAL 7) in stream"))?;
-    let bpps = bpps.ok_or_else(|| anyhow::anyhow!("no base PPS (NAL 8) in stream"))?;
-    let dsps = dsps.ok_or_else(|| anyhow::anyhow!("no subset SPS (NAL 15) — not an MVC stream"))?;
-    let dpps = dpps.ok_or_else(|| anyhow::anyhow!("no dependent PPS in stream"))?;
-    Ok((aus, bsps, bpps, dsps, dpps))
+    /// The final (unterminated) access unit at end of stream, if coded.
+    fn finish(&mut self) -> Option<Au> {
+        self.cur.take().filter(|a| !a.base.is_empty())
+    }
 }
 
-/// Decode a full MVC Annex B elementary stream. `on_frame(base, dep, w, h)`
-/// is invoked once per access unit in decode order with both reconstructed,
-/// deblocked views (`base` = left / view 0, `dep` = right / view 1) and the
-/// cropped display width/height. Frames carry MB-padded planes (`fw`/`fh` may
-/// exceed the display size); use [`write_cropped_yuv420`] to trim.
-pub fn decode_annex_b<F>(data: &[u8], mut on_frame: F) -> anyhow::Result<ClipInfo>
+/// Pulls complete access units from a byte stream incrementally via
+/// [`NalReader`], so only the current AU (plus the header sets) is resident.
+struct AuSource<R: Read> {
+    nals: NalReader<R>,
+    asm: AuAssembler,
+    done: bool,
+}
+
+impl<R: Read> AuSource<R> {
+    fn new(reader: R) -> Self {
+        Self { nals: NalReader::new(reader), asm: AuAssembler::default(), done: false }
+    }
+
+    /// The next complete access unit, or `None` at end of stream.
+    fn pull(&mut self) -> anyhow::Result<Option<Au>> {
+        if self.done {
+            return Ok(None);
+        }
+        while let Some(nal) = self.nals.next() {
+            let nal = nal?;
+            if nal.is_empty() {
+                continue;
+            }
+            if let Some(au) = self.asm.feed(&nal)? {
+                return Ok(Some(au));
+            }
+        }
+        self.done = true;
+        Ok(self.asm.finish())
+    }
+}
+
+/// Decode a full MVC Annex B elementary stream from an in-memory buffer. Thin
+/// wrapper over [`decode_annex_b_reader`]; prefer the reader form for large
+/// streams so the bytes are not all held at once.
+pub fn decode_annex_b<F>(data: &[u8], on_frame: F) -> anyhow::Result<ClipInfo>
 where
     F: FnMut(&Frame, &Frame, u32, u32) -> anyhow::Result<()>,
 {
-    let (aus, bsps, bpps, dsps, dpps) = parse_stream(data)?;
-    // Route by GOP structure: an all-I/P stream (decode order == display
-    // order, dependent L0 built from ref_pic_list_modification) uses the
-    // sliding-window path below; a hierarchical stream with B-slices uses the
-    // POC-ordered path (temporal L0/L1, display-order reorder).
-    let has_b = aus.iter().any(|au| {
-        parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, &bsps, &bpps)
-            .map(|sh| sh.slice_type % 5 == 1)
-            .unwrap_or(false)
-    });
-    if has_b {
-        return decode_annex_b_hierarchical(&aus, &bsps, &bpps, &dsps, &dpps, on_frame);
-    }
+    decode_annex_b_reader(io::Cursor::new(data), on_frame)
+}
 
+/// Decode a full MVC Annex B elementary stream read incrementally from any
+/// `Read`. `on_frame(base, dep, w, h)` is invoked once per access unit in
+/// DISPLAY order with both reconstructed, deblocked views (`base` = left /
+/// view 0, `dep` = right / view 1) and the cropped display size. Frames carry
+/// MB-padded planes (`fw`/`fh` may exceed the display size); use
+/// [`write_cropped_yuv420`] to trim.
+///
+/// Memory stays bounded regardless of stream length: NALs are pulled one at a
+/// time ([`AuSource`]) and only a handful of reference/reorder frames are held
+/// — so a full retail movie decodes without loading it into RAM.
+pub fn decode_annex_b_reader<R: Read, F>(reader: R, on_frame: F) -> anyhow::Result<ClipInfo>
+where
+    F: FnMut(&Frame, &Frame, u32, u32) -> anyhow::Result<()>,
+{
+    let mut src = AuSource::new(reader);
+    // Buffer the first GOP (until the 2nd base IDR, or a cap) to detect B-slices
+    // for routing. This is bounded — one GOP, not the whole stream — and the GOP
+    // structure is uniform across these streams, so it is representative.
+    const DETECT_CAP: usize = 96;
+    let mut buffered: Vec<Au> = Vec::new();
+    let mut idrs = 0usize;
+    while let Some(au) = src.pull()? {
+        let is_idr = au.base_idr;
+        buffered.push(au);
+        if is_idr {
+            idrs += 1;
+            if idrs >= 2 {
+                break;
+            }
+        }
+        if buffered.len() >= DETECT_CAP {
+            break;
+        }
+    }
+    // Header sets are parsed as their NALs stream by, ahead of the first slice.
+    let bsps = src.asm.bsps.clone().ok_or_else(|| anyhow::anyhow!("no base SPS (NAL 7) in stream"))?;
+    let bpps = src.asm.bpps.clone().ok_or_else(|| anyhow::anyhow!("no base PPS (NAL 8) in stream"))?;
+    let dsps = src.asm.dsps.clone().ok_or_else(|| anyhow::anyhow!("no subset SPS (NAL 15) — not an MVC stream"))?;
+    let dpps = src.asm.dpps.clone().ok_or_else(|| anyhow::anyhow!("no dependent PPS in stream"))?;
+
+    // Route by GOP structure: a hierarchical stream (base B-slices) uses the
+    // POC-ordered path (temporal L0/L1, display-order reorder); an all-I/P
+    // stream uses the sliding-window path (decode order == display order).
+    let has_b = buffered.iter().any(|au| {
+        !au.base.is_empty()
+            && parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, &bsps, &bpps)
+                .map(|sh| sh.slice_type % 5 == 1)
+                .unwrap_or(false)
+    });
+
+    // The buffered first-GOP AUs, then the rest of the stream still pulled one
+    // AU at a time — both as a single `Result<Au>` iterator.
+    let rest = std::iter::from_fn(move || src.pull().transpose());
+    let aus = buffered.into_iter().map(Ok).chain(rest);
+
+    if has_b {
+        decode_hier_stream(aus, &bsps, &bpps, &dsps, &dpps, on_frame)
+    } else {
+        decode_ip_stream(aus, &bsps, &bpps, &dsps, &dpps, on_frame)
+    }
+}
+
+/// Sliding-window decode for an all-I/P MVC stream (decode order == display
+/// order): base view is an I/P chain against a sliding DPB; the dependent view
+/// builds L0 from its `ref_pic_list_modification` (inter-view base + temporal).
+fn decode_ip_stream<I, F>(aus: I, bsps: &Sps, bpps: &Pps, dsps: &Sps, dpps: &Pps, mut on_frame: F) -> anyhow::Result<ClipInfo>
+where
+    I: Iterator<Item = anyhow::Result<Au>>,
+    F: FnMut(&Frame, &Frame, u32, u32) -> anyhow::Result<()>,
+{
     let (dw, dh) = (bsps.width, bsps.height);
     let max_ref = bsps.max_num_ref_frames.max(1) as usize;
     let mut base_dpb: Vec<Frame> = Vec::new();
     let mut dep_dpb: Vec<Frame> = Vec::new();
     let mut frames = 0usize;
 
-    for au in &aus {
+    for au in aus {
+        let au = au?;
         // ---- base view ---- route by slice_type: I-slices (IDR or not)
         // decode intra; P-slices reference the base DPB.
-        let bsh = parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, &bsps, &bpps)?;
+        let bsh = parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, bsps, bpps)?;
         // libmvc decodes I and P slices; B-slices (hierarchical GOPs) aren't
         // supported yet. Bail cleanly so the caller can fall back.
         anyhow::ensure!(bsh.slice_type % 5 != 1, "B-slices not supported by libmvc yet (base view)");
         let base_intra = bsh.slice_type % 5 == 2;
         let bs: Vec<&[u8]> = au.base.iter().map(|s| s.as_slice()).collect();
         let bf = if base_intra {
-            let mut f = decode_intra_frame(&bs, au.base_idc, au.base_idr, &bsps, &bpps)?;
+            let mut f = decode_intra_frame(&bs, au.base_idc, au.base_idr, bsps, bpps)?;
             f.deblock_intra(bpps.chroma_qp_index_offset);
             f
         } else {
             let refs: Vec<&Frame> = base_dpb.iter().collect();
-            let (mut f, mf) = decode_p_frame(&bs, au.base_idc, false, &bsps, &bpps, &refs)?;
+            let (mut f, mf) = decode_p_frame(&bs, au.base_idc, false, bsps, bpps, &refs)?;
             deblock_inter(&mut f, &mf, bpps.chroma_qp_index_offset);
             f
         };
 
         // ---- dependent view ---- L0 per the slice's ref_pic_list_modification.
         let ds: Vec<&[u8]> = au.dep.iter().map(|s| s.as_slice()).collect();
-        let dsh = parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, &dsps, &dpps)?;
+        let dsh = parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, dsps, dpps)?;
         anyhow::ensure!(dsh.slice_type % 5 != 1, "B-slices not supported by libmvc yet (dependent view)");
         let dnum = (dsh.num_ref_idx_l0_active_minus1 + 1) as usize;
         let dl0 = build_dep_l0(&dsh.ref_pic_list_modifications.list0, dnum, dep_dpb.len(), au.dep_anchor);
@@ -219,7 +327,7 @@ where
                 DRef::Temporal(i) => &dep_dpb[*i],
             })
             .collect();
-        let (mut df, dmf) = decode_p_frame(&ds, au.dep_idc, au.dep_idr, &dsps, &dpps, &drefs)?;
+        let (mut df, dmf) = decode_p_frame(&ds, au.dep_idc, au.dep_idr, dsps, dpps, &drefs)?;
         deblock_inter(&mut df, &dmf, dpps.chroma_qp_index_offset);
 
         on_frame(&bf, &df, dw, dh)?;
@@ -272,8 +380,9 @@ fn decode_hier_view(slices: &[&[u8]], idr: bool, idc: u8, st: u32, poc: i32, sps
 /// IDR / dependent anchor); a per-GOP reorder buffer flushes in POC order at
 /// each new GOP. The dependent view's anchor is inter-view-predicted from the
 /// base frame of the same access unit; its later P/B frames are temporal.
-fn decode_annex_b_hierarchical<F>(aus: &[Au], bsps: &Sps, bpps: &Pps, dsps: &Sps, dpps: &Pps, mut on_frame: F) -> anyhow::Result<ClipInfo>
+fn decode_hier_stream<I, F>(aus: I, bsps: &Sps, bpps: &Pps, dsps: &Sps, dpps: &Pps, mut on_frame: F) -> anyhow::Result<ClipInfo>
 where
+    I: Iterator<Item = anyhow::Result<Au>>,
     F: FnMut(&Frame, &Frame, u32, u32) -> anyhow::Result<()>,
 {
     let (dw, dh) = (bsps.width, bsps.height);
@@ -303,6 +412,7 @@ where
     };
 
     for au in aus {
+        let au = au?;
         let bsh = parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, bsps, bpps)?;
         let lsb = bsh.pic_order_cnt_lsb.unwrap_or(0) as i32;
         if au.base_idr {
@@ -403,9 +513,16 @@ fn clone_frame(f: &Frame) -> Frame {
 /// compose step consumes them unchanged. Returns the display geometry + frame
 /// count. Writers are buffered internally.
 pub fn decode_annex_b_to_yuv_files(data: &[u8], view0: &std::path::Path, view1: &std::path::Path) -> anyhow::Result<ClipInfo> {
+    decode_annex_b_to_yuv_files_reader(io::Cursor::new(data), view0, view1)
+}
+
+/// Streaming form of [`decode_annex_b_to_yuv_files`]: reads the elementary
+/// stream incrementally from `reader` (e.g. a `BufReader<File>`) so a full
+/// retail-length movie decodes without loading the stream into memory.
+pub fn decode_annex_b_to_yuv_files_reader<R: Read>(reader: R, view0: &std::path::Path, view1: &std::path::Path) -> anyhow::Result<ClipInfo> {
     let mut w0 = io::BufWriter::new(std::fs::File::create(view0)?);
     let mut w1 = io::BufWriter::new(std::fs::File::create(view1)?);
-    let info = decode_annex_b(data, |bf, df, w, h| {
+    let info = decode_annex_b_reader(reader, |bf, df, w, h| {
         write_cropped_yuv420(bf, w as usize, h as usize, &mut w0)?;
         write_cropped_yuv420(df, w as usize, h as usize, &mut w1)?;
         Ok(())

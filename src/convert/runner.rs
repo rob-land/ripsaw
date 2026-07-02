@@ -240,9 +240,11 @@ async fn run_mvc_pipeline(
         // and fall back to ldecod, NOT abort the conversion — so flatten the
         // JoinError into the same Err path as a clean decode error.
         match tokio::task::spawn_blocking(move || -> Result<crate::mvc::clip::ClipInfo> {
-            let data = std::fs::read(&h264)
-                .with_context(|| format!("reading {}", h264.display()))?;
-            crate::mvc::clip::decode_annex_b_to_yuv_files(&data, &v0, &v1)
+            // Stream the elementary stream from disk (never resident in full) so
+            // a retail-length movie decodes without exhausting memory.
+            let file = std::fs::File::open(&h264)
+                .with_context(|| format!("opening {}", h264.display()))?;
+            crate::mvc::clip::decode_annex_b_to_yuv_files_reader(std::io::BufReader::new(file), &v0, &v1)
         })
         .await
         {

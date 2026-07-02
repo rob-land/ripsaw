@@ -94,6 +94,101 @@ fn trim_trailing_zeros(data: &[u8]) -> usize {
     end
 }
 
+/// Streaming counterpart of [`NalSplitter`]: yields each NAL unit as an owned
+/// `Vec<u8>` while reading the byte stream incrementally from any `Read`, so the
+/// whole elementary stream is never held in memory at once. Only the current
+/// NAL (plus a small read-ahead) is buffered — memory stays bounded regardless
+/// of stream length, which is what lets the decoder handle a full retail movie.
+///
+/// Same delimiting as [`NalSplitter`] (3- or 4-byte start codes, trailing zeros
+/// trimmed); emulation prevention guarantees `00 00 01` only appears as a start
+/// code, so scanning the payload for the next start code is unambiguous.
+pub struct NalReader<R: std::io::Read> {
+    reader: R,
+    /// Unconsumed bytes: after the leading start code is skipped this begins at
+    /// the current NAL's payload.
+    buf: Vec<u8>,
+    /// Resume offset for the next-start-code search (avoids rescanning the
+    /// whole growing buffer each refill).
+    scan: usize,
+    started: bool,
+    eof: bool,
+}
+
+impl<R: std::io::Read> NalReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self { reader, buf: Vec::new(), scan: 0, started: false, eof: false }
+    }
+
+    /// Read one more chunk into `buf`; sets `eof` at end of stream.
+    fn read_more(&mut self) -> std::io::Result<()> {
+        let mut chunk = [0u8; 64 * 1024];
+        let n = self.reader.read(&mut chunk)?;
+        if n == 0 {
+            self.eof = true;
+        } else {
+            self.buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok(())
+    }
+}
+
+impl<R: std::io::Read> Iterator for NalReader<R> {
+    type Item = std::io::Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<std::io::Result<Vec<u8>>> {
+        // Skip the leading start code once: drop everything up to and including
+        // the first start code, leaving `buf` at the first NAL's payload.
+        if !self.started {
+            loop {
+                if let Some(sc) = find_start_code(&self.buf, 0) {
+                    let after = skip_start_code(&self.buf, sc).expect("start code just found");
+                    self.buf.drain(..after);
+                    self.started = true;
+                    self.scan = 0;
+                    break;
+                }
+                if self.eof {
+                    return None; // no start code anywhere
+                }
+                if let Err(e) = self.read_more() {
+                    return Some(Err(e));
+                }
+            }
+        }
+        // Find the next start code = end of the current NAL, refilling as needed.
+        loop {
+            if let Some(sc) = find_start_code(&self.buf, self.scan) {
+                let end = trim_trailing_zeros(&self.buf[..sc]);
+                let nal = self.buf[..end].to_vec();
+                let after = skip_start_code(&self.buf, sc).expect("start code just found");
+                self.buf.drain(..after);
+                self.scan = 0;
+                return Some(Ok(nal));
+            }
+            if self.eof {
+                if self.buf.is_empty() {
+                    return None;
+                }
+                let end = trim_trailing_zeros(&self.buf);
+                let nal = self.buf[..end].to_vec();
+                self.buf.clear();
+                self.scan = 0;
+                if end == 0 {
+                    return None; // trailing padding only
+                }
+                return Some(Ok(nal));
+            }
+            // Resume the next search 3 bytes back so a start code straddling the
+            // read boundary is still found.
+            self.scan = self.buf.len().saturating_sub(3);
+            if let Err(e) = self.read_more() {
+                return Some(Err(e));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +243,47 @@ mod tests {
         let nals: Vec<&[u8]> = NalSplitter::new(data).collect();
         assert_eq!(nals.len(), 1);
         assert_eq!(nals[0], &[0x67, 0x42]);
+    }
+
+    /// The streaming `NalReader` must yield exactly the same NALs as the
+    /// in-memory `NalSplitter`, for any read-chunking. A tiny `Read` wrapper
+    /// that hands out at most `step` bytes per call exercises start codes that
+    /// straddle read boundaries.
+    struct Chunked<'a> {
+        data: &'a [u8],
+        pos: usize,
+        step: usize,
+    }
+    impl std::io::Read for Chunked<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.step.min(out.len()).min(self.data.len() - self.pos);
+            out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    fn stream_nals(data: &[u8], step: usize) -> Vec<Vec<u8>> {
+        NalReader::new(Chunked { data, pos: 0, step })
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn nal_reader_matches_splitter_for_all_chunk_sizes() {
+        let cases: &[&[u8]] = &[
+            b"\x00\x00\x01\x67\x42\x00\x00\x01\x68\x42",
+            b"\x00\x00\x00\x01\x67\x42\x00\x00\x00\x01\x68\x42",
+            b"\x00\x00\x00\x01\x67\x00\x00\x01\x68\x00\x00\x00\x01\x65",
+            b"\x00\x00\x01\x67\x42\x00\x00\x00", // trailing zero padding
+            b"", b"\x01\x02\x03\x04", // no start codes
+        ];
+        for data in cases {
+            let want: Vec<Vec<u8>> = NalSplitter::new(data).map(|s| s.to_vec()).collect();
+            // Every chunk size from 1 byte up to the whole buffer at once.
+            for step in 1..=data.len().max(1) {
+                assert_eq!(stream_nals(data, step), want, "case {data:?} step {step}");
+            }
+        }
     }
 }

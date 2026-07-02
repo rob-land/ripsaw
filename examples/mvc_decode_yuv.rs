@@ -4,15 +4,16 @@
 //
 //   mvc_decode_yuv -- stream.h264 view0.yuv view1.yuv
 
-use ripsaw::mvc::clip::decode_annex_b_to_yuv_files;
+use ripsaw::mvc::clip::decode_annex_b_to_yuv_files_reader;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let src = args.next().expect("usage: mvc_decode_yuv <stream.h264> <view0.yuv> <view1.yuv>");
     let view0 = args.next().expect("missing view0 output path");
     let view1 = args.next().expect("missing view1 output path");
-    let data = std::fs::read(&src)?;
-    let info = decode_annex_b_to_yuv_files(&data, view0.as_ref(), view1.as_ref())?;
+    // Stream from the file so memory stays bounded regardless of stream length.
+    let reader = std::io::BufReader::new(std::fs::File::open(&src)?);
+    let info = decode_annex_b_to_yuv_files_reader(reader, view0.as_ref(), view1.as_ref())?;
     eprintln!("decoded {} frames, {}×{} per view → {view0}, {view1}", info.frames, info.width, info.height);
     Ok(())
 }
