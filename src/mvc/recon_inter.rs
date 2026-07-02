@@ -56,7 +56,11 @@ fn partitions(mb_type: i64) -> Vec<(usize, usize, usize, usize, Option<Direction
 /// `refs` is L0 (index = ref_idx): one frame for single-ref, `[temporal,
 /// inter-view]` for the MVC dependent temporal P (ref_idx decoded per
 /// partition when num_ref_idx_l0_active > 1).
-pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, refs: &[&Frame]) -> anyhow::Result<(Frame, MotionField)> {
+/// Decode one or more P-slices of a frame into a single buffer set, returning
+/// the (pre-deblock) frame, its motion field, and the number of MBs decoded.
+/// Does NOT verify full-frame coverage — the caller does (so a single slice can
+/// be decoded in isolation for the per-slice-parallel path).
+fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, refs: &[&Frame]) -> anyhow::Result<(Frame, MotionField, usize)> {
     let width = sps.pic_width_in_mbs as usize;
     let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
     let (cw, ch) = (fw / 2, fh / 2);
@@ -364,11 +368,7 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
     }
     } // per-slice loop
 
-    // Every MB must be decoded exactly once. A CABAC desync that ends a slice
-    // early (or a stream feature that skips MBs) leaves a gap — bail cleanly so
-    // the caller falls back, rather than emitting a frame with undecoded holes.
-    anyhow::ensure!(decoded_mbs == num_mbs, "slice desync — {decoded_mbs}/{num_mbs} MBs decoded (unsupported feature?)");
-
+    let _ = num_mbs;
     let sh = sh_last.expect("at least one slice");
     let frame = Frame {
         y: y.d,
@@ -386,6 +386,66 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         slice_beta_offset_div2: sh.slice_beta_offset_div2,
     };
     let mf = MotionField { mv: g_mv, refidx: g_ref, nz, bw4, bh4 };
+    Ok((frame, mf, decoded_mbs))
+}
+
+/// Decode a P-slice frame (pre-deblock) + its motion field. Multi-slice frames
+/// decode their (independent) slices in parallel, merging the disjoint MB-row
+/// bands; single-slice frames decode directly. Verifies full coverage.
+pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, refs: &[&Frame]) -> anyhow::Result<(Frame, MotionField)> {
+    let width = sps.pic_width_in_mbs as usize;
+    let num_mbs = width * sps.pic_height_in_map_units as usize;
+    if slices.len() < 2 {
+        let (frame, mf, n) = decode_p_frame_one(slices, nal_ref_idc, idr, sps, pps, refs)?;
+        anyhow::ensure!(n == num_mbs, "slice desync — {n}/{num_mbs} MBs decoded (unsupported feature?)");
+        return Ok((frame, mf));
+    }
+    // Per-slice parallel: each slice is independent (cross-slice neighbours are
+    // unavailable), decoding into its own buffers; then merge the bands.
+    let firsts = slice_first_mbs(slices, idr, nal_ref_idc, sps, pps)?;
+    let partials: Vec<anyhow::Result<(Frame, MotionField, usize)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = slices.iter().map(|sl| scope.spawn(|| decode_p_frame_one(std::slice::from_ref(sl), nal_ref_idc, idr, sps, pps, refs))).collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("P-slice decode thread panicked")))).collect()
+    });
+    merge_slice_frames(partials, &firsts, num_mbs, width)
+}
+
+/// Parse the `first_mb_in_slice` of each slice (they partition the frame into
+/// contiguous, ascending MB ranges).
+fn slice_first_mbs(slices: &[&[u8]], idr: bool, nal_ref_idc: u8, sps: &Sps, pps: &Pps) -> anyhow::Result<Vec<usize>> {
+    slices
+        .iter()
+        .map(|sl| Ok(parse_slice_header(&mut BitReader::new(sl), idr, nal_ref_idc, sps, pps)?.first_mb_in_slice as usize))
+        .collect()
+}
+
+/// Merge per-slice partial decodes (each with only its own MB-row band filled)
+/// into one frame + motion field, then verify full coverage. `firsts[k]` is the
+/// first MB of slice `k`; slices are contiguous MB rows.
+fn merge_slice_frames(partials: Vec<anyhow::Result<(Frame, MotionField, usize)>>, firsts: &[usize], num_mbs: usize, width: usize) -> anyhow::Result<(Frame, MotionField)> {
+    let mut parts: Vec<(Frame, MotionField, usize)> = Vec::with_capacity(partials.len());
+    for p in partials {
+        parts.push(p?);
+    }
+    let mut it = parts.into_iter();
+    let (mut frame, mut mf, mut total) = it.next().ok_or_else(|| anyhow::anyhow!("no slices"))?;
+    let (fw, cw, bw4) = (frame.fw, frame.cw, mf.bw4);
+    for (i, (fk, mfk, nk)) in it.enumerate() {
+        let k = i + 1; // parts[0] (slice 0) is already the accumulator
+        let (r0, r1) = (firsts[k] / width, firsts.get(k + 1).copied().unwrap_or(num_mbs) / width); // MB rows
+        let (start, end) = (firsts[k], firsts.get(k + 1).copied().unwrap_or(num_mbs));
+        frame.y[r0 * 16 * fw..r1 * 16 * fw].copy_from_slice(&fk.y[r0 * 16 * fw..r1 * 16 * fw]);
+        frame.cb[r0 * 8 * cw..r1 * 8 * cw].copy_from_slice(&fk.cb[r0 * 8 * cw..r1 * 8 * cw]);
+        frame.cr[r0 * 8 * cw..r1 * 8 * cw].copy_from_slice(&fk.cr[r0 * 8 * cw..r1 * 8 * cw]);
+        frame.mb_info[start..end].copy_from_slice(&fk.mb_info[start..end]);
+        frame.qp[start..end].copy_from_slice(&fk.qp[start..end]);
+        let (b0, b1) = (r0 * 4 * bw4, r1 * 4 * bw4); // 4×4 grid range
+        mf.mv[b0..b1].copy_from_slice(&mfk.mv[b0..b1]);
+        mf.refidx[b0..b1].copy_from_slice(&mfk.refidx[b0..b1]);
+        mf.nz[b0..b1].copy_from_slice(&mfk.nz[b0..b1]);
+        total += nk;
+    }
+    anyhow::ensure!(total == num_mbs, "slice desync — {total}/{num_mbs} MBs decoded (unsupported feature?)");
     Ok((frame, mf))
 }
 
@@ -524,7 +584,7 @@ impl BGrids {
 /// CABAC reinit + cross-slice neighbour unavailability); spatial direct only,
 /// num_ref_idx = 1 per list (ref_idx not coded); intra MBs handled.
 #[allow(clippy::too_many_arguments)]
-pub fn decode_b_frame(
+fn decode_b_frame_one(
     slices: &[&[u8]],
     nal_ref_idc: u8,
     idr: bool,
@@ -534,7 +594,7 @@ pub fn decode_b_frame(
     l1: &[(&Frame, i32)],
     col: &MotionField,
     bipred: (i32, i32),
-) -> anyhow::Result<(Frame, BMotionField)> {
+) -> anyhow::Result<(Frame, BMotionField, usize)> {
     let width = sps.pic_width_in_mbs as usize;
     let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
     let (cw, ch) = (fw / 2, fh / 2);
@@ -843,8 +903,7 @@ pub fn decode_b_frame(
         }
     }
 
-    anyhow::ensure!(decoded_mbs == num_mbs, "slice desync — {decoded_mbs}/{num_mbs} MBs decoded (unsupported feature?)");
-
+    let _ = num_mbs;
     let sh = sh_last.expect("at least one slice");
     let frame = Frame {
         y: y.d,
@@ -862,6 +921,52 @@ pub fn decode_b_frame(
         slice_beta_offset_div2: sh.slice_beta_offset_div2,
     };
     let bmf = BMotionField { mv: g.mv, refpoc, intra: intra_grid, nz, bw4, bh4 };
+    Ok((frame, bmf, decoded_mbs))
+}
+
+/// Decode a B-slice frame (pre-deblock) + its two-list motion field, decoding
+/// independent slices in parallel and merging their disjoint MB-row bands.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_b_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, l0: &[(&Frame, i32)], l1: &[(&Frame, i32)], col: &MotionField, bipred: (i32, i32)) -> anyhow::Result<(Frame, BMotionField)> {
+    let width = sps.pic_width_in_mbs as usize;
+    let num_mbs = width * sps.pic_height_in_map_units as usize;
+    if slices.len() < 2 {
+        let (frame, bmf, n) = decode_b_frame_one(slices, nal_ref_idc, idr, sps, pps, l0, l1, col, bipred)?;
+        anyhow::ensure!(n == num_mbs, "slice desync — {n}/{num_mbs} MBs decoded (unsupported feature?)");
+        return Ok((frame, bmf));
+    }
+    let firsts = slice_first_mbs(slices, idr, nal_ref_idc, sps, pps)?;
+    let partials: Vec<anyhow::Result<(Frame, BMotionField, usize)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = slices.iter().map(|sl| scope.spawn(|| decode_b_frame_one(std::slice::from_ref(sl), nal_ref_idc, idr, sps, pps, l0, l1, col, bipred))).collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("B-slice decode thread panicked")))).collect()
+    });
+    // Merge (BMotionField is two-list; otherwise identical band-copy to P).
+    let mut parts: Vec<(Frame, BMotionField, usize)> = Vec::with_capacity(partials.len());
+    for p in partials {
+        parts.push(p?);
+    }
+    let mut it = parts.into_iter();
+    let (mut frame, mut bmf, mut total) = it.next().ok_or_else(|| anyhow::anyhow!("no slices"))?;
+    let (fw, cw, bw4) = (frame.fw, frame.cw, bmf.bw4);
+    for (i, (fk, bk, nk)) in it.enumerate() {
+        let k = i + 1;
+        let (r0, r1) = (firsts[k] / width, firsts.get(k + 1).copied().unwrap_or(num_mbs) / width);
+        let (start, end) = (firsts[k], firsts.get(k + 1).copied().unwrap_or(num_mbs));
+        frame.y[r0 * 16 * fw..r1 * 16 * fw].copy_from_slice(&fk.y[r0 * 16 * fw..r1 * 16 * fw]);
+        frame.cb[r0 * 8 * cw..r1 * 8 * cw].copy_from_slice(&fk.cb[r0 * 8 * cw..r1 * 8 * cw]);
+        frame.cr[r0 * 8 * cw..r1 * 8 * cw].copy_from_slice(&fk.cr[r0 * 8 * cw..r1 * 8 * cw]);
+        frame.mb_info[start..end].copy_from_slice(&fk.mb_info[start..end]);
+        frame.qp[start..end].copy_from_slice(&fk.qp[start..end]);
+        let (b0, b1) = (r0 * 4 * bw4, r1 * 4 * bw4);
+        for l in 0..2 {
+            bmf.mv[l][b0..b1].copy_from_slice(&bk.mv[l][b0..b1]);
+            bmf.refpoc[l][b0..b1].copy_from_slice(&bk.refpoc[l][b0..b1]);
+        }
+        bmf.intra[b0..b1].copy_from_slice(&bk.intra[b0..b1]);
+        bmf.nz[b0..b1].copy_from_slice(&bk.nz[b0..b1]);
+        total += nk;
+    }
+    anyhow::ensure!(total == num_mbs, "slice desync — {total}/{num_mbs} MBs decoded (unsupported feature?)");
     Ok((frame, bmf))
 }
 

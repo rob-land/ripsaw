@@ -157,7 +157,7 @@ pub fn reconstruct_intra_mb(
 /// increasing). A single-slice frame is `&[rbsp]`; a multi-slice frame passes
 /// all its slices. Slice boundaries break intra prediction (cross-slice
 /// neighbours are unavailable). Pre-deblock.
-pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps) -> anyhow::Result<Frame> {
+fn decode_intra_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps) -> anyhow::Result<(Frame, usize)> {
     let width = sps.pic_width_in_mbs as usize;
     let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
     let (cw, ch) = (fw / 2, fh / 2);
@@ -229,23 +229,66 @@ pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
     }
     } // per-slice loop
 
-    anyhow::ensure!(decoded_mbs == num_mbs, "intra slice desync — {decoded_mbs}/{num_mbs} MBs decoded");
+    let _ = num_mbs;
     let sh = sh_last.expect("at least one slice");
-    Ok(Frame {
-        y: y.d,
-        cb: cb.d,
-        cr: cr.d,
-        fw,
-        fh,
-        cw,
-        ch,
-        width_mbs: width,
-        mb_info: grid,
-        qp: qp_grid,
-        disable_deblock_idc: sh.disable_deblocking_filter_idc,
-        slice_alpha_c0_offset_div2: sh.slice_alpha_c0_offset_div2,
-        slice_beta_offset_div2: sh.slice_beta_offset_div2,
-    })
+    Ok((
+        Frame {
+            y: y.d,
+            cb: cb.d,
+            cr: cr.d,
+            fw,
+            fh,
+            cw,
+            ch,
+            width_mbs: width,
+            mb_info: grid,
+            qp: qp_grid,
+            disable_deblock_idc: sh.disable_deblocking_filter_idc,
+            slice_alpha_c0_offset_div2: sh.slice_alpha_c0_offset_div2,
+            slice_beta_offset_div2: sh.slice_beta_offset_div2,
+        },
+        decoded_mbs,
+    ))
+}
+
+/// Decode an intra (I) frame (pre-deblock), decoding independent slices in
+/// parallel and merging their disjoint MB-row bands. Verifies full coverage.
+pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps) -> anyhow::Result<Frame> {
+    let width = sps.pic_width_in_mbs as usize;
+    let num_mbs = width * sps.pic_height_in_map_units as usize;
+    if slices.len() < 2 {
+        let (frame, n) = decode_intra_frame_one(slices, nal_ref_idc, idr, sps, pps)?;
+        anyhow::ensure!(n == num_mbs, "intra slice desync — {n}/{num_mbs} MBs decoded");
+        return Ok(frame);
+    }
+    let firsts: Vec<usize> = slices
+        .iter()
+        .map(|sl| Ok::<_, anyhow::Error>(parse_slice_header(&mut BitReader::new(sl), idr, nal_ref_idc, sps, pps)?.first_mb_in_slice as usize))
+        .collect::<Result<_, _>>()?;
+    let partials: Vec<anyhow::Result<(Frame, usize)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = slices.iter().map(|sl| scope.spawn(|| decode_intra_frame_one(std::slice::from_ref(sl), nal_ref_idc, idr, sps, pps))).collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("intra-slice decode thread panicked")))).collect()
+    });
+    let mut parts: Vec<(Frame, usize)> = Vec::with_capacity(partials.len());
+    for p in partials {
+        parts.push(p?);
+    }
+    let mut it = parts.into_iter();
+    let (mut frame, mut total) = it.next().ok_or_else(|| anyhow::anyhow!("no slices"))?;
+    let (fw, cw) = (frame.fw, frame.cw);
+    for (i, (fk, nk)) in it.enumerate() {
+        let k = i + 1;
+        let (r0, r1) = (firsts[k] / width, firsts.get(k + 1).copied().unwrap_or(num_mbs) / width);
+        let (start, end) = (firsts[k], firsts.get(k + 1).copied().unwrap_or(num_mbs));
+        frame.y[r0 * 16 * fw..r1 * 16 * fw].copy_from_slice(&fk.y[r0 * 16 * fw..r1 * 16 * fw]);
+        frame.cb[r0 * 8 * cw..r1 * 8 * cw].copy_from_slice(&fk.cb[r0 * 8 * cw..r1 * 8 * cw]);
+        frame.cr[r0 * 8 * cw..r1 * 8 * cw].copy_from_slice(&fk.cr[r0 * 8 * cw..r1 * 8 * cw]);
+        frame.mb_info[start..end].copy_from_slice(&fk.mb_info[start..end]);
+        frame.qp[start..end].copy_from_slice(&fk.qp[start..end]);
+        total += nk;
+    }
+    anyhow::ensure!(total == num_mbs, "intra slice desync — {total}/{num_mbs} MBs decoded");
+    Ok(frame)
 }
 
 impl Frame {
