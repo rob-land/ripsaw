@@ -352,18 +352,28 @@ type ViewRef = (i32, Frame, MotionField);
 /// L0 = nearest-past, L1 = nearest-future (num_ref 1; empty
 /// ref_pic_list_modification → default temporal list).
 #[allow(clippy::too_many_arguments)]
-fn decode_hier_view(slices: &[&[u8]], idr: bool, idc: u8, st: u32, poc: i32, sps: &Sps, pps: &Pps, refs: &[ViewRef], inter_view: Option<&Frame>) -> anyhow::Result<(Frame, Option<MotionField>)> {
+fn decode_hier_view(slices: &[&[u8]], idr: bool, idc: u8, st: u32, poc: i32, num_ref_l0: usize, sps: &Sps, pps: &Pps, refs: &[ViewRef], inter_view: Option<&Frame>) -> anyhow::Result<(Frame, Option<MotionField>)> {
     if st == 2 {
         let mut f = decode_intra_frame(slices, idc, idr, sps, pps)?;
         f.deblock_intra(pps.chroma_qp_index_offset);
         Ok((f, None))
     } else if st == 0 {
-        let reff: &Frame = if let Some(iv) = inter_view {
-            iv
+        // RefPicList0 for the P frame. A dependent anchor is inter-view-only
+        // (the base frame of this AU). Otherwise it's the temporal short-term
+        // refs ordered by descending PicNum — for the anchor chain (frame_num
+        // ascending in decode order == POC ascending) that is descending POC,
+        // nearest-past first — taking the slice's num_ref_idx_l0_active count
+        // (P frames on these streams use ≥1; empty ref_pic_list_modification →
+        // this default order).
+        let l0: Vec<&Frame> = if let Some(iv) = inter_view {
+            vec![iv]
         } else {
-            &refs.iter().filter(|(p, ..)| *p < poc).max_by_key(|(p, ..)| *p).ok_or_else(|| anyhow::anyhow!("no past ref for P"))?.1
+            let mut past: Vec<&ViewRef> = refs.iter().filter(|(p, ..)| *p < poc).collect();
+            past.sort_by(|a, b| b.0.cmp(&a.0));
+            anyhow::ensure!(!past.is_empty(), "no past ref for P");
+            past.iter().take(num_ref_l0.max(1)).map(|vr| &vr.1).collect()
         };
-        let (mut f, mf) = decode_p_frame(slices, idc, idr, sps, pps, &[reff])?;
+        let (mut f, mf) = decode_p_frame(slices, idc, idr, sps, pps, &l0)?;
         deblock_inter(&mut f, &mf, pps.chroma_qp_index_offset);
         Ok((f, Some(mf)))
     } else {
@@ -442,17 +452,19 @@ where
         let ds: Vec<&[u8]> = au.dep.iter().map(|s| s.as_slice()).collect();
         let dsh = parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, dsps, dpps)?;
         let (bst, dst) = (bsh.slice_type % 5, dsh.slice_type % 5);
+        let bnum = (bsh.num_ref_idx_l0_active_minus1 + 1) as usize;
+        let dnum = (dsh.num_ref_idx_l0_active_minus1 + 1) as usize;
         // Base and dependent views are independent to decode EXCEPT at a
         // dependent anchor (inter-view predicted from the base of the same
         // AU). Decode the two views in parallel where possible.
         let ((bf, bmf), (df, dmf)) = if au.dep_anchor {
-            let base = decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bsps, bpps, &brefs, None)?;
-            let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dsps, dpps, &drefs, Some(&base.0))?;
+            let base = decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bnum, bsps, bpps, &brefs, None)?;
+            let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dnum, dsps, dpps, &drefs, Some(&base.0))?;
             (base, dep)
         } else {
             std::thread::scope(|scope| -> anyhow::Result<_> {
-                let bh = scope.spawn(|| decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bsps, bpps, &brefs, None));
-                let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dsps, dpps, &drefs, None)?;
+                let bh = scope.spawn(|| decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bnum, bsps, bpps, &brefs, None));
+                let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dnum, dsps, dpps, &drefs, None)?;
                 let base = bh.join().map_err(|_| anyhow::anyhow!("base-view decode thread panicked"))??;
                 Ok((base, dep))
             })?

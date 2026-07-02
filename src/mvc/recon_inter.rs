@@ -109,17 +109,25 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
     let _ = ch;
 
     // Neighbour accessor: `None` only when the neighbour MB is truly
-    // unavailable — out of frame or in an earlier slice (MB address <
-    // the current slice's first MB). An available-but-intra neighbour returns
-    // `Some((0, 0, -1))` (its grid cells hold mv 0, ref -1): the median MV
-    // prediction treats it as a zero-MV non-match, and — crucially — the P_Skip
-    // zero-condition and the "B,C unavailable → A" rule (§8.4.1.1 / §8.4.1.3.2)
-    // must distinguish "MB not available" from "MB is intra".
-    let nb = |g_mv: &Band<(i32, i32)>, g_ref: &Band<i32>, bx: i32, by: i32, slice_start: usize| -> Neighbour {
+    // unavailable — out of frame, in an earlier slice (MB address <
+    // the current slice's first MB), or NOT YET DECODED (MB address >
+    // the current MB, i.e. `cur_addr`). The last case matters for the
+    // above-right (C) neighbour: for a lower partition it points into the
+    // still-undecoded right MB, and § 6.4.11.7 then substitutes the above-left
+    // (D). Without the `> cur_addr` guard that future cell reads back as its
+    // init (0, 0, -1) and the C→D fallback never fires — a bug only visible
+    // with mixed references (num_ref > 1), since a single-ref directional
+    // predictor always matches and never consults C.
+    // An available-but-intra neighbour returns `Some((0, 0, -1))` (mv 0, ref
+    // -1): the median treats it as a zero-MV non-match, and the P_Skip
+    // zero-condition / "B,C unavailable → A" rule (§ 8.4.1.1 / 8.4.1.3.2) must
+    // distinguish "MB not available" from "MB is intra".
+    let nb = |g_mv: &Band<(i32, i32)>, g_ref: &Band<i32>, bx: i32, by: i32, slice_start: usize, cur_addr: usize| -> Neighbour {
         if bx < 0 || by < 0 || bx >= bw4 as i32 || by >= bh4 as i32 {
             return None;
         }
-        if (by as usize / 4) * width + (bx as usize / 4) < slice_start {
+        let nmb = (by as usize / 4) * width + (bx as usize / 4);
+        if nmb < slice_start || nmb > cur_addr {
             return None;
         }
         let i = by as usize * bw4 + bx as usize;
@@ -155,11 +163,11 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         decoded_mbs += 1;
 
         if is_skip {
-            let a = nb(&g_mv, &g_ref, mbx4 as i32 - 1, mby4 as i32, slice_start);
-            let b = nb(&g_mv, &g_ref, mbx4 as i32, mby4 as i32 - 1, slice_start);
+            let a = nb(&g_mv, &g_ref, mbx4 as i32 - 1, mby4 as i32, slice_start, addr);
+            let b = nb(&g_mv, &g_ref, mbx4 as i32, mby4 as i32 - 1, slice_start, addr);
             let c = {
-                let cc = nb(&g_mv, &g_ref, mbx4 as i32 + 4, mby4 as i32 - 1, slice_start);
-                if cc.is_some() { cc } else { nb(&g_mv, &g_ref, mbx4 as i32 - 1, mby4 as i32 - 1, slice_start) }
+                let cc = nb(&g_mv, &g_ref, mbx4 as i32 + 4, mby4 as i32 - 1, slice_start, addr);
+                if cc.is_some() { cc } else { nb(&g_mv, &g_ref, mbx4 as i32 - 1, mby4 as i32 - 1, slice_start, addr) }
             };
             let mv = predict_skip_mv(a, b, c);
             fill(&mut g_mv, &mut g_ref, &mut g_mvd, mbx4, mby4, 4, 4, mv, (0, 0), 0, bw4);
@@ -321,11 +329,11 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             let incx = mvd_ctx_inc(lmvd.0.abs() + umvd.0.abs());
             let incy = mvd_ctx_inc(lmvd.1.abs() + umvd.1.abs());
             let mvd = (decode_mvd_component(&mut e, &mut ctx, 0, incx) as i32, decode_mvd_component(&mut e, &mut ctx, 1, incy) as i32);
-            let a = nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32, slice_start);
-            let b = nb(&g_mv, &g_ref, gx as i32, gy as i32 - 1, slice_start);
+            let a = nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32, slice_start, addr);
+            let b = nb(&g_mv, &g_ref, gx as i32, gy as i32 - 1, slice_start, addr);
             let c = {
-                let cc = nb(&g_mv, &g_ref, gx as i32 + w4 as i32, gy as i32 - 1, slice_start);
-                if cc.is_some() { cc } else { nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32 - 1, slice_start) }
+                let cc = nb(&g_mv, &g_ref, gx as i32 + w4 as i32, gy as i32 - 1, slice_start, addr);
+                if cc.is_some() { cc } else { nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32 - 1, slice_start, addr) }
             };
             let mvp = predict_mv(a, b, c, ridx, dir);
             let mv = (mvp.0 + mvd.0, mvp.1 + mvd.1);
@@ -590,11 +598,16 @@ struct BGrids<'a> {
     width: usize,
 }
 impl BGrids<'_> {
-    fn nb(&self, list: usize, bx: i32, by: i32, slice_start: usize) -> Neighbour {
+    fn nb(&self, list: usize, bx: i32, by: i32, slice_start: usize, cur_addr: usize) -> Neighbour {
         if bx < 0 || by < 0 || bx >= self.bw4 as i32 || by >= self.bh4 as i32 {
             return None;
         }
-        if (by as usize / 4) * self.width + (bx as usize / 4) < slice_start {
+        // Unavailable if in an earlier slice OR not yet decoded (MB address >
+        // the current MB) — the latter is the above-right (C) of a lower
+        // partition pointing into the still-undecoded right MB (§ 6.4.11.7
+        // then substitutes above-left D); see the P-slice `nb`.
+        let nmb = (by as usize / 4) * self.width + (bx as usize / 4);
+        if nmb < slice_start || nmb > cur_addr {
             return None;
         }
         // `None` only for a truly-unavailable MB; an available neighbour that
@@ -622,15 +635,15 @@ impl BGrids<'_> {
             }
         }
     }
-    fn spatial_direct(&self, mbx4: usize, mby4: usize, slice_start: usize) -> Direct {
+    fn spatial_direct(&self, mbx4: usize, mby4: usize, slice_start: usize, cur_addr: usize) -> Direct {
         let (x, yy) = (mbx4 as i32, mby4 as i32);
         let mut d = Direct { ref0: -1, ref1: -1, mvp0: (0, 0), mvp1: (0, 0), zero: false };
         for list in 0..2 {
-            let a = self.nb(list, x - 1, yy, slice_start);
-            let b = self.nb(list, x, yy - 1, slice_start);
+            let a = self.nb(list, x - 1, yy, slice_start, cur_addr);
+            let b = self.nb(list, x, yy - 1, slice_start, cur_addr);
             let c = {
-                let cc = self.nb(list, x + 4, yy - 1, slice_start);
-                if cc.is_some() { cc } else { self.nb(list, x - 1, yy - 1, slice_start) }
+                let cc = self.nb(list, x + 4, yy - 1, slice_start, cur_addr);
+                if cc.is_some() { cc } else { self.nb(list, x - 1, yy - 1, slice_start, cur_addr) }
             };
             let r = |n: Neighbour| n.map(|(_, _, r)| r).unwrap_or(-1);
             let refi = min_positive(min_positive(r(a), r(b)), r(c));
@@ -837,7 +850,7 @@ fn decode_b_frame_one(
             }
 
             // ---- inter (direct / explicit) ----
-            let direct = g.spatial_direct(mbx4, mby4, slice_start);
+            let direct = g.spatial_direct(mbx4, mby4, slice_start, addr);
             enum Plan {
                 Direct { b8: usize },
                 Explicit { pdir: u8, dir: Option<Directional>, mv0: (i32, i32), mv1: (i32, i32) },
@@ -888,11 +901,11 @@ fn decode_b_frame_one(
                         let incx = mvd_ctx_inc(lmvd.0.abs() + umvd.0.abs());
                         let incy = mvd_ctx_inc(lmvd.1.abs() + umvd.1.abs());
                         let mvd = (decode_mvd_component(&mut e, &mut ctx, 0, incx) as i32, decode_mvd_component(&mut e, &mut ctx, 1, incy) as i32);
-                        let a = g.nb(list, *gx as i32 - 1, *gy as i32, slice_start);
-                        let b = g.nb(list, *gx as i32, *gy as i32 - 1, slice_start);
+                        let a = g.nb(list, *gx as i32 - 1, *gy as i32, slice_start, addr);
+                        let b = g.nb(list, *gx as i32, *gy as i32 - 1, slice_start, addr);
                         let c = {
-                            let cc = g.nb(list, *gx as i32 + *w4 as i32, *gy as i32 - 1, slice_start);
-                            if cc.is_some() { cc } else { g.nb(list, *gx as i32 - 1, *gy as i32 - 1, slice_start) }
+                            let cc = g.nb(list, *gx as i32 + *w4 as i32, *gy as i32 - 1, slice_start, addr);
+                            if cc.is_some() { cc } else { g.nb(list, *gx as i32 - 1, *gy as i32 - 1, slice_start, addr) }
                         };
                         let mvp = predict_mv(a, b, c, 0, *dir);
                         let mv = (mvp.0 + mvd.0, mvp.1 + mvd.1);
