@@ -225,42 +225,14 @@ async fn run_mvc_pipeline(
         }
     }
 
-    // Decode both views natively with libmvc (pure Rust, no external
-    // dependency, bit-exact vs JM on the real disc). The decoder is
-    // synchronous and CPU-bound, so run it on a blocking thread. If it fails
-    // — e.g. the stream uses a feature libmvc doesn't handle yet — fall back
-    // to the JM reference decoder when it's available.
-    log(&event_tx, "Decoding MVC natively (libmvc)…");
-    let native: Result<crate::mvc::clip::ClipInfo> = {
-        let h264 = h264_path.clone();
-        let v0 = view0.clone();
-        let v1 = view1.clone();
-        // A panic inside libmvc (e.g. an index-out-of-bounds on an
-        // unsupported bitstream feature) must be treated as a decode failure
-        // and fall back to ldecod, NOT abort the conversion — so flatten the
-        // JoinError into the same Err path as a clean decode error.
-        match tokio::task::spawn_blocking(move || -> Result<crate::mvc::clip::ClipInfo> {
-            // Stream the elementary stream from disk (never resident in full) so
-            // a retail-length movie decodes without exhausting memory.
-            let file = std::fs::File::open(&h264)
-                .with_context(|| format!("opening {}", h264.display()))?;
-            crate::mvc::clip::decode_annex_b_to_yuv_files_reader(std::io::BufReader::new(file), &v0, &v1)
-        })
-        .await
-        {
-            Ok(inner) => inner,
-            Err(join_err) => Err(anyhow!("libmvc panicked while decoding: {join_err}")),
-        }
-    };
-
-    match native {
-        Ok(info) => {
-            log(
-                &event_tx,
-                &format!("Decoded {} frames natively ({}×{} per view)", info.frames, info.width, info.height),
-            );
-        }
-        Err(e) => {
+    // Decode with libmvc (pure Rust, bit-exact vs JM on the real disc),
+    // streaming composed full-SBS frames straight into ffmpeg — so the pipeline
+    // needs no tens-of-GB intermediate YUV on disk. If libmvc can't handle the
+    // stream (an unsupported feature, or a panic), fall back to the JM reference
+    // decoder, which writes per-view YUV files that ffmpeg then composes.
+    match decode_pipe_encode(plan, &event_tx, &h264_path, width, height, &frame_rate).await? {
+        PipeOutcome::Success => return Ok(plan.output.clone()),
+        PipeOutcome::DecodeFailed(e) => {
             log(
                 &event_tx,
                 &format!("libmvc decode failed ({e}); falling back to the JM reference decoder…"),
@@ -290,6 +262,7 @@ async fn run_mvc_pipeline(
         }
     }
 
+    // Reached only via the ldecod fallback (the piped libmvc path returns above).
     if !view0.exists() || !view1.exists() {
         return Err(anyhow!(
             "MVC decode produced no dependent view output -- the source may not contain MVC NALs"
@@ -355,6 +328,130 @@ async fn run_mvc_pipeline(
     Ok(plan.output.clone())
 }
 
+/// Result of the piped libmvc decode+encode: either it finished the whole
+/// output, or the decode failed and the caller should fall back to ldecod.
+enum PipeOutcome {
+    Success,
+    DecodeFailed(anyhow::Error),
+}
+
+/// Decode the extracted MVC stream with libmvc and stream composed full-SBS
+/// frames straight into ffmpeg over a pipe — no intermediate YUV on disk. The
+/// decoder (blocking, CPU-bound) and ffmpeg run concurrently: the decoder writes
+/// one full-SBS frame per AU into the pipe, ffmpeg derives the requested layout
+/// from it and muxes audio/subtitles from the original input. Returns
+/// `DecodeFailed` (→ ldecod fallback) if libmvc errors or panics; propagates a
+/// genuine ffmpeg/setup error.
+async fn decode_pipe_encode(
+    plan: &ConversionPlan,
+    event_tx: &Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
+    h264_path: &Path,
+    width: u32,
+    height: u32,
+    frame_rate: &str,
+) -> Result<PipeOutcome> {
+    log(event_tx, "Decoding MVC natively (libmvc), streaming into ffmpeg…");
+
+    let (pipe_reader, pipe_writer) = std::io::pipe().context("creating decode→ffmpeg pipe")?;
+
+    let encoder = resolve_encoder_args(plan, event_tx.as_ref());
+    let compose = compose_filter_fsbs(plan.format);
+    let filter_complex = match &encoder.pre_input_vf {
+        Some(extra) => {
+            let intermediate = compose.trim_end_matches("[v]");
+            format!("{intermediate}[vraw];[vraw]{extra}[v]")
+        }
+        None => compose,
+    };
+    // One full-SBS frame per AU: 2×(per-view width) × height.
+    let fsbs_size = format!("{}x{}", width * 2, height);
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-y").arg("-hide_banner");
+    for a in &encoder.init {
+        cmd.arg(a);
+    }
+    cmd.arg("-f").arg("rawvideo")
+        .arg("-pixel_format").arg("yuv420p")
+        .arg("-video_size").arg(&fsbs_size)
+        .arg("-framerate").arg(frame_rate)
+        .arg("-i").arg("pipe:0")
+        .arg("-i").arg(&plan.input)
+        .arg("-filter_complex").arg(&filter_complex)
+        .arg("-map").arg("[v]")
+        .arg("-map").arg("1:a?")
+        .arg("-map").arg("1:s?");
+    for a in &encoder.encoder_args {
+        cmd.arg(a);
+    }
+    let mut child = cmd
+        .arg("-c:a").arg("copy")
+        .arg("-c:s").arg("copy")
+        .arg(&plan.output)
+        .stdin(Stdio::from(pipe_reader))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn ffmpeg (piped compose)")?;
+    forward_stderr(&mut child, event_tx.clone());
+
+    // Decode on a blocking thread, writing composed FSBS frames into the pipe.
+    // When the closure returns, `pipe_writer` drops → EOF → ffmpeg finalises.
+    let h264 = h264_path.to_path_buf();
+    let decode = tokio::task::spawn_blocking(move || -> Result<crate::mvc::clip::ClipInfo> {
+        let file = std::fs::File::open(&h264)
+            .with_context(|| format!("opening {}", h264.display()))?;
+        crate::mvc::clip::decode_annex_b_to_fsbs_writer(std::io::BufReader::new(file), pipe_writer)
+    });
+
+    // Await the decode. ffmpeg consumes the pipe concurrently at the OS level and
+    // its stderr is drained by forward_stderr, so neither side can deadlock. A
+    // JoinError means a panic inside libmvc — treat it as a decode failure.
+    let decode_res = match decode.await {
+        Ok(inner) => inner,
+        Err(join_err) => Err(anyhow!("libmvc panicked while decoding: {join_err}")),
+    };
+
+    match decode_res {
+        Err(e) => {
+            // Decode failed: the writer has dropped, so ffmpeg sees EOF and exits
+            // on the partial input. Reap it (its output is discarded) and report
+            // the decode error so the caller falls back to ldecod.
+            let _ = child.wait().await;
+            Ok(PipeOutcome::DecodeFailed(e))
+        }
+        Ok(info) => {
+            log(
+                event_tx,
+                &format!("Decoded {} frames natively ({}×{} per view); encoding…", info.frames, info.width, info.height),
+            );
+            let status = child.wait().await.context("waiting for ffmpeg (piped compose)")?;
+            if !status.success() {
+                return Err(anyhow!("ffmpeg compose failed with status {}", status));
+            }
+            Ok(PipeOutcome::Success)
+        }
+    }
+}
+
+/// Filtergraph deriving the requested stereo layout from a single full-SBS input
+/// `[0:v]` (2×width × height, view 0 left / view 1 right) — the form the piped
+/// libmvc decoder emits. Counterpart of [`compose_filter`], which takes the two
+/// views as separate inputs (the ldecod file path).
+fn compose_filter_fsbs(format: OutputFormat) -> String {
+    match format {
+        // Already full-SBS; pass through ([v] label needed for -map / pre-input vf).
+        OutputFormat::FullSbs => "[0:v]null[v]".into(),
+        // Halve the packed width: 2W→W keeps each view at W/2.
+        OutputFormat::HalfSbs => "[0:v]scale=iw/2:ih[v]".into(),
+        // Split the halves and stack them vertically.
+        OutputFormat::FullTab => "[0:v]crop=iw/2:ih:0:0[l];[0:v]crop=iw/2:ih:iw/2:0[r];[l][r]vstack=inputs=2[v]".into(),
+        OutputFormat::HalfTab => "[0:v]crop=iw/2:ih:0:0,scale=iw:ih/2[t];[0:v]crop=iw/2:ih:iw/2:0,scale=iw:ih/2[b];[t][b]vstack=inputs=2[v]".into(),
+        OutputFormat::FrameSequential => "[0:v]crop=iw/2:ih:0:0[l];[0:v]crop=iw/2:ih:iw/2:0[r];[l][r]framepack=frameseq[v]".into(),
+    }
+}
+
 fn build_decoder_cfg(input: &Path, output_yuv: &Path) -> String {
     format!(
         "InputFile = \"{input}\"\nOutputFile = \"{output}\"\nWriteUV = 1\nFileFormat = 0\nRefOffset = 0\nPOCScale = 2\nDisplayDecParams = 0\nConcealMode = 0\nRefPOCGap = 2\nPOCGap = 2\nSilent = 1\nIntraProfileDeblocking = 1\nDecFrmNum = 0\nDecodeAllLayers = 1\n",
@@ -375,8 +472,8 @@ fn compose_filter(format: OutputFormat) -> String {
             "[0:v]scale=iw:ih/2[t];[1:v]scale=iw:ih/2[b];[t][b]vstack=inputs=2[v]".into()
         }
         OutputFormat::FrameSequential => {
-            // Interleave one frame from each input. Simplest: concat with framepacking.
-            "[0:v][1:v]framepack=l=r[v]".into()
+            // Frame-sequential: alternate L/R frames (framepack doubles the rate).
+            "[0:v][1:v]framepack=frameseq[v]".into()
         }
     }
 }

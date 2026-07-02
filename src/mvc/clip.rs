@@ -548,3 +548,40 @@ pub fn write_cropped_yuv420(f: &Frame, w: usize, h: usize, out: &mut impl Write)
     }
     Ok(())
 }
+
+/// Write a stereo pair as one full-side-by-side (2`w`×`h`) planar YUV 4:2:0
+/// frame: each plane row is the left view's cropped row followed by the right
+/// view's, so the packed frame is view 0 in the left half and view 1 in the
+/// right half. Feeding this straight to ffmpeg lets the whole pipeline avoid a
+/// tens-of-GB intermediate YUV on disk — the decoder streams composed frames
+/// into the encoder.
+pub fn write_fsbs_yuv420(left: &Frame, right: &Frame, w: usize, h: usize, out: &mut impl Write) -> io::Result<()> {
+    for y in 0..h {
+        out.write_all(&left.y[y * left.fw..y * left.fw + w])?;
+        out.write_all(&right.y[y * right.fw..y * right.fw + w])?;
+    }
+    let (cw, ch) = (w / 2, h / 2);
+    for y in 0..ch {
+        out.write_all(&left.cb[y * left.cw..y * left.cw + cw])?;
+        out.write_all(&right.cb[y * right.cw..y * right.cw + cw])?;
+    }
+    for y in 0..ch {
+        out.write_all(&left.cr[y * left.cw..y * left.cw + cw])?;
+        out.write_all(&right.cr[y * right.cw..y * right.cw + cw])?;
+    }
+    Ok(())
+}
+
+/// Decode an MVC Annex B stream (read incrementally from `reader`) and write
+/// each access unit as one full-side-by-side frame ([`write_fsbs_yuv420`]) to
+/// `out` — the streaming decode → encode bridge used by the conversion runner.
+/// `out` is consumed and flushed (then dropped by the caller to signal EOF).
+pub fn decode_annex_b_to_fsbs_writer<R: Read, W: Write>(reader: R, out: W) -> anyhow::Result<ClipInfo> {
+    let mut w = io::BufWriter::with_capacity(1 << 20, out);
+    let info = decode_annex_b_reader(reader, |bf, df, dw, dh| {
+        write_fsbs_yuv420(bf, df, dw as usize, dh as usize, &mut w)?;
+        Ok(())
+    })?;
+    w.flush()?;
+    Ok(info)
+}
