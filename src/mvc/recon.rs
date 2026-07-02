@@ -169,9 +169,13 @@ pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
     let mut cr = Plane { d: vec![0; cw * ch], w: cw };
     let bw4 = width * 4;
     let mut modes = vec![None::<u8>; bw4 * fh / 4];
-    let mut grid: Vec<MbInfo> = Vec::new();
-    let mut cbp_grid: Vec<CbpBits> = Vec::new();
-    let mut qp_grid: Vec<i32> = Vec::new();
+    // Per-MB grids indexed by MB address (see recon_inter::decode_p_frame).
+    let num_mbs = width * (fh / 16);
+    let default_mb = MbInfo { i_nxn: false, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 };
+    let mut grid = vec![default_mb; num_mbs];
+    let mut cbp_grid = vec![CbpBits::default(); num_mbs];
+    let mut qp_grid = vec![0i32; num_mbs];
+    let mut decoded_mbs = 0usize;
     let mut sink = Vec::new();
     // Deblock params come from the last slice header parsed (all equal here).
     let mut sh_last = None;
@@ -195,8 +199,8 @@ pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
         // Cross-slice neighbours (earlier slice) are unavailable. Slices are
         // MB-contiguous, so only the top neighbour can cross a boundary.
         let mb_top = addr >= width && addr - width >= slice_start;
-        let left_i = if mbx != 0 { grid.get(addr - 1).copied() } else { None };
-        let up_i = if mb_top { grid.get(addr - width).copied() } else { None };
+        let left_i = if mbx != 0 { Some(grid[addr - 1]) } else { None };
+        let up_i = if mb_top { Some(grid[addr - width]) } else { None };
         let mut header: Vec<(String, i64)> = Vec::new();
         let info = decode_mb_header(&mut e, &mut hctx, &Neighbors { left: left_i, up: up_i }, &mut last_dquant, &mut header);
         if let Some((_, d)) = header.iter().find(|(n, _)| n == "mb_qp_delta") {
@@ -206,17 +210,18 @@ pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
 
         let mut neigh = CbfNeighbours {
             cur: CbpBits::default(),
-            left: if mbx != 0 { cbp_grid.get(addr - 1).copied() } else { None },
-            up: if mb_top { cbp_grid.get(addr - width).copied() } else { None },
+            left: if mbx != 0 { Some(cbp_grid[addr - 1]) } else { None },
+            up: if mb_top { Some(cbp_grid[addr - width]) } else { None },
         };
         let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut neigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut sink);
 
         reconstruct_intra_mb(&mut y, &mut cb, &mut cr, &mut modes, &info, &raw, &res, mbx, mby, width, bw4, fw, mb_top);
 
         let eos = e.decode_terminate();
-        grid.push(info);
-        cbp_grid.push(neigh.cur);
-        qp_grid.push(qp);
+        grid[addr] = info;
+        cbp_grid[addr] = neigh.cur;
+        qp_grid[addr] = qp;
+        decoded_mbs += 1;
         if eos == 1 {
             break;
         }
@@ -224,6 +229,7 @@ pub fn decode_intra_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
     }
     } // per-slice loop
 
+    anyhow::ensure!(decoded_mbs == num_mbs, "intra slice desync — {decoded_mbs}/{num_mbs} MBs decoded");
     let sh = sh_last.expect("at least one slice");
     Ok(Frame {
         y: y.d,

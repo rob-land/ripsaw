@@ -84,11 +84,16 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
     // Intra pred-mode grid (Some(2)=DC for inter/skip cells, so intra MBs in
     // the P-slice derive their pred modes correctly).
     let mut modes = vec![Some(2u8); bw4 * bh4];
-    let mut skip_grid: Vec<bool> = Vec::new();
-    let mut cbp_grid: Vec<CbpBits> = Vec::new();
-    let mut cbpv: Vec<u8> = Vec::new();
-    let mut mb_info: Vec<MbInfo> = Vec::new();
-    let mut qp_grid: Vec<i32> = Vec::new();
+    // Per-MB grids indexed by MB address (not decode/push order), so a slice
+    // may start at any first_mb and a mid-slice desync leaves a detectable gap
+    // rather than a misaligned index (see the coverage check below).
+    let num_mbs = width * (fh / 16);
+    let mut skip_grid = vec![false; num_mbs];
+    let mut cbp_grid = vec![CbpBits::default(); num_mbs];
+    let mut cbpv = vec![0u8; num_mbs];
+    let mut mb_info = vec![MbInfo { i_nxn: false, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 }; num_mbs];
+    let mut qp_grid = vec![0i32; num_mbs];
+    let mut decoded_mbs = 0usize;
     let mut sh_last = None;
     let _ = (ysz, csz);
 
@@ -132,19 +137,11 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         let mby = addr / width;
         let (mbx4, mby4) = (mbx * 4, mby * 4);
         let mb_top = addr >= width && addr - width >= slice_start;
-        // The per-MB grids are pushed in decode order, so a neighbour is only
-        // reachable if it was already decoded. A CABAC desync that ends a slice
-        // early leaves a gap before the next slice's first_mb; detect it here
-        // and bail cleanly (the caller falls back) instead of indexing past the
-        // grid.
-        anyhow::ensure!(
-            (mbx == 0 || addr - 1 < skip_grid.len()) && (!mb_top || addr - width < skip_grid.len()),
-            "slice desync — neighbour MB not decoded (unsupported feature?) at addr {addr}"
-        );
         let left_ns = if mbx != 0 { (!skip_grid[addr - 1]) as u32 } else { 0 };
         let up_ns = if mb_top { (!skip_grid[addr - width]) as u32 } else { 0 };
         let (is_skip, _) = decode_mb_skip_flag(&mut e, &mut ctx, left_ns, up_ns);
-        skip_grid.push(is_skip);
+        skip_grid[addr] = is_skip;
+        decoded_mbs += 1;
 
         if is_skip {
             let a = nb(&g_mv, &g_ref, mbx4 as i32 - 1, mby4 as i32, slice_start);
@@ -156,10 +153,8 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             let mv = predict_skip_mv(a, b, c);
             fill(&mut g_mv, &mut g_ref, &mut g_mvd, mbx4, mby4, 4, 4, mv, (0, 0), 0, bw4);
             recon_part(&mut y.d, &mut cb.d, &mut cr.d, &ref_planes[0], mbx * 16, mby * 16, 0, 0, 16, 16, mv, &[[0i32; 16]; 16], &[[0i32; 8]; 8], &[[0i32; 8]; 8], fw, cw);
-            cbp_grid.push(CbpBits::default());
-            cbpv.push(0);
-            mb_info.push(MbInfo { i_nxn: false, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 });
-            qp_grid.push(qp);
+            qp_grid[addr] = qp;
+            // (cbp_grid/cbpv/mb_info default to a skip MB's zeros — pre-filled.)
             // A skipped MB infers mb_qp_delta = 0, so the next coded MB's
             // mb_qp_delta context (ctxIdxInc from the previous MB's delta) must
             // see 0 here — reset the running prevMbQpDelta.
@@ -242,10 +237,10 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
                     }
                 }
             }
-            cbp_grid.push(rneigh.cur);
-            cbpv.push(info.cbp);
-            mb_info.push(info);
-            qp_grid.push(qp);
+            cbp_grid[addr] = rneigh.cur;
+            cbpv[addr] = info.cbp;
+            mb_info[addr] = info;
+            qp_grid[addr] = qp;
             // g_ref/g_mv stay -1/0 for this MB (intra → unavailable for the MV
             // prediction of subsequent inter MBs).
             if e.decode_terminate() == 1 {
@@ -346,10 +341,10 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         };
         let mut sink = Vec::new();
         let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &scaling, &mut sink);
-        cbp_grid.push(rneigh.cur);
-        cbpv.push(cbp as u8);
-        mb_info.push(info);
-        qp_grid.push(qp);
+        cbp_grid[addr] = rneigh.cur;
+        cbpv[addr] = cbp as u8;
+        mb_info[addr] = info;
+        qp_grid[addr] = qp;
         for by in 0..4u32 {
             for bx in 0..4u32 {
                 if rneigh.cur.luma4x4_nonzero(bx, by) {
@@ -368,6 +363,11 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         addr += 1;
     }
     } // per-slice loop
+
+    // Every MB must be decoded exactly once. A CABAC desync that ends a slice
+    // early (or a stream feature that skips MBs) leaves a gap — bail cleanly so
+    // the caller falls back, rather than emitting a frame with undecoded holes.
+    anyhow::ensure!(decoded_mbs == num_mbs, "slice desync — {decoded_mbs}/{num_mbs} MBs decoded (unsupported feature?)");
 
     let sh = sh_last.expect("at least one slice");
     let frame = Frame {
@@ -568,12 +568,15 @@ pub fn decode_b_frame(
     let mut nz = vec![false; bw4 * bh4];
     // Intra pred-mode grid (Some(2)=DC seed for inter/skip cells).
     let mut modes = vec![Some(2u8); bw4 * bh4];
-    let mut skip_grid: Vec<bool> = Vec::new();
-    let mut mbtype_grid: Vec<i64> = Vec::new();
-    let mut cbp_grid: Vec<CbpBits> = Vec::new();
-    let mut cbpv: Vec<u8> = Vec::new();
-    let mut mb_info: Vec<MbInfo> = Vec::new();
-    let mut qp_grid: Vec<i32> = Vec::new();
+    // Per-MB grids indexed by MB address (see decode_p_frame).
+    let num_mbs = width * (fh / 16);
+    let mut skip_grid = vec![false; num_mbs];
+    let mut mbtype_grid = vec![0i64; num_mbs];
+    let mut cbp_grid = vec![CbpBits::default(); num_mbs];
+    let mut cbpv = vec![0u8; num_mbs];
+    let mut mb_info = vec![MbInfo { i_nxn: false, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 }; num_mbs];
+    let mut qp_grid = vec![0i32; num_mbs];
+    let mut decoded_mbs = 0usize;
     let mut sh_last = None;
 
     for rbsp in slices {
@@ -598,14 +601,11 @@ pub fn decode_b_frame(
             let (mbx, mby) = (addr % width, addr / width);
             let (mbx4, mby4) = (mbx * 4, mby * 4);
             let mb_top = addr >= width && addr - width >= slice_start;
-            anyhow::ensure!(
-                (mbx == 0 || addr - 1 < skip_grid.len()) && (!mb_top || addr - width < skip_grid.len()),
-                "slice desync — neighbour MB not decoded (unsupported feature?) at addr {addr}"
-            );
             let left_ns = if mbx != 0 { (!skip_grid[addr - 1]) as u32 } else { 0 };
             let up_ns = if mb_top { (!skip_grid[addr - width]) as u32 } else { 0 };
             let (is_skip, _) = decode_mb_skip_flag_b(&mut e, &mut ctx, left_ns, up_ns);
-            skip_grid.push(is_skip);
+            skip_grid[addr] = is_skip;
+            decoded_mbs += 1;
 
             let mb_type = if is_skip {
                 0
@@ -614,7 +614,7 @@ pub fn decode_b_frame(
                 let ua = if mb_top { (mbtype_grid[addr - width] != 0) as u32 } else { 0 };
                 decode_b_mb_type(&mut e, &mut ctx, la, ua)
             };
-            mbtype_grid.push(if is_skip { 0 } else { mb_type });
+            mbtype_grid[addr] = if is_skip { 0 } else { mb_type };
 
             // ---- intra MB inside the B-slice (mb_type ≥ 23) ----
             if !is_skip && mb_type >= 23 {
@@ -685,10 +685,10 @@ pub fn decode_b_frame(
                         }
                     }
                 }
-                cbp_grid.push(rneigh.cur);
-                cbpv.push(info.cbp);
-                mb_info.push(info);
-                qp_grid.push(qp);
+                cbp_grid[addr] = rneigh.cur;
+                cbpv[addr] = info.cbp;
+                mb_info[addr] = info;
+                qp_grid[addr] = qp;
                 if e.decode_terminate() == 1 {
                     break;
                 }
@@ -801,15 +801,13 @@ pub fn decode_b_frame(
                         }
                     }
                 }
-                cbp_grid.push(rneigh.cur);
-                cbpv.push(cbp as u8);
-                mb_info.push(info);
-                qp_grid.push(qp);
+                cbp_grid[addr] = rneigh.cur;
+                cbpv[addr] = cbp as u8;
+                mb_info[addr] = info;
+                qp_grid[addr] = qp;
             } else {
-                cbp_grid.push(CbpBits::default());
-                cbpv.push(0);
-                mb_info.push(MbInfo { i_nxn: false, transform8x8: false, c_ipred: 0, cbp: 0, i16_pred: 0 });
-                qp_grid.push(qp);
+                // skip MB — cbp_grid/cbpv/mb_info keep their pre-filled zeros.
+                qp_grid[addr] = qp;
                 last_dquant = 0;
             }
 
@@ -844,6 +842,8 @@ pub fn decode_b_frame(
             addr += 1;
         }
     }
+
+    anyhow::ensure!(decoded_mbs == num_mbs, "slice desync — {decoded_mbs}/{num_mbs} MBs decoded (unsupported feature?)");
 
     let sh = sh_last.expect("at least one slice");
     let frame = Frame {
