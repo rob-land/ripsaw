@@ -34,6 +34,11 @@ struct Au {
     dep_idc: u8,
     dep_idr: bool,    // !non_idr_flag — IDR-marked header layout
     dep_anchor: bool, // anchor_pic_flag — inter-view-only ref list
+    // The PPS active for each view when this AU's slices were parsed. A stream
+    // re-sends its PPS (same id) with a changed pic_init_qp over time (rate
+    // control), so the PPS in effect is per-AU, not a single global one.
+    bpps: Option<Pps>,
+    dpps: Option<Pps>,
 }
 
 /// Display geometry + frame count of a decoded clip.
@@ -108,7 +113,11 @@ struct AuAssembler {
     bpps: Option<Pps>,
     dsps: Option<Sps>,
     dpps: Option<Pps>,
-    seen_subset: bool,
+    // The dependent subset-SPS id: a PPS whose seq_parameter_set_id matches is a
+    // dependent-view PPS, otherwise base. This is order-independent (unlike the
+    // former "PPS after the subset SPS" heuristic, which mis-classified a base
+    // PPS re-sent in a later AU as the dependent PPS).
+    dep_sps_id: Option<u32>,
     cur: Option<Au>,
 }
 
@@ -128,14 +137,18 @@ impl AuAssembler {
             }
             7 => self.bsps = Some(parse_seq_parameter_set_data(&mut BitReader::new(&rbsp))?),
             15 => {
-                self.dsps = Some(parse_subset_sps_rbsp(&rbsp)?.sps);
-                self.seen_subset = true;
+                let sps = parse_subset_sps_rbsp(&rbsp)?.sps;
+                self.dep_sps_id = Some(sps.seq_parameter_set_id);
+                self.dsps = Some(sps);
             }
             8 => {
                 let chroma = self.bsps.as_ref().map(|s| s.chroma_format_idc).unwrap_or(1);
                 let p = parse_pic_parameter_set(&mut BitReader::new(&rbsp), chroma)?;
-                // The dependent PPS is the NAL 8 that follows the subset SPS.
-                if self.seen_subset {
+                // A PPS referencing the dependent subset-SPS is a dependent-view
+                // PPS; otherwise it's base. Both views re-send their PPS (same id,
+                // changed pic_init_qp) over the stream, so this only updates the
+                // active set — each AU snapshots it below.
+                if self.dep_sps_id == Some(p.seq_parameter_set_id) {
                     self.dpps = Some(p);
                 } else {
                     self.bpps = Some(p);
@@ -152,6 +165,9 @@ impl AuAssembler {
                 let au = self.cur.get_or_insert_with(Au::default);
                 au.base_idr = hdr.nal_unit_type == 5;
                 au.base_idc = hdr.nal_ref_idc;
+                if au.bpps.is_none() {
+                    au.bpps = self.bpps.clone();
+                }
                 au.base.push(rbsp.to_vec());
                 return Ok(done);
             }
@@ -161,6 +177,9 @@ impl AuAssembler {
                 if let Some(ext) = &hdr.mvc_extension {
                     au.dep_idr = !ext.non_idr_flag;
                     au.dep_anchor = ext.anchor_pic_flag;
+                }
+                if au.dpps.is_none() {
+                    au.dpps = self.dpps.clone();
                 }
                 au.dep.push(rbsp.to_vec());
             }
@@ -262,7 +281,7 @@ where
     // stream uses the sliding-window path (decode order == display order).
     let has_b = buffered.iter().any(|au| {
         !au.base.is_empty()
-            && parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, &bsps, &bpps)
+            && parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, &bsps, au.bpps.as_ref().unwrap_or(&bpps))
                 .map(|sh| sh.slice_type % 5 == 1)
                 .unwrap_or(false)
     });
@@ -295,6 +314,10 @@ where
 
     for au in aus {
         let au = au?;
+        // Use the PPS active for this AU (a stream re-sends its PPS with a
+        // changed pic_init_qp over time); fall back to the global set.
+        let bpps = au.bpps.as_ref().unwrap_or(bpps);
+        let dpps = au.dpps.as_ref().unwrap_or(dpps);
         // ---- base view ---- route by slice_type: I-slices (IDR or not)
         // decode intra; P-slices reference the base DPB.
         let bsh = parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, bsps, bpps)?;
@@ -377,8 +400,18 @@ fn decode_hier_view(slices: &[&[u8]], idr: bool, idc: u8, st: u32, poc: i32, num
         deblock_inter(&mut f, &mf, pps.chroma_qp_index_offset);
         Ok((f, Some(mf)))
     } else {
-        let l0 = refs.iter().filter(|(p, ..)| *p < poc).max_by_key(|(p, ..)| *p).ok_or_else(|| anyhow::anyhow!("no L0 for B"))?;
-        let l1 = refs.iter().filter(|(p, ..)| *p > poc).min_by_key(|(p, ..)| *p).ok_or_else(|| anyhow::anyhow!("no L1 for B"))?;
+        // RefPicList0/1 for a B-slice (§ 8.2.4.2.3): L0 = past POC-descending
+        // then future POC-ascending; L1 = future POC-ascending then past
+        // POC-descending. Taking L0[0]/L1[0] (num_ref 1 on these streams). This
+        // ordering matters for an open-GOP *leading* B (the stream starts mid-
+        // GOP at a non-IDR I, so the first B has only a FUTURE ref — the I —
+        // and its L0 must fall back to that future picture).
+        let mut past: Vec<&ViewRef> = refs.iter().filter(|(p, ..)| *p < poc).collect();
+        past.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut fut: Vec<&ViewRef> = refs.iter().filter(|(p, ..)| *p > poc).collect();
+        fut.sort_by(|a, b| a.0.cmp(&b.0));
+        let l0 = *past.first().or_else(|| fut.first()).ok_or_else(|| anyhow::anyhow!("no L0 for B"))?;
+        let l1 = *fut.first().or_else(|| past.first()).ok_or_else(|| anyhow::anyhow!("no L1 for B"))?;
         let (mut f, bmf) = decode_b_frame(slices, idc, idr, sps, pps, &[(&l0.1, l0.0)], &[(&l1.1, l1.0)], &l1.2, (32, 32))?;
         deblock_b(&mut f, &bmf, pps.chroma_qp_index_offset);
         Ok((f, None))
@@ -423,6 +456,10 @@ where
 
     for au in aus {
         let au = au?;
+        // Use the PPS active for this AU (rate control re-sends the PPS with a
+        // changed pic_init_qp); fall back to the global set.
+        let bpps = au.bpps.as_ref().unwrap_or(bpps);
+        let dpps = au.dpps.as_ref().unwrap_or(dpps);
         let bsh = parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, bsps, bpps)?;
         let lsb = bsh.pic_order_cnt_lsb.unwrap_or(0) as i32;
         if au.base_idr {

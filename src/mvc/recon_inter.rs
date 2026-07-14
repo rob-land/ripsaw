@@ -276,8 +276,14 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         // (bx4, by4, w4, h4, dir, group) — `group` is the ref_idx unit: the
         // b8 for P_8x8, else the partition. P_8x8 sub_mb_type expands to its
         // sub-partitions (8x8/8x4/4x8/4x4), all L0, median prediction.
+        // § 7.3.5 noSubMbPartSizeLessThan8x8Flag: for P_8x8, false as soon as
+        // any sub_mb_type is not 8x8 (i.e. 8x4/4x8/4x4) — that suppresses the
+        // MB's transform_size_8x8_flag below. For every non-P_8x8 mb_type the
+        // partitions are ≥ 8x8, so it stays true.
+        let mut no_sub_lt_8x8 = true;
         let (parts, ngroups): (Vec<(usize, usize, usize, usize, Option<Directional>, usize)>, usize) = if mb_type == 4 {
             let subs: Vec<i64> = (0..4).map(|_| decode_sub_mb_type(&mut e, &mut ctx)).collect();
+            no_sub_lt_8x8 = subs.iter().all(|&s| s == 0);
             let mut parts = Vec::new();
             for b8 in 0..4usize {
                 let (gx0, gy0) = ((b8 & 1) * 2, (b8 >> 1) * 2);
@@ -345,7 +351,7 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         let left = if mbx != 0 { Some(cbpv[addr - 1]) } else { None };
         let cbp = decode_cbp_ctx(&mut e, &mut ctx.cbp, up, left);
         let mut transform8x8 = false;
-        if cbp & 0x0f != 0 && pps.transform_8x8_mode_flag {
+        if cbp & 0x0f != 0 && pps.transform_8x8_mode_flag && no_sub_lt_8x8 {
             let lt = if mbx != 0 { mb_info[addr - 1].transform8x8 as usize } else { 0 };
             let ut = if mb_top { mb_info[addr - width].transform8x8 as usize } else { 0 };
             transform8x8 = e.decode_decision(&mut ctx.transform[lt + ut]) == 1;
@@ -971,7 +977,10 @@ fn decode_b_frame_one(
                         let ccol = mbx4 + if b8 & 1 == 0 { 0 } else { 3 };
                         let crow = mby4 + if b8 >> 1 == 0 { 0 } else { 3 };
                         let cidx = crow * bw4 + ccol;
-                        let colzero = col.refidx[cidx] == 0 && col.mv[cidx].0.abs() <= 1 && col.mv[cidx].1.abs() <= 1;
+                        // A co-located L1[0] that is an I-frame (or otherwise has
+                        // no motion field) contributes no motion: refIdxCol = -1,
+                        // so colZeroFlag = 0 (§ 8.4.1.2.2). Guard the empty field.
+                        let colzero = cidx < col.refidx.len() && col.refidx[cidx] == 0 && col.mv[cidx].0.abs() <= 1 && col.mv[cidx].1.abs() <= 1;
                         let (mv0, mv1, use0, use1) = direct.resolve(colzero);
                         g.fill(0, *gx, *gy, *w4, *h4, mv0, if use0 { 0 } else { -1 }, (0, 0));
                         g.fill(1, *gx, *gy, *w4, *h4, mv1, if use1 { 0 } else { -1 }, (0, 0));
