@@ -689,6 +689,10 @@ struct BBufs<'a> {
     mvd: [Band<'a, (i32, i32)>; 2],
     refpoc: [Band<'a, i32>; 2],
     intra_grid: Band<'a, bool>,
+    // Per-4×4 "direct-predicted" flag (B_Skip / B_Direct_16x16 / B_Direct_8x8):
+    // such a neighbour contributes condTermFlag 0 to the ref_idx context even
+    // though its derived refIdx may be > 0 (JM readRefFrame_CABAC).
+    dir_grid: Band<'a, bool>,
     nz: Band<'a, bool>,
     modes: Band<'a, Option<u8>>,
     skip_grid: Band<'a, bool>,
@@ -728,7 +732,7 @@ fn decode_b_frame_one(
     let pl = [planes(l0, fw, fh, cw, ch), planes(l1, fw, fh, cw, ch)];
     let poc = [l0.iter().map(|(_, p)| *p).collect::<Vec<_>>(), l1.iter().map(|(_, p)| *p).collect::<Vec<_>>()];
 
-    let BBufs { mut y, mut cb, mut cr, mv, refi, mvd, mut refpoc, mut intra_grid, mut nz, mut modes, mut skip_grid, mut mbtype_grid, mut cbp_grid, mut cbpv, mut mb_info, mut qp_grid } = bufs;
+    let BBufs { mut y, mut cb, mut cr, mv, refi, mvd, mut refpoc, mut intra_grid, mut dir_grid, mut nz, mut modes, mut skip_grid, mut mbtype_grid, mut cbp_grid, mut cbpv, mut mb_info, mut qp_grid } = bufs;
     let mut g = BGrids { mv, refi, mvd, bw4, bh4, width };
     let num_mbs = width * (fh / 16);
     let mut decoded_mbs = 0usize;
@@ -738,7 +742,9 @@ fn decode_b_frame_one(
         let mut sr = BitReader::new(rbsp);
         let sh = parse_slice_header(&mut sr, idr, nal_ref_idc, sps, pps)?;
         anyhow::ensure!(sh.direct_spatial_mv_pred_flag, "temporal direct not supported (need spatial)");
-        anyhow::ensure!(sh.num_ref_idx_l0_active_minus1 == 0 && sh.num_ref_idx_l1_active_minus1 == 0, "B multi-ref (num_ref_idx > 1) not supported yet");
+        let num_ref_l0 = (sh.num_ref_idx_l0_active_minus1 + 1) as usize;
+        let num_ref_l1 = (sh.num_ref_idx_l1_active_minus1 + 1) as usize;
+        anyhow::ensure!(num_ref_l0 <= l0.len() && num_ref_l1 <= l1.len(), "B ref list shorter than num_ref_idx_active");
         let slice_qp = 26 + pps.pic_init_qp_minus26 + sh.slice_qp_delta;
         let idc = sh.cabac_init_idc.unwrap_or(0);
         let slice_start = sh.first_mb_in_slice as usize;
@@ -859,7 +865,10 @@ fn decode_b_frame_one(
             let direct = g.spatial_direct(mbx4, mby4, slice_start, addr);
             enum Plan {
                 Direct { b8: usize },
-                Explicit { pdir: u8, dir: Option<Directional>, mv0: (i32, i32), mv1: (i32, i32) },
+                // `group` = the mbPartIdx / b8 that owns this partition's ref_idx
+                // (sub-partitions of an 8×8 share one ref_idx). `ref0`/`ref1` are
+                // the decoded reference indices per list.
+                Explicit { pdir: u8, dir: Option<Directional>, group: usize, ref0: i32, ref1: i32, mv0: (i32, i32), mv1: (i32, i32) },
             }
             let mut plan: Vec<(usize, usize, usize, usize, Plan)> = Vec::new();
             if is_skip || mb_type == 0 {
@@ -877,7 +886,7 @@ fn decode_b_frame_one(
                         plan.push((gx0, gy0, 2, 2, Plan::Direct { b8 }));
                     } else {
                         for &(dx, dy, w4, h4) in parts {
-                            plan.push((gx0 + dx, gy0 + dy, w4, h4, Plan::Explicit { pdir, dir: None, mv0: (0, 0), mv1: (0, 0) }));
+                            plan.push((gx0 + dx, gy0 + dy, w4, h4, Plan::Explicit { pdir, dir: None, group: b8, ref0: 0, ref1: 0, mv0: (0, 0), mv1: (0, 0) }));
                         }
                     }
                 }
@@ -891,17 +900,84 @@ fn decode_b_frame_one(
                     } else {
                         (0, 0, None)
                     };
-                    plan.push((mbx4 + dx, mby4 + dy, pw4, ph4, Plan::Explicit { pdir: pdir[p], dir, mv0: (0, 0), mv1: (0, 0) }));
+                    plan.push((mbx4 + dx, mby4 + dy, pw4, ph4, Plan::Explicit { pdir: pdir[p], dir, group: p, ref0: 0, ref1: 0, mv0: (0, 0), mv1: (0, 0) }));
+                }
+            }
+
+            // Pre-fill the refIdx grid for direct partitions with the spatial-
+            // direct-derived refIdx (§ 8.4.1.2.2) so a later same-MB explicit
+            // partition's ref_idx / MV-pred context reads the right value.
+            for (gx, gy, w4, h4, pk) in plan.iter() {
+                if matches!(pk, Plan::Direct { .. }) {
+                    for j in 0..*h4 {
+                        for i in 0..*w4 {
+                            g.refi[0][(*gy + j) * bw4 + *gx + i] = direct.ref0;
+                            g.refi[1][(*gy + j) * bw4 + *gx + i] = direct.ref1;
+                            dir_grid[(*gy + j) * bw4 + *gx + i] = true;
+                        }
+                    }
+                }
+            }
+
+            // ref_idx per mbPart per list, list-major, before all mvds
+            // (§ 7.3.5.1). Only coded when that list has > 1 active reference;
+            // sub-partitions of an 8×8 share the b8's ref_idx. Fill g.refi as we
+            // go so a later same-MB partition sees an earlier one.
+            for list in 0..2usize {
+                let num_ref = if list == 0 { num_ref_l0 } else { num_ref_l1 };
+                for grp in 0..4usize {
+                    let uses = |pk: &Plan| matches!(pk, Plan::Explicit { group, pdir, .. } if *group == grp && ((*pdir as usize) == list || *pdir == 2));
+                    let Some((gx0, gy0)) = plan.iter().find(|(_, _, _, _, pk)| uses(pk)).map(|(gx, gy, ..)| (*gx as i32, *gy as i32)) else { continue };
+                    let ridx = if num_ref > 1 {
+                        // ref_idx ctxIdxInc (JM readRefFrame_CABAC): condTermFlag
+                        // is 0 not only for an unavailable/intra/other-list
+                        // neighbour (refIdx ≤ 0) but ALSO for a DIRECT neighbour
+                        // (B_Skip / B_Direct_16x16, or a direct b8) — its derived
+                        // refIdx may be > 0 yet must not raise the context, or the
+                        // ref_no model state drifts and a later decode desyncs.
+                        let condterm = |bx: i32, by: i32| -> bool {
+                            let r = match g.nb(list, bx, by, slice_start, addr) {
+                                Some((_, _, r)) => r,
+                                None => return false,
+                            };
+                            if r <= 0 {
+                                return false;
+                            }
+                            // A direct-predicted neighbour block (whole-MB or a
+                            // B_8×8 direct b8, in this MB or an earlier one) →
+                            // condTermFlag 0. dir_grid is filled for the current
+                            // MB's direct cells in the pre-fill pass above.
+                            !dir_grid[by as usize * bw4 + bx as usize]
+                        };
+                        let la = condterm(gx0 - 1, gy0);
+                        let ub = condterm(gx0, gy0 - 1);
+                        decode_ref_idx(&mut e, &mut ctx, la as u32, if ub { 2 } else { 0 }) as i32
+                    } else {
+                        0
+                    };
+                    for (gx, gy, w4, h4, pk) in plan.iter_mut() {
+                        if uses(pk) {
+                            if let Plan::Explicit { ref0, ref1, .. } = pk {
+                                if list == 0 { *ref0 = ridx } else { *ref1 = ridx }
+                            }
+                            for j in 0..*h4 {
+                                for i in 0..*w4 {
+                                    g.refi[list][(*gy + j) * bw4 + *gx + i] = ridx;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
             // mvd for explicit partitions, list-major (all L0 then all L1).
             for list in 0..2usize {
                 for (gx, gy, w4, h4, pk) in plan.iter_mut() {
-                    if let Plan::Explicit { pdir, dir, mv0, mv1 } = pk {
+                    if let Plan::Explicit { pdir, dir, ref0, ref1, mv0, mv1, .. } = pk {
                         if (*pdir as usize) != list && *pdir != 2 {
                             continue;
                         }
+                        let ridx = if list == 0 { *ref0 } else { *ref1 };
                         let lmvd = g.nb_mvd(list, *gx as i32 - 1, *gy as i32, slice_start);
                         let umvd = g.nb_mvd(list, *gx as i32, *gy as i32 - 1, slice_start);
                         let incx = mvd_ctx_inc(lmvd.0.abs() + umvd.0.abs());
@@ -913,14 +989,14 @@ fn decode_b_frame_one(
                             let cc = g.nb(list, *gx as i32 + *w4 as i32, *gy as i32 - 1, slice_start, addr);
                             if cc.is_some() { cc } else { g.nb(list, *gx as i32 - 1, *gy as i32 - 1, slice_start, addr) }
                         };
-                        let mvp = predict_mv(a, b, c, 0, *dir);
+                        let mvp = predict_mv(a, b, c, ridx.max(0), *dir);
                         let mv = (mvp.0 + mvd.0, mvp.1 + mvd.1);
                         if list == 0 {
                             *mv0 = mv;
                         } else {
                             *mv1 = mv;
                         }
-                        g.fill(list, *gx, *gy, *w4, *h4, mv, 0, mvd);
+                        g.fill(list, *gx, *gy, *w4, *h4, mv, ridx, mvd);
                     }
                 }
             }
@@ -972,7 +1048,7 @@ fn decode_b_frame_one(
 
             // Reconstruct partitions + record deblock motion.
             for (gx, gy, w4, h4, pk) in &plan {
-                let (mv0, mv1, use0, use1) = match pk {
+                let (mv0, mv1, use0, use1, ref0, ref1) = match pk {
                     Plan::Direct { b8 } => {
                         let ccol = mbx4 + if b8 & 1 == 0 { 0 } else { 3 };
                         let crow = mby4 + if b8 >> 1 == 0 { 0 } else { 3 };
@@ -982,20 +1058,23 @@ fn decode_b_frame_one(
                         // so colZeroFlag = 0 (§ 8.4.1.2.2). Guard the empty field.
                         let colzero = cidx < col.refidx.len() && col.refidx[cidx] == 0 && col.mv[cidx].0.abs() <= 1 && col.mv[cidx].1.abs() <= 1;
                         let (mv0, mv1, use0, use1) = direct.resolve(colzero);
-                        g.fill(0, *gx, *gy, *w4, *h4, mv0, if use0 { 0 } else { -1 }, (0, 0));
-                        g.fill(1, *gx, *gy, *w4, *h4, mv1, if use1 { 0 } else { -1 }, (0, 0));
-                        (mv0, mv1, use0, use1)
+                        // Direct refIdx is the spatial-direct-derived ref (may be
+                        // > 0 with multi-ref); keep it in the grid.
+                        g.fill(0, *gx, *gy, *w4, *h4, mv0, if use0 { direct.ref0 } else { -1 }, (0, 0));
+                        g.fill(1, *gx, *gy, *w4, *h4, mv1, if use1 { direct.ref1 } else { -1 }, (0, 0));
+                        (mv0, mv1, use0, use1, direct.ref0.max(0), direct.ref1.max(0))
                     }
-                    Plan::Explicit { pdir, mv0, mv1, .. } => (*mv0, *mv1, *pdir == 0 || *pdir == 2, *pdir == 1 || *pdir == 2),
+                    Plan::Explicit { pdir, mv0, mv1, ref0, ref1, .. } => (*mv0, *mv1, *pdir == 0 || *pdir == 2, *pdir == 1 || *pdir == 2, (*ref0).max(0), (*ref1).max(0)),
                 };
+                let (ref0, ref1) = (ref0 as usize, ref1 as usize);
                 for j in 0..*h4 {
                     for i in 0..*w4 {
                         let cell = (*gy + j) * bw4 + *gx + i;
-                        refpoc[0][cell] = if use0 { poc[0][0] } else { -1 };
-                        refpoc[1][cell] = if use1 { poc[1][0] } else { -1 };
+                        refpoc[0][cell] = if use0 { poc[0][ref0] } else { -1 };
+                        refpoc[1][cell] = if use1 { poc[1][ref1] } else { -1 };
                     }
                 }
-                b_recon_block(&mut y, &mut cb, &mut cr, &pl, gx * 4, gy * 4, w4 * 4, h4 * 4, mv0, mv1, use0, use1, &res, fw, cw, bipred);
+                b_recon_block(&mut y, &mut cb, &mut cr, &pl, ref0, ref1, gx * 4, gy * 4, w4 * 4, h4 * 4, mv0, mv1, use0, use1, &res, fw, cw, bipred);
             }
 
             if e.decode_terminate() == 1 {
@@ -1034,6 +1113,7 @@ pub fn decode_b_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
     let mut refpoc0 = vec![-1i32; bw4 * bh4];
     let mut refpoc1 = vec![-1i32; bw4 * bh4];
     let mut intra_grid = vec![false; bw4 * bh4];
+    let mut dir_grid = vec![false; bw4 * bh4];
     let mut nz = vec![false; bw4 * bh4];
     let mut modes = vec![Some(2u8); bw4 * bh4];
     let mut skip_grid = vec![false; num_mbs];
@@ -1062,6 +1142,7 @@ pub fn decode_b_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         let mut rp0v = split_bands(&mut refpoc0, &g4).into_iter();
         let mut rp1v = split_bands(&mut refpoc1, &g4).into_iter();
         let mut igv = split_bands(&mut intra_grid, &g4).into_iter();
+        let mut dgv = split_bands(&mut dir_grid, &g4).into_iter();
         let mut nzv = split_bands(&mut nz, &g4).into_iter();
         let mut modv = split_bands(&mut modes, &g4).into_iter();
         let mut skv = split_bands(&mut skip_grid, &mbb).into_iter();
@@ -1084,6 +1165,7 @@ pub fn decode_b_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
                 mvd: [Band::new(mvd0v.next().unwrap(), g4b), Band::new(mvd1v.next().unwrap(), g4b)],
                 refpoc: [Band::new(rp0v.next().unwrap(), g4b), Band::new(rp1v.next().unwrap(), g4b)],
                 intra_grid: Band::new(igv.next().unwrap(), g4b),
+                dir_grid: Band::new(dgv.next().unwrap(), g4b),
                 nz: Band::new(nzv.next().unwrap(), g4b),
                 modes: Band::new(modv.next().unwrap(), g4b),
                 skip_grid: Band::new(skv.next().unwrap(), mbg),
@@ -1142,9 +1224,10 @@ pub fn decode_b_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
 /// Reconstruct one B partition: uni- or bi-predicted MC (implicit weight `wt`,
 /// `(32,32)` = default average) + residual, into the output planes.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn b_recon_block<'a>(
     y: &mut OutPlane<'a>, cb: &mut OutPlane<'a>, cr: &mut OutPlane<'a>,
-    pl: &[Vec<(Plane, Plane, Plane)>; 2],
+    pl: &[Vec<(Plane, Plane, Plane)>; 2], ref0: usize, ref1: usize,
     px: usize, py: usize, w: usize, h: usize,
     mv0: (i32, i32), mv1: (i32, i32), use0: bool, use1: bool,
     res: &crate::mvc::mb_residual::MbResidual, fw: usize, cw: usize, wt: (i32, i32),
@@ -1158,8 +1241,8 @@ fn b_recon_block<'a>(
             (None, None) => 0,
         }
     };
-    let p0 = if use0 { Some(mc_luma(&pl[0][0].0, px as i32, py as i32, mv0.0, mv0.1, w, h)) } else { None };
-    let p1 = if use1 { Some(mc_luma(&pl[1][0].0, px as i32, py as i32, mv1.0, mv1.1, w, h)) } else { None };
+    let p0 = if use0 { Some(mc_luma(&pl[0][ref0].0, px as i32, py as i32, mv0.0, mv0.1, w, h)) } else { None };
+    let p1 = if use1 { Some(mc_luma(&pl[1][ref1].0, px as i32, py as i32, mv1.0, mv1.1, w, h)) } else { None };
     let (rx, ry) = (px % 16, py % 16);
     for j in 0..h {
         for i in 0..w {
@@ -1170,8 +1253,8 @@ fn b_recon_block<'a>(
     let (cpx, cpy, cww, chh) = (px / 2, py / 2, w / 2, h / 2);
     let (crx, cry) = (cpx % 8, cpy % 8);
     for pi in 0..2usize {
-        let rp0 = if pi == 0 { &pl[0][0].1 } else { &pl[0][0].2 };
-        let rp1 = if pi == 0 { &pl[1][0].1 } else { &pl[1][0].2 };
+        let rp0 = if pi == 0 { &pl[0][ref0].1 } else { &pl[0][ref0].2 };
+        let rp1 = if pi == 0 { &pl[1][ref1].1 } else { &pl[1][ref1].2 };
         let plane: &mut OutPlane = if pi == 0 { &mut *cb } else { &mut *cr };
         let c0 = if use0 { Some(mc_chroma(rp0, cpx as i32, cpy as i32, mv0.0, mv0.1, cww, chh)) } else { None };
         let c1 = if use1 { Some(mc_chroma(rp1, cpx as i32, cpy as i32, mv1.0, mv1.1, cww, chh)) } else { None };

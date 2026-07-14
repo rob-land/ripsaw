@@ -375,44 +375,67 @@ type ViewRef = (i32, Frame, MotionField);
 /// L0 = nearest-past, L1 = nearest-future (num_ref 1; empty
 /// ref_pic_list_modification → default temporal list).
 #[allow(clippy::too_many_arguments)]
-fn decode_hier_view(slices: &[&[u8]], idr: bool, idc: u8, st: u32, poc: i32, num_ref_l0: usize, sps: &Sps, pps: &Pps, refs: &[ViewRef], inter_view: Option<&Frame>) -> anyhow::Result<(Frame, Option<MotionField>)> {
+#[allow(clippy::too_many_arguments)]
+fn decode_hier_view(
+    slices: &[&[u8]], idr: bool, idc: u8, st: u32, poc: i32,
+    num_ref_l0: usize, num_ref_l1: usize, sps: &Sps, pps: &Pps,
+    refs: &[ViewRef], inter_view: Option<&Frame>,
+    mods0: &Option<Vec<RefPicListModification>>, mods1: &Option<Vec<RefPicListModification>>,
+) -> anyhow::Result<(Frame, Option<MotionField>)> {
     if st == 2 {
         let mut f = decode_intra_frame(slices, idc, idr, sps, pps)?;
         f.deblock_intra(pps.chroma_qp_index_offset);
-        Ok((f, None))
-    } else if st == 0 {
-        // RefPicList0 for the P frame. A dependent anchor is inter-view-only
-        // (the base frame of this AU). Otherwise it's the temporal short-term
-        // refs ordered by descending PicNum — for the anchor chain (frame_num
-        // ascending in decode order == POC ascending) that is descending POC,
-        // nearest-past first — taking the slice's num_ref_idx_l0_active count
-        // (P frames on these streams use ≥1; empty ref_pic_list_modification →
-        // this default order).
-        let l0: Vec<&Frame> = if let Some(iv) = inter_view {
-            vec![iv]
-        } else {
-            let mut past: Vec<&ViewRef> = refs.iter().filter(|(p, ..)| *p < poc).collect();
-            past.sort_by(|a, b| b.0.cmp(&a.0));
-            anyhow::ensure!(!past.is_empty(), "no past ref for P");
-            past.iter().take(num_ref_l0.max(1)).map(|vr| &vr.1).collect()
-        };
-        let (mut f, mf) = decode_p_frame(slices, idc, idr, sps, pps, &l0)?;
-        deblock_inter(&mut f, &mf, pps.chroma_qp_index_offset);
-        Ok((f, Some(mf)))
-    } else {
-        // RefPicList0/1 for a B-slice (§ 8.2.4.2.3): L0 = past POC-descending
-        // then future POC-ascending; L1 = future POC-ascending then past
-        // POC-descending. Taking L0[0]/L1[0] (num_ref 1 on these streams). This
-        // ordering matters for an open-GOP *leading* B (the stream starts mid-
-        // GOP at a non-IDR I, so the first B has only a FUTURE ref — the I —
-        // and its L0 must fall back to that future picture).
+        return Ok((f, None));
+    }
+    // Build one reference list: the default temporal short-term list
+    // (§ 8.2.4.2.3 — L0 = past POC-descending then future POC-ascending;
+    // L1 = future POC-ascending then past POC-descending) with the inter-view
+    // base appended AFTER the temporal refs when that list's
+    // ref_pic_list_modification adds it (the `[PicNum.., InterViewAdd]` order
+    // these dependent streams use; the InterViewAdd sits at the last refIdx, so
+    // `num_ref - 1` temporal refs precede it). A dependent anchor is
+    // inter-view-only (num_ref_l0 = 1, mod = [InterViewAdd] → 0 temporal). The
+    // returned mf is the temporal ref's L0 motion field (for a B's spatial-
+    // direct co-located source). Open-GOP leading frames fall back cleanly:
+    // no past ref → the list starts with the nearest future.
+    let build = |is_l1: bool, num_ref: usize, mods: &Option<Vec<RefPicListModification>>, force_iv: bool| -> Vec<(&Frame, i32, Option<&MotionField>)> {
         let mut past: Vec<&ViewRef> = refs.iter().filter(|(p, ..)| *p < poc).collect();
         past.sort_by(|a, b| b.0.cmp(&a.0));
         let mut fut: Vec<&ViewRef> = refs.iter().filter(|(p, ..)| *p > poc).collect();
         fut.sort_by(|a, b| a.0.cmp(&b.0));
-        let l0 = *past.first().or_else(|| fut.first()).ok_or_else(|| anyhow::anyhow!("no L0 for B"))?;
-        let l1 = *fut.first().or_else(|| past.first()).ok_or_else(|| anyhow::anyhow!("no L1 for B"))?;
-        let (mut f, bmf) = decode_b_frame(slices, idc, idr, sps, pps, &[(&l0.1, l0.0)], &[(&l1.1, l1.0)], &l1.2, (32, 32))?;
+        let temporal: Vec<&ViewRef> = if is_l1 { fut.into_iter().chain(past).collect() } else { past.into_iter().chain(fut).collect() };
+        // The inter-view base joins THIS list only when its ref_pic_list_
+        // modification adds it (the `[PicNum.., InterViewAdd]` order → it sits
+        // after the temporal refs, last of `num_ref` slots) — OR, for a P
+        // frame (`force_iv`), by default even with an empty modification (a
+        // dependent anchor whose sole ref is the inter-view base). A B's L1
+        // here has an empty modification, so it stays temporal-only.
+        let mod_iv = mods.as_ref().map(|m| m.iter().any(|c| matches!(c, RefPicListModification::InterViewAdd { .. } | RefPicListModification::InterViewSub { .. }))).unwrap_or(false);
+        let has_iv = inter_view.is_some() && (force_iv || mod_iv);
+        let ntemp = if has_iv { num_ref.saturating_sub(1) } else { num_ref };
+        let mut list: Vec<(&Frame, i32, Option<&MotionField>)> = temporal.iter().take(ntemp).map(|vr| (&vr.1, vr.0, Some(&vr.2))).collect();
+        if has_iv {
+            list.push((inter_view.unwrap(), poc, None));
+        }
+        list.truncate(num_ref.max(1));
+        list
+    };
+    if st == 0 {
+        let l0 = build(false, num_ref_l0, mods0, true);
+        anyhow::ensure!(!l0.is_empty(), "no L0 for a P frame (poc={poc})");
+        let l0f: Vec<&Frame> = l0.iter().map(|(f, ..)| *f).collect();
+        let (mut f, mf) = decode_p_frame(slices, idc, idr, sps, pps, &l0f)?;
+        deblock_inter(&mut f, &mf, pps.chroma_qp_index_offset);
+        Ok((f, Some(mf)))
+    } else {
+        let l0 = build(false, num_ref_l0, mods0, false);
+        let l1 = build(true, num_ref_l1, mods1, false);
+        anyhow::ensure!(!l0.is_empty() && !l1.is_empty(), "no refs for B");
+        let l0p: Vec<(&Frame, i32)> = l0.iter().map(|(f, p, _)| (*f, *p)).collect();
+        let l1p: Vec<(&Frame, i32)> = l1.iter().map(|(f, p, _)| (*f, *p)).collect();
+        // Spatial-direct co-located source = RefPicList1[0]'s L0 motion field.
+        let col: MotionField = l1[0].2.cloned().unwrap_or_else(empty_motion_field);
+        let (mut f, bmf) = decode_b_frame(slices, idc, idr, sps, pps, &l0p, &l1p, &col, (32, 32))?;
         deblock_b(&mut f, &bmf, pps.chroma_qp_index_offset);
         Ok((f, None))
     }
@@ -490,18 +513,25 @@ where
         let dsh = parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, dsps, dpps)?;
         let (bst, dst) = (bsh.slice_type % 5, dsh.slice_type % 5);
         let bnum = (bsh.num_ref_idx_l0_active_minus1 + 1) as usize;
+        let bnum1 = (bsh.num_ref_idx_l1_active_minus1 + 1) as usize;
         let dnum = (dsh.num_ref_idx_l0_active_minus1 + 1) as usize;
-        // Base and dependent views are independent to decode EXCEPT at a
-        // dependent anchor (inter-view predicted from the base of the same
-        // AU). Decode the two views in parallel where possible.
-        let ((bf, bmf), (df, dmf)) = if au.dep_anchor {
-            let base = decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bnum, bsps, bpps, &brefs, None)?;
-            let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dnum, dsps, dpps, &drefs, Some(&base.0))?;
+        let dnum1 = (dsh.num_ref_idx_l1_active_minus1 + 1) as usize;
+        let (bm0, bm1) = (&bsh.ref_pic_list_modifications.list0, &bsh.ref_pic_list_modifications.list1);
+        let (dm0, dm1) = (&dsh.ref_pic_list_modifications.list0, &dsh.ref_pic_list_modifications.list1);
+        // Base and dependent views are independent to decode EXCEPT when the
+        // dependent view is inter-view predicted from the base of the same AU —
+        // at an anchor, or a non-anchor slice whose ref list adds the inter-view
+        // reference. Those decode serially (base first); otherwise in parallel.
+        let has_iv = |m: &Option<Vec<RefPicListModification>>| m.as_ref().map(|c| c.iter().any(|x| matches!(x, RefPicListModification::InterViewAdd { .. } | RefPicListModification::InterViewSub { .. }))).unwrap_or(false);
+        let dep_inter_view = au.dep_anchor || has_iv(dm0) || has_iv(dm1);
+        let ((bf, bmf), (df, dmf)) = if dep_inter_view {
+            let base = decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bnum, bnum1, bsps, bpps, &brefs, None, bm0, bm1)?;
+            let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dnum, dnum1, dsps, dpps, &drefs, Some(&base.0), dm0, dm1)?;
             (base, dep)
         } else {
             std::thread::scope(|scope| -> anyhow::Result<_> {
-                let bh = scope.spawn(|| decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bnum, bsps, bpps, &brefs, None));
-                let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dnum, dsps, dpps, &drefs, None)?;
+                let bh = scope.spawn(|| decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bnum, bnum1, bsps, bpps, &brefs, None, bm0, bm1));
+                let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dnum, dnum1, dsps, dpps, &drefs, None, dm0, dm1)?;
                 let base = bh.join().map_err(|_| anyhow::anyhow!("base-view decode thread panicked"))??;
                 Ok((base, dep))
             })?
