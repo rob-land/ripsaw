@@ -327,6 +327,17 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         }
 
         let mut part_mv = Vec::new();
+        // Which of the MB's 16 4×4 cells are already decoded (filled). A
+        // sub-partition's up-right (C) neighbour can point into a LATER
+        // sub-partition of the SAME MB (e.g. b8_2's lower block → the not-yet-
+        // decoded b8_3): § 6.4.11.7 makes that C unavailable, so the median
+        // must substitute the above-left (D). Without this the init cell reads
+        // back as an available zero-MV predictor and the sub-block's MV is
+        // wrong. (The cross-MB analog — the undecoded RIGHT MB — is handled by
+        // `nb`'s `nmb > cur_addr` guard; this is the within-MB case, which bites
+        // even single-ref P since sub-partitions predict via the median, not a
+        // directional predictor.)
+        let mut mb_dec = [false; 16];
         for &(bx4, by4, w4, h4, dir, group) in &parts {
             let ridx = group_ref[group];
             let (gx, gy) = (mbx4 + bx4, mby4 + by4);
@@ -338,12 +349,18 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             let a = nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32, slice_start, addr);
             let b = nb(&g_mv, &g_ref, gx as i32, gy as i32 - 1, slice_start, addr);
             let c = {
-                let cc = nb(&g_mv, &g_ref, gx as i32 + w4 as i32, gy as i32 - 1, slice_start, addr);
+                let (cx, cy) = (gx as i32 + w4 as i32, gy as i32 - 1);
+                let cc = if within_mb_undecoded(cx, cy, mbx4, mby4, &mb_dec) { None } else { nb(&g_mv, &g_ref, cx, cy, slice_start, addr) };
                 if cc.is_some() { cc } else { nb(&g_mv, &g_ref, gx as i32 - 1, gy as i32 - 1, slice_start, addr) }
             };
             let mvp = predict_mv(a, b, c, ridx, dir);
             let mv = (mvp.0 + mvd.0, mvp.1 + mvd.1);
             fill(&mut g_mv, &mut g_ref, &mut g_mvd, gx, gy, w4, h4, mv, mvd, ridx, bw4);
+            for j in 0..h4 {
+                for i in 0..w4 {
+                    mb_dec[(by4 + j) * 4 + bx4 + i] = true;
+                }
+            }
             part_mv.push((bx4, by4, w4, h4, mv, ridx));
         }
 
@@ -566,6 +583,33 @@ fn b_sub_geom(s: i64) -> (u8, &'static [(usize, usize, usize, usize)]) {
         _ => &[(0, 0, 1, 1), (1, 0, 1, 1), (0, 1, 1, 1), (1, 1, 1, 1)],
     };
     (pdir, parts)
+}
+
+/// True when a neighbour 4×4 cell `(cx, cy)` (frame coords) lies inside the
+/// current macroblock but has NOT been decoded yet — i.e. it belongs to a later
+/// sub-partition in this MB. Such a cell is unavailable for MV prediction
+/// (§ 6.4.11.7 substitutes the above-left neighbour D instead).
+fn within_mb_undecoded(cx: i32, cy: i32, mbx4: usize, mby4: usize, mb_dec: &[bool; 16]) -> bool {
+    let (mx, my) = (mbx4 as i32, mby4 as i32);
+    if cx >= mx && cx < mx + 4 && cy >= my && cy < my + 4 {
+        !mb_dec[(cy - my) as usize * 4 + (cx - mx) as usize]
+    } else {
+        false
+    }
+}
+
+/// Like [`within_mb_undecoded`] but for the B decoder's list-major MV
+/// derivation: a within-MB cell is unavailable if its partition (`cell_plan`
+/// spatial index) is NOT before the current partition `pi` — i.e. it belongs to
+/// a later b8/sub-partition in decode order (§ 6.4.11.7). A cell decoded by an
+/// earlier b8 that simply doesn't use this list stays available.
+fn within_mb_later(cx: i32, cy: i32, mbx4: usize, mby4: usize, cell_plan: &[usize; 16], pi: usize) -> bool {
+    let (mx, my) = (mbx4 as i32, mby4 as i32);
+    if cx >= mx && cx < mx + 4 && cy >= my && cy < my + 4 {
+        cell_plan[(cy - my) as usize * 4 + (cx - mx) as usize] >= pi
+    } else {
+        false
+    }
 }
 
 fn min_positive(a: i32, b: i32) -> i32 {
@@ -970,9 +1014,43 @@ fn decode_b_frame_one(
                 }
             }
 
-            // mvd for explicit partitions, list-major (all L0 then all L1).
+            // Spatial decode-order index per 4×4 cell (the plan is in b8 raster
+            // + sub-partition order). A neighbour cell within this MB is
+            // available for MV prediction only if its partition precedes the
+            // current one — used for the up-right (C) availability test below.
+            let mut cell_plan = [usize::MAX; 16];
+            for (pi, (gx, gy, w4, h4, _)) in plan.iter().enumerate() {
+                for j in 0..*h4 {
+                    for i in 0..*w4 {
+                        cell_plan[(*gy + j - mby4) * 4 + (*gx + i - mbx4)] = pi;
+                    }
+                }
+            }
+
+            // Derive direct-partition motion up front (spatial direct §8.4.1.2.2
+            // + colZeroFlag) so it is available as a neighbour when the explicit
+            // sub-partitions predict their MVs — JM derives a b8's direct motion
+            // before the later b8s' mvds; libmvc otherwise only filled direct
+            // MVs in the reconstruction pass, leaving an explicit partition's D
+            // neighbour (a direct b8) reading an unset cell.
+            for (gx, gy, w4, h4, pk) in plan.iter() {
+                if let Plan::Direct { b8 } = pk {
+                    let ccol = mbx4 + if b8 & 1 == 0 { 0 } else { 3 };
+                    let crow = mby4 + if b8 >> 1 == 0 { 0 } else { 3 };
+                    let cidx = crow * bw4 + ccol;
+                    let colzero = cidx < col.refidx.len() && col.refidx[cidx] == 0 && col.mv[cidx].0.abs() <= 1 && col.mv[cidx].1.abs() <= 1;
+                    let (mv0, mv1, use0, use1) = direct.resolve(colzero);
+                    g.fill(0, *gx, *gy, *w4, *h4, mv0, if use0 { direct.ref0 } else { -1 }, (0, 0));
+                    g.fill(1, *gx, *gy, *w4, *h4, mv1, if use1 { direct.ref1 } else { -1 }, (0, 0));
+                }
+            }
+
+            // mvd for explicit partitions, list-major (all L0 then all L1). The
+            // C-neighbour availability is by spatial (plan) order — NOT the list
+            // pass order — so a decoded earlier-b8 that just doesn't use this
+            // list (refIdxLX = -1) still counts as available (§ 6.4.11.7).
             for list in 0..2usize {
-                for (gx, gy, w4, h4, pk) in plan.iter_mut() {
+                for (pi, (gx, gy, w4, h4, pk)) in plan.iter_mut().enumerate() {
                     if let Plan::Explicit { pdir, dir, ref0, ref1, mv0, mv1, .. } = pk {
                         if (*pdir as usize) != list && *pdir != 2 {
                             continue;
@@ -986,7 +1064,8 @@ fn decode_b_frame_one(
                         let a = g.nb(list, *gx as i32 - 1, *gy as i32, slice_start, addr);
                         let b = g.nb(list, *gx as i32, *gy as i32 - 1, slice_start, addr);
                         let c = {
-                            let cc = g.nb(list, *gx as i32 + *w4 as i32, *gy as i32 - 1, slice_start, addr);
+                            let (cx, cy) = (*gx as i32 + *w4 as i32, *gy as i32 - 1);
+                            let cc = if within_mb_later(cx, cy, mbx4, mby4, &cell_plan, pi) { None } else { g.nb(list, cx, cy, slice_start, addr) };
                             if cc.is_some() { cc } else { g.nb(list, *gx as i32 - 1, *gy as i32 - 1, slice_start, addr) }
                         };
                         let mvp = predict_mv(a, b, c, ridx.max(0), *dir);
