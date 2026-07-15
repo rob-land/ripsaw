@@ -42,6 +42,23 @@ pub struct SliceHeader {
     pub disable_deblocking_filter_idc: u32,
     pub slice_alpha_c0_offset_div2: i32,
     pub slice_beta_offset_div2: i32,
+    /// Explicit `pred_weight_table()` weights (§ 7.3.3.2) when weighted
+    /// prediction is active (P with `weighted_pred_flag`, B with
+    /// `weighted_bipred_idc == 1`); `None` for default (unweighted) prediction.
+    pub pred_weights: Option<PredWeights>,
+}
+
+/// Parsed `pred_weight_table()` — per reference-index luma/chroma weight+offset
+/// for L0 and L1, plus the log2 denominators. A ref with no explicit entry gets
+/// the default (`1 << denom`, offset 0).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PredWeights {
+    pub luma_denom: i32,
+    pub chroma_denom: i32,
+    pub l0_luma: Vec<(i32, i32)>,
+    pub l1_luma: Vec<(i32, i32)>,
+    pub l0_chroma: Vec<[(i32, i32); 2]>,
+    pub l1_chroma: Vec<[(i32, i32); 2]>,
 }
 
 /// Parse `slice_header()` (§ 7.3.3) from the current bit position.
@@ -122,19 +139,21 @@ pub fn parse_slice_header(
     // use, so it serves both base and MVC slices.
     let ref_pic_list_modifications = parse_ref_pic_list_modification(reader, slice_kind)?;
 
-    // pred_weight_table() — consume only.
+    // pred_weight_table() — parsed and retained when weighted prediction is on.
     let weighted = (pps.weighted_pred_flag
         && matches!(slice_kind, SliceKind::P | SliceKind::Sp))
         || (pps.weighted_bipred_idc == 1 && matches!(slice_kind, SliceKind::B));
-    if weighted {
-        consume_pred_weight_table(
+    let pred_weights = if weighted {
+        Some(parse_pred_weight_table(
             reader,
             sps.chroma_array_type(),
             num_ref_idx_l0_active_minus1,
             num_ref_idx_l1_active_minus1,
             slice_kind,
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
 
     // dec_ref_pic_marking() — consume only.
     if nal_ref_idc != 0 {
@@ -197,47 +216,53 @@ pub fn parse_slice_header(
         disable_deblocking_filter_idc,
         slice_alpha_c0_offset_div2,
         slice_beta_offset_div2,
+        pred_weights,
     })
 }
 
-/// `pred_weight_table()` (§ 7.3.3.2). Walked for positioning only.
-fn consume_pred_weight_table(
+/// `pred_weight_table()` (§ 7.3.3.2), parsed into per-ref weights/offsets.
+fn parse_pred_weight_table(
     reader: &mut BitReader<'_>,
     chroma_array_type: u32,
     num_ref_idx_l0_active_minus1: u32,
     num_ref_idx_l1_active_minus1: u32,
     kind: SliceKind,
-) -> Result<(), ReadError> {
-    let _luma_log2_weight_denom = reader.read_ue()?;
-    if chroma_array_type != 0 {
-        let _chroma_log2_weight_denom = reader.read_ue()?;
-    }
-    consume_weight_list(reader, chroma_array_type, num_ref_idx_l0_active_minus1)?;
-    if matches!(kind, SliceKind::B) {
-        consume_weight_list(reader, chroma_array_type, num_ref_idx_l1_active_minus1)?;
-    }
-    Ok(())
+) -> Result<PredWeights, ReadError> {
+    let luma_denom = reader.read_ue()? as i32;
+    let chroma_denom = if chroma_array_type != 0 { reader.read_ue()? as i32 } else { 0 };
+    let (l0_luma, l0_chroma) = parse_weight_list(reader, chroma_array_type, num_ref_idx_l0_active_minus1, luma_denom, chroma_denom)?;
+    let (l1_luma, l1_chroma) = if matches!(kind, SliceKind::B) {
+        parse_weight_list(reader, chroma_array_type, num_ref_idx_l1_active_minus1, luma_denom, chroma_denom)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    Ok(PredWeights { luma_denom, chroma_denom, l0_luma, l1_luma, l0_chroma, l1_chroma })
 }
 
-fn consume_weight_list(
+#[allow(clippy::type_complexity)]
+fn parse_weight_list(
     reader: &mut BitReader<'_>,
     chroma_array_type: u32,
     num_ref_idx_active_minus1: u32,
-) -> Result<(), ReadError> {
+    luma_denom: i32,
+    chroma_denom: i32,
+) -> Result<(Vec<(i32, i32)>, Vec<[(i32, i32); 2]>), ReadError> {
+    let (mut luma, mut chroma) = (Vec::new(), Vec::new());
     for _ in 0..=num_ref_idx_active_minus1 {
         if reader.read_bit()? {
-            // luma_weight_l[i], luma_offset_l[i]
-            let _ = reader.read_se()?;
-            let _ = reader.read_se()?;
+            luma.push((reader.read_se()?, reader.read_se()?));
+        } else {
+            luma.push((1 << luma_denom, 0)); // default: unit weight, no offset
         }
-        if chroma_array_type != 0 && reader.read_bit()? {
-            for _ in 0..2 {
-                let _chroma_weight = reader.read_se()?;
-                let _chroma_offset = reader.read_se()?;
+        if chroma_array_type != 0 {
+            if reader.read_bit()? {
+                chroma.push([(reader.read_se()?, reader.read_se()?), (reader.read_se()?, reader.read_se()?)]);
+            } else {
+                chroma.push([(1 << chroma_denom, 0); 2]);
             }
         }
     }
-    Ok(())
+    Ok((luma, chroma))
 }
 
 /// `dec_ref_pic_marking()` (§ 7.3.3.3). Walked for positioning only.

@@ -20,7 +20,7 @@ use crate::mvc::mv::{predict_mv, predict_skip_mv, Directional, Neighbour};
 use crate::mvc::pps::Pps;
 use crate::mvc::recon::{reconstruct_intra_mb, split_bands, Band, Frame, Plane as OutPlane};
 use crate::mvc::scaling::ScalingLists;
-use crate::mvc::slice_header::parse_slice_header;
+use crate::mvc::slice_header::{parse_slice_header, PredWeights};
 use crate::mvc::sps::Sps;
 
 /// Per-4×4-block motion (list-0): MV, ref index (-1 = intra/none), and the
@@ -145,6 +145,7 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         let mut ctx = InterContexts::new(idc, slice_qp);
         let mut rctx = ResidualContexts::new(slice_qp, true);
         let num_ref = (sh.num_ref_idx_l0_active_minus1 + 1) as usize;
+        let pw = sh.pred_weights.clone();
         let mut last_dquant = 0;
         let mut qp = slice_qp;
         let mut addr = slice_start;
@@ -171,7 +172,7 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             };
             let mv = predict_skip_mv(a, b, c);
             fill(&mut g_mv, &mut g_ref, &mut g_mvd, mbx4, mby4, 4, 4, mv, (0, 0), 0, bw4);
-            recon_part(&mut y, &mut cb, &mut cr, &ref_planes[0], mbx * 16, mby * 16, 0, 0, 16, 16, mv, &[[0i32; 16]; 16], &[[0i32; 8]; 8], &[[0i32; 8]; 8], fw, cw);
+            recon_part(&mut y, &mut cb, &mut cr, &ref_planes[0], mbx * 16, mby * 16, 0, 0, 16, 16, mv, &[[0i32; 16]; 16], &[[0i32; 8]; 8], &[[0i32; 8]; 8], fw, cw, wpred_of(&pw, 0, 0));
             qp_grid[addr] = qp;
             // (cbp_grid/cbpv/mb_info default to a skip MB's zeros — pre-filled.)
             // A skipped MB infers mb_qp_delta = 0, so the next coded MB's
@@ -408,7 +409,7 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             // base + temporal), which decode_hier_view doesn't yet assemble. Bail
             // cleanly so the caller falls back rather than panicking on the index.
             anyhow::ensure!((ridx as usize) < ref_planes.len(), "P-slice ref_idx {ridx} exceeds {} built references (multi-ref dependent-view L0 not supported yet)", ref_planes.len());
-            recon_part(&mut y, &mut cb, &mut cr, &ref_planes[ridx as usize], px, py, bx4 * 4, by4 * 4, w4 * 4, h4 * 4, mv, &res.luma, &res.cb, &res.cr, fw, cw);
+            recon_part(&mut y, &mut cb, &mut cr, &ref_planes[ridx as usize], px, py, bx4 * 4, by4 * 4, w4 * 4, h4 * 4, mv, &res.luma, &res.cb, &res.cr, fw, cw, wpred_of(&pw, 0, ridx as usize));
         }
         if e.decode_terminate() == 1 {
             break;
@@ -796,6 +797,7 @@ fn decode_b_frame_one(
         let mut e = CabacEngine::new(&rbsp[cabac_start..]);
         let mut ctx = InterContexts::new(idc, slice_qp);
         let mut rctx = ResidualContexts::new(slice_qp, true);
+        let pw = sh.pred_weights.clone();
         let mut last_dquant = 0;
         let mut qp = slice_qp;
         let mut addr = slice_start;
@@ -1153,7 +1155,8 @@ fn decode_b_frame_one(
                         refpoc[1][cell] = if use1 { poc[1][ref1] } else { -1 };
                     }
                 }
-                b_recon_block(&mut y, &mut cb, &mut cr, &pl, ref0, ref1, gx * 4, gy * 4, w4 * 4, h4 * 4, mv0, mv1, use0, use1, &res, fw, cw, bipred);
+                let bwp = pw.as_ref().map(|_| (wpred_of(&pw, 0, ref0).unwrap(), wpred_of(&pw, 1, ref1).unwrap()));
+                b_recon_block(&mut y, &mut cb, &mut cr, &pl, ref0, ref1, gx * 4, gy * 4, w4 * 4, h4 * 4, mv0, mv1, use0, use1, &res, fw, cw, bipred, bwp);
             }
 
             if e.decode_terminate() == 1 {
@@ -1310,22 +1313,35 @@ fn b_recon_block<'a>(
     px: usize, py: usize, w: usize, h: usize,
     mv0: (i32, i32), mv1: (i32, i32), use0: bool, use1: bool,
     res: &crate::mvc::mb_residual::MbResidual, fw: usize, cw: usize, wt: (i32, i32),
+    wp: Option<(WPred, WPred)>,
 ) {
     let _ = (fw, cw);
-    let comb = |a: &Option<Vec<u8>>, b: &Option<Vec<u8>>, k: usize| -> i32 {
+    // Sample combine (§ 8.4.2.3): explicit weighted bi/uni-pred when `wp` is
+    // set (weighted_bipred_idc == 1); otherwise the default average (`wt`).
+    // `cw0`/`cw1` are the per-list (weight, offset) for this component, `denom`
+    // its log2 weight denominator.
+    let comb = |a: &Option<Vec<u8>>, b: &Option<Vec<u8>>, k: usize, cw0: (i32, i32), cw1: (i32, i32), denom: i32| -> i32 {
         match (a, b) {
-            (Some(a), Some(b)) => ((a[k] as i32 * wt.0 + b[k] as i32 * wt.1 + 32) >> 6).clamp(0, 255),
-            (Some(a), None) => a[k] as i32,
-            (None, Some(b)) => b[k] as i32,
+            (Some(a), Some(b)) => {
+                let (av, bv) = (a[k] as i32, b[k] as i32);
+                if wp.is_some() {
+                    (((av * cw0.0 + bv * cw1.0 + (1 << denom)) >> (denom + 1)) + ((cw0.1 + cw1.1 + 1) >> 1)).clamp(0, 255)
+                } else {
+                    ((av * wt.0 + bv * wt.1 + 32) >> 6).clamp(0, 255)
+                }
+            }
+            (Some(a), None) => if wp.is_some() { wp_apply(a[k] as i32, cw0.0, cw0.1, denom) } else { a[k] as i32 },
+            (None, Some(b)) => if wp.is_some() { wp_apply(b[k] as i32, cw1.0, cw1.1, denom) } else { b[k] as i32 },
             (None, None) => 0,
         }
     };
+    let (w0, w1) = wp.unwrap_or((WPred { luma: (1, 0), luma_denom: 0, chroma: [(1, 0); 2], chroma_denom: 0 }, WPred { luma: (1, 0), luma_denom: 0, chroma: [(1, 0); 2], chroma_denom: 0 }));
     let p0 = if use0 { Some(mc_luma(&pl[0][ref0].0, px as i32, py as i32, mv0.0, mv0.1, w, h)) } else { None };
     let p1 = if use1 { Some(mc_luma(&pl[1][ref1].0, px as i32, py as i32, mv1.0, mv1.1, w, h)) } else { None };
     let (rx, ry) = (px % 16, py % 16);
     for j in 0..h {
         for i in 0..w {
-            let pred = comb(&p0, &p1, j * w + i);
+            let pred = comb(&p0, &p1, j * w + i, w0.luma, w1.luma, w0.luma_denom);
             y.set(px + i, py + j, pred + res.luma[ry + j][rx + i]);
         }
     }
@@ -1340,7 +1356,7 @@ fn b_recon_block<'a>(
         let resc = if pi == 0 { &res.cb } else { &res.cr };
         for j in 0..chh {
             for i in 0..cww {
-                let pred = comb(&c0, &c1, j * cww + i);
+                let pred = comb(&c0, &c1, j * cww + i, w0.chroma[pi], w1.chroma[pi], w0.chroma_denom);
                 plane.set(cpx + i, cpy + j, pred + resc[cry + j][crx + i]);
             }
         }
@@ -1378,26 +1394,64 @@ fn nb_mvd(g_mvd: &Band<(i32, i32)>, g_ref: &Band<i32>, bx: i32, by: i32, bw4: us
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Explicit weighted-prediction weight for one reference: sample
+/// `((s * weight + round) >> denom) + offset`, clamped (§ 8.4.2.3.2).
+#[derive(Clone, Copy)]
+struct WPred {
+    luma: (i32, i32),
+    luma_denom: i32,
+    chroma: [(i32, i32); 2],
+    chroma_denom: i32,
+}
+#[inline]
+fn wp_apply(s: i32, w: i32, o: i32, d: i32) -> i32 {
+    (if d >= 1 { ((s * w + (1 << (d - 1))) >> d) + o } else { s * w + o }).clamp(0, 255)
+}
+
+/// The [`WPred`] for reference `ridx` in `list`, or `None` for default
+/// (unweighted) prediction.
+fn wpred_of(pw: &Option<PredWeights>, list: usize, ridx: usize) -> Option<WPred> {
+    pw.as_ref().map(|w| {
+        let (lu, ch) = if list == 0 { (&w.l0_luma, &w.l0_chroma) } else { (&w.l1_luma, &w.l1_chroma) };
+        WPred {
+            luma: lu.get(ridx).copied().unwrap_or((1 << w.luma_denom, 0)),
+            luma_denom: w.luma_denom,
+            chroma: ch.get(ridx).copied().unwrap_or([(1 << w.chroma_denom, 0); 2]),
+            chroma_denom: w.chroma_denom,
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn recon_part<'a>(
     y: &mut OutPlane<'a>, cb: &mut OutPlane<'a>, cr: &mut OutPlane<'a>,
     rp: &(Plane, Plane, Plane),
     px: usize, py: usize, rx: usize, ry: usize, w: usize, h: usize, mv: (i32, i32),
     luma: &[[i32; 16]; 16], rcb: &[[i32; 8]; 8], rcr: &[[i32; 8]; 8], fw: usize, cw: usize,
+    wp: Option<WPred>,
 ) {
     let _ = (fw, cw);
     let (rpy, rpcb, rpcr) = (&rp.0, &rp.1, &rp.2);
     let pred = mc_luma(rpy, px as i32, py as i32, mv.0, mv.1, w, h);
     for j in 0..h {
         for i in 0..w {
-            y.set(px + i, py + j, pred[j * w + i] as i32 + luma[ry + j][rx + i]);
+            let mut s = pred[j * w + i] as i32;
+            if let Some(wp) = &wp {
+                s = wp_apply(s, wp.luma.0, wp.luma.1, wp.luma_denom);
+            }
+            y.set(px + i, py + j, s + luma[ry + j][rx + i]);
         }
     }
     let (cpx, cpy, cww, chh, crx, cry) = (px / 2, py / 2, w / 2, h / 2, rx / 2, ry / 2);
-    for (plane, res, rp) in [(&mut *cb, rcb, rpcb), (&mut *cr, rcr, rpcr)] {
+    for (ci, (plane, res, rp)) in [(&mut *cb, rcb, rpcb), (&mut *cr, rcr, rpcr)].into_iter().enumerate() {
         let p = mc_chroma(rp, cpx as i32, cpy as i32, mv.0, mv.1, cww, chh);
         for j in 0..chh {
             for i in 0..cww {
-                plane.set(cpx + i, cpy + j, p[j * cww + i] as i32 + res[cry + j][crx + i]);
+                let mut s = p[j * cww + i] as i32;
+                if let Some(wp) = &wp {
+                    s = wp_apply(s, wp.chroma[ci].0, wp.chroma[ci].1, wp.chroma_denom);
+                }
+                plane.set(cpx + i, cpy + j, s + res[cry + j][crx + i]);
             }
         }
     }
