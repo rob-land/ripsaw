@@ -632,8 +632,13 @@ struct Direct {
 }
 impl Direct {
     fn resolve(&self, colzero: bool) -> ((i32, i32), (i32, i32), bool, bool) {
-        let mv0 = if self.zero || self.ref0 < 0 || colzero { (0, 0) } else { self.mvp0 };
-        let mv1 = if self.zero || self.ref1 < 0 || colzero { (0, 0) } else { self.mvp1 };
+        // § 8.4.1.2.2: colZeroFlag zeros a list's MV only when its refIdx is 0
+        // (the nearest reference). With MVC multi-ref L0, an inter-view direct
+        // block has refIdxL0 = 1, so colZeroFlag must NOT zero its (disparity)
+        // MV — it keeps the median predictor. (Base single-ref B always has
+        // refIdx 0, so the old unconditional zeroing was correct there.)
+        let mv0 = if self.zero || self.ref0 < 0 || (colzero && self.ref0 == 0) { (0, 0) } else { self.mvp0 };
+        let mv1 = if self.zero || self.ref1 < 0 || (colzero && self.ref1 == 0) { (0, 0) } else { self.mvp1 };
         (mv0, mv1, self.ref0 >= 0, self.ref1 >= 0)
     }
 }
