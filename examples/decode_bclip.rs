@@ -127,12 +127,14 @@ fn main() -> anyhow::Result<()> {
             check_pre(&f0, dcidx, st);
             let mut f = clone_frame(&f0);
             f.deblock_intra(pps.chroma_qp_index_offset);
-            refs.push((poc, clone_frame(&f), MotionField { mv: vec![], refidx: vec![], nz: vec![], bw4: 0, bh4: 0 }));
+            refs.push((poc, clone_frame(&f), MotionField { mv: vec![], refidx: vec![], refpoc: vec![], nz: vec![], bw4: 0, bh4: 0 }));
             out.push((disp, f));
         } else if st == 0 {
             // P: single ref = nearest past by POC.
             let r = refs.iter().filter(|(p, ..)| *p < poc).max_by_key(|(p, ..)| *p).expect("P past ref");
-            let (mut f, mf) = decode_p_frame(&slices, au.idc, false, sps, pps, &[&r.1])?;
+            let rpoc = r.0;
+            let (mut f, mut mf) = decode_p_frame(&slices, au.idc, false, sps, pps, &[&r.1])?;
+            mf.resolve_refpoc(&[rpoc]);
             check_pre(&f, dcidx, st);
             deblock_inter(&mut f, &mf, pps.chroma_qp_index_offset);
             refs.push((poc, clone_frame(&f), mf));
@@ -141,7 +143,7 @@ fn main() -> anyhow::Result<()> {
             // B: L0 = nearest past, L1 = nearest future; col = L1's motion field.
             let l0 = refs.iter().filter(|(p, ..)| *p < poc).max_by_key(|(p, ..)| *p).expect("B L0");
             let l1 = refs.iter().filter(|(p, ..)| *p > poc).min_by_key(|(p, ..)| *p).expect("B L1");
-            let (mut f, bmf) = decode_b_frame(&slices, au.idc, false, sps, pps, &[(&l0.1, l0.0)], &[(&l1.1, l1.0)], &l1.2, (32, 32))?;
+            let (mut f, bmf) = decode_b_frame(&slices, au.idc, false, sps, pps, &[(&l0.1, l0.0)], &[(&l1.1, l1.0)], poc, &l1.2, (32, 32))?;
             check_pre(&f, dcidx, st);
             deblock_b(&mut f, &bmf, pps.chroma_qp_index_offset);
             out.push((disp, f));

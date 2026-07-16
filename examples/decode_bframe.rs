@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
                     let l0e = refs.iter().filter(|(p, _)| *p < poc).max_by_key(|(p, _)| *p).expect("past ref");
                     let l1e = refs.iter().filter(|(p, _)| *p > poc).min_by_key(|(p, _)| *p).expect("future ref");
                     let wt = implicit_weights(l0e.0, l1e.0, poc);
-                    let (frame, _bmf) = decode_b_frame(&[&rbsp[..]], hdr.nal_ref_idc, false, sps, pps, &[(&l0e.1, l0e.0)], &[(&l1e.1, l1e.0)], col.as_ref().unwrap(), wt)?;
+                    let (frame, _bmf) = decode_b_frame(&[&rbsp[..]], hdr.nal_ref_idc, false, sps, pps, &[(&l0e.1, l0e.0)], &[(&l1e.1, l1e.0)], poc, col.as_ref().unwrap(), wt)?;
                     let jm = std::fs::read(&jm_all)?;
                     let (ysz, csz) = (frame.fw * frame.fh, frame.cw * frame.ch);
                     let fsz = ysz + 2 * csz;

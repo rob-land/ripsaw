@@ -187,7 +187,7 @@ fn decode_view(
         // B: temporal L0=nearest past, L1=nearest future; col = L1's motion.
         let l0 = refs.iter().filter(|(p, ..)| *p < poc).max_by_key(|(p, ..)| *p).expect("B L0");
         let l1 = refs.iter().filter(|(p, ..)| *p > poc).min_by_key(|(p, ..)| *p).expect("B L1");
-        let (mut f, bmf) = decode_b_frame(slices, idc, idr, sps, pps, &[(&l0.1, l0.0)], &[(&l1.1, l1.0)], &l1.2, (32, 32))?;
+        let (mut f, bmf) = decode_b_frame(slices, idc, idr, sps, pps, &[(&l0.1, l0.0)], &[(&l1.1, l1.0)], poc, &l1.2, (32, 32))?;
         deblock_b(&mut f, &bmf, pps.chroma_qp_index_offset);
         Ok((f, None))
     }
@@ -231,7 +231,7 @@ fn cmp_frame(f: &Frame, jm: &[u8], off: usize) -> bool {
 }
 
 fn empty_mf() -> MotionField {
-    MotionField { mv: vec![], refidx: vec![], nz: vec![], bw4: 0, bh4: 0 }
+    MotionField { mv: vec![], refidx: vec![], refpoc: vec![], nz: vec![], bw4: 0, bh4: 0 }
 }
 
 fn clone_frame(f: &Frame) -> Frame {

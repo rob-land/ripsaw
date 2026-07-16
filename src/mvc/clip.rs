@@ -424,7 +424,11 @@ fn decode_hier_view(
         let l0 = build(false, num_ref_l0, mods0, true);
         anyhow::ensure!(!l0.is_empty(), "no L0 for a P frame (poc={poc})");
         let l0f: Vec<&Frame> = l0.iter().map(|(f, ..)| *f).collect();
-        let (mut f, mf) = decode_p_frame(slices, idc, idr, sps, pps, &l0f)?;
+        let (mut f, mut mf) = decode_p_frame(slices, idc, idr, sps, pps, &l0f)?;
+        // Resolve each block's referenced POC (for temporal-direct MapColToList0
+        // when this frame is later a B's co-located source) from this P's own L0.
+        let l0_pocs: Vec<i32> = l0.iter().map(|(_, p, _)| *p).collect();
+        mf.resolve_refpoc(&l0_pocs);
         deblock_inter(&mut f, &mf, pps.chroma_qp_index_offset);
         Ok((f, Some(mf)))
     } else {
@@ -435,7 +439,7 @@ fn decode_hier_view(
         let l1p: Vec<(&Frame, i32)> = l1.iter().map(|(f, p, _)| (*f, *p)).collect();
         // Spatial-direct co-located source = RefPicList1[0]'s L0 motion field.
         let col: MotionField = l1[0].2.cloned().unwrap_or_else(empty_motion_field);
-        let (mut f, bmf) = decode_b_frame(slices, idc, idr, sps, pps, &l0p, &l1p, &col, (32, 32))?;
+        let (mut f, bmf) = decode_b_frame(slices, idc, idr, sps, pps, &l0p, &l1p, poc, &col, (32, 32))?;
         deblock_b(&mut f, &bmf, pps.chroma_qp_index_offset);
         Ok((f, None))
     }
@@ -586,7 +590,7 @@ where
 }
 
 fn empty_motion_field() -> MotionField {
-    MotionField { mv: Vec::new(), refidx: Vec::new(), nz: Vec::new(), bw4: 0, bh4: 0 }
+    MotionField { mv: Vec::new(), refidx: Vec::new(), refpoc: Vec::new(), nz: Vec::new(), bw4: 0, bh4: 0 }
 }
 
 fn clone_frame(f: &Frame) -> Frame {

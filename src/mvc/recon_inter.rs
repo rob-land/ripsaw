@@ -25,14 +25,37 @@ use crate::mvc::sps::Sps;
 
 /// Per-4×4-block motion (list-0): MV, ref index (-1 = intra/none), and the
 /// luma nonzero-coefficient flag (for the deblock bS). Co-located source for a
-/// B-slice's spatial-direct colZeroFlag.
+/// B-slice's direct prediction.
+///
+/// `refpoc` is the display POC of the picture each block *referenced* (not the
+/// local ref index) — needed for temporal-direct `MapColToList0` (§ 8.4.1.2.3),
+/// which maps the co-located block's reference into the current L0 by identity.
+/// It is resolved by the caller (which knows this frame's reference POCs) via
+/// [`MotionField::resolve_refpoc`]; `-1` where the block is intra/unused. Empty
+/// when unresolved (spatial-direct streams never read it).
 #[derive(Clone)]
 pub struct MotionField {
     pub mv: Vec<(i32, i32)>,
     pub refidx: Vec<i32>,
+    pub refpoc: Vec<i32>,
     pub nz: Vec<bool>,
     pub bw4: usize,
     pub bh4: usize,
+}
+
+impl MotionField {
+    /// Fill `refpoc` from this frame's own L0 reference POCs: for each 4×4
+    /// block, the POC of `ref_pocs[refidx]` (or `-1` when the block is
+    /// intra/unused). Call once, at the caller, right after the frame decodes —
+    /// that is where the ref-list POCs are known. Needed only as a temporal-
+    /// direct co-located source; harmless (and cheap) to always call.
+    pub fn resolve_refpoc(&mut self, ref_pocs: &[i32]) {
+        self.refpoc = self
+            .refidx
+            .iter()
+            .map(|&r| if r >= 0 { ref_pocs.get(r as usize).copied().unwrap_or(-1) } else { -1 })
+            .collect();
+    }
 }
 
 fn partitions(mb_type: i64) -> Vec<(usize, usize, usize, usize, Option<Directional>)> {
@@ -532,7 +555,7 @@ pub fn decode_p_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         slice_alpha_c0_offset_div2: alpha,
         slice_beta_offset_div2: beta,
     };
-    let mf = MotionField { mv: g_mv, refidx: g_ref, nz, bw4, bh4 };
+    let mf = MotionField { mv: g_mv, refidx: g_ref, refpoc: Vec::new(), nz, bw4, bh4 };
     Ok((frame, mf))
 }
 
@@ -619,6 +642,42 @@ fn min_positive(a: i32, b: i32) -> i32 {
     } else {
         a.max(b)
     }
+}
+
+/// Temporal-direct derivation (§ 8.4.1.2.3) for one direct 8×8 (with
+/// direct_8x8_inference_flag = 1 the co-located sample is the block's outer
+/// corner 4×4, whose grid index is `cidx`). Returns
+/// `(mvL0, mvL1, refIdxL0, refIdxL1, useL0, useL1)`. Both lists are always
+/// used in temporal direct (bi-prediction); refIdxL1 is always 0.
+///
+/// `col` is RefPicList1[0]'s motion field, with `refpoc` resolved to the POC of
+/// the picture each co-located block referenced. `poc[0]`/`poc[1]` are the
+/// current L0/L1 reference POCs (index = ref_idx); `cur` is the current POC.
+fn temporal_direct(col: &MotionField, cidx: usize, poc: &[Vec<i32>; 2], cur: i32) -> ((i32, i32), (i32, i32), i32, i32, bool, bool) {
+    // Co-located block intra / outside the field / no motion → zero motion,
+    // refIdxL0 = 0 (§ 8.4.1.2.3: refIdxCol < 0 ⇒ mvL0 = mvL1 = 0, refIdxL0 = 0).
+    if cidx >= col.mv.len() || col.refidx.get(cidx).copied().unwrap_or(-1) < 0 {
+        return ((0, 0), (0, 0), 0, 0, true, true);
+    }
+    let mvcol = col.mv[cidx];
+    let colrefpoc = col.refpoc.get(cidx).copied().unwrap_or(-1);
+    // MapColToList0: the current L0 index whose picture is the one the
+    // co-located block referenced (matched by POC identity). Falls back to 0
+    // (nearest) when unresolved — correct for the single-ref case.
+    let ref0 = poc[0].iter().position(|&p| p == colrefpoc).unwrap_or(0) as i32;
+    let (p0, p1) = (poc[0][ref0 as usize], poc[1][0]);
+    let td = (p1 - p0).clamp(-128, 127);
+    let tb = (cur - p0).clamp(-128, 127);
+    if td == 0 {
+        // Equal POCs (or would-be long-term): no scaling, mvL0 = mvCol, mvL1 = 0.
+        return (mvcol, (0, 0), ref0, 0, true, true);
+    }
+    let tx = (16384 + (td.abs() / 2)) / td;
+    let dsf = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+    let scale = |v: i32| (dsf * v + 128) >> 8;
+    let mvl0 = (scale(mvcol.0), scale(mvcol.1));
+    let mvl1 = (mvl0.0 - mvcol.0, mvl0.1 - mvcol.1);
+    (mvl0, mvl1, ref0, 0, true, true)
 }
 
 /// Spatial-direct derivation (§ 8.4.1.2.2) per MB: median predictor + refIdx per
@@ -762,6 +821,7 @@ fn decode_b_frame_one(
     pps: &Pps,
     l0: &[(&Frame, i32)],
     l1: &[(&Frame, i32)],
+    cur_poc: i32,
     col: &MotionField,
     bipred: (i32, i32),
     bufs: BBufs,
@@ -791,7 +851,7 @@ fn decode_b_frame_one(
     for rbsp in slices {
         let mut sr = BitReader::new(rbsp);
         let sh = parse_slice_header(&mut sr, idr, nal_ref_idc, sps, pps)?;
-        anyhow::ensure!(sh.direct_spatial_mv_pred_flag, "temporal direct not supported (need spatial)");
+        let spatial_direct = sh.direct_spatial_mv_pred_flag;
         let num_ref_l0 = (sh.num_ref_idx_l0_active_minus1 + 1) as usize;
         let num_ref_l1 = (sh.num_ref_idx_l1_active_minus1 + 1) as usize;
         anyhow::ensure!(num_ref_l0 <= l0.len() && num_ref_l1 <= l1.len(), "B ref list shorter than num_ref_idx_active");
@@ -913,7 +973,25 @@ fn decode_b_frame_one(
             }
 
             // ---- inter (direct / explicit) ----
+            // Spatial-direct predictor (used only when direct_spatial_mv_pred);
+            // temporal direct derives per-8×8 from the co-located motion field.
             let direct = g.spatial_direct(mbx4, mby4, slice_start, addr);
+            // Per-direct-8×8 motion, dispatching spatial vs temporal direct.
+            // Returns (mvL0, mvL1, gridRefL0, gridRefL1, useL0, useL1) — the grid
+            // ref is -1 for an unused list (spatial). direct_8x8_inference_flag=1
+            // takes the co-located sample at the 8×8's outer corner 4×4.
+            let db8 = |b8: usize| -> ((i32, i32), (i32, i32), i32, i32, bool, bool) {
+                let ccol = mbx4 + if b8 & 1 == 0 { 0 } else { 3 };
+                let crow = mby4 + if b8 >> 1 == 0 { 0 } else { 3 };
+                let cidx = crow * bw4 + ccol;
+                if spatial_direct {
+                    let colzero = cidx < col.refidx.len() && col.refidx[cidx] == 0 && col.mv[cidx].0.abs() <= 1 && col.mv[cidx].1.abs() <= 1;
+                    let (mv0, mv1, use0, use1) = direct.resolve(colzero);
+                    (mv0, mv1, if use0 { direct.ref0 } else { -1 }, if use1 { direct.ref1 } else { -1 }, use0, use1)
+                } else {
+                    temporal_direct(col, cidx, &poc, cur_poc)
+                }
+            };
             enum Plan {
                 Direct { b8: usize },
                 // `group` = the mbPartIdx / b8 that owns this partition's ref_idx
@@ -959,11 +1037,12 @@ fn decode_b_frame_one(
             // direct-derived refIdx (§ 8.4.1.2.2) so a later same-MB explicit
             // partition's ref_idx / MV-pred context reads the right value.
             for (gx, gy, w4, h4, pk) in plan.iter() {
-                if matches!(pk, Plan::Direct { .. }) {
+                if let Plan::Direct { b8 } = pk {
+                    let (_, _, gref0, gref1, _, _) = db8(*b8);
                     for j in 0..*h4 {
                         for i in 0..*w4 {
-                            g.refi[0][(*gy + j) * bw4 + *gx + i] = direct.ref0;
-                            g.refi[1][(*gy + j) * bw4 + *gx + i] = direct.ref1;
+                            g.refi[0][(*gy + j) * bw4 + *gx + i] = gref0;
+                            g.refi[1][(*gy + j) * bw4 + *gx + i] = gref1;
                             dir_grid[(*gy + j) * bw4 + *gx + i] = true;
                         }
                     }
@@ -1042,13 +1121,9 @@ fn decode_b_frame_one(
             // neighbour (a direct b8) reading an unset cell.
             for (gx, gy, w4, h4, pk) in plan.iter() {
                 if let Plan::Direct { b8 } = pk {
-                    let ccol = mbx4 + if b8 & 1 == 0 { 0 } else { 3 };
-                    let crow = mby4 + if b8 >> 1 == 0 { 0 } else { 3 };
-                    let cidx = crow * bw4 + ccol;
-                    let colzero = cidx < col.refidx.len() && col.refidx[cidx] == 0 && col.mv[cidx].0.abs() <= 1 && col.mv[cidx].1.abs() <= 1;
-                    let (mv0, mv1, use0, use1) = direct.resolve(colzero);
-                    g.fill(0, *gx, *gy, *w4, *h4, mv0, if use0 { direct.ref0 } else { -1 }, (0, 0));
-                    g.fill(1, *gx, *gy, *w4, *h4, mv1, if use1 { direct.ref1 } else { -1 }, (0, 0));
+                    let (mv0, mv1, gref0, gref1, _, _) = db8(*b8);
+                    g.fill(0, *gx, *gy, *w4, *h4, mv0, gref0, (0, 0));
+                    g.fill(1, *gx, *gy, *w4, *h4, mv1, gref1, (0, 0));
                 }
             }
 
@@ -1136,19 +1211,14 @@ fn decode_b_frame_one(
             for (gx, gy, w4, h4, pk) in &plan {
                 let (mv0, mv1, use0, use1, ref0, ref1) = match pk {
                     Plan::Direct { b8 } => {
-                        let ccol = mbx4 + if b8 & 1 == 0 { 0 } else { 3 };
-                        let crow = mby4 + if b8 >> 1 == 0 { 0 } else { 3 };
-                        let cidx = crow * bw4 + ccol;
-                        // A co-located L1[0] that is an I-frame (or otherwise has
-                        // no motion field) contributes no motion: refIdxCol = -1,
-                        // so colZeroFlag = 0 (§ 8.4.1.2.2). Guard the empty field.
-                        let colzero = cidx < col.refidx.len() && col.refidx[cidx] == 0 && col.mv[cidx].0.abs() <= 1 && col.mv[cidx].1.abs() <= 1;
-                        let (mv0, mv1, use0, use1) = direct.resolve(colzero);
-                        // Direct refIdx is the spatial-direct-derived ref (may be
-                        // > 0 with multi-ref); keep it in the grid.
-                        g.fill(0, *gx, *gy, *w4, *h4, mv0, if use0 { direct.ref0 } else { -1 }, (0, 0));
-                        g.fill(1, *gx, *gy, *w4, *h4, mv1, if use1 { direct.ref1 } else { -1 }, (0, 0));
-                        (mv0, mv1, use0, use1, direct.ref0.max(0), direct.ref1.max(0))
+                        // Spatial (§ 8.4.1.2.2 colZeroFlag) or temporal
+                        // (§ 8.4.1.2.3 POC scaling) direct, per db8. An empty
+                        // co-located field (I-frame L1[0]) yields refIdxCol = -1
+                        // → zero motion in both paths.
+                        let (mv0, mv1, gref0, gref1, use0, use1) = db8(*b8);
+                        g.fill(0, *gx, *gy, *w4, *h4, mv0, gref0, (0, 0));
+                        g.fill(1, *gx, *gy, *w4, *h4, mv1, gref1, (0, 0));
+                        (mv0, mv1, use0, use1, gref0.max(0), gref1.max(0))
                     }
                     Plan::Explicit { pdir, mv0, mv1, ref0, ref1, .. } => (*mv0, *mv1, *pdir == 0 || *pdir == 2, *pdir == 1 || *pdir == 2, (*ref0).max(0), (*ref1).max(0)),
                 };
@@ -1181,7 +1251,7 @@ fn decode_b_frame_one(
 /// disjoint per-slice MB-row bands; the independent slices decode into their
 /// bands in parallel, assembling the frame directly (no merge).
 #[allow(clippy::too_many_arguments)]
-pub fn decode_b_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, l0: &[(&Frame, i32)], l1: &[(&Frame, i32)], col: &MotionField, bipred: (i32, i32)) -> anyhow::Result<(Frame, BMotionField)> {
+pub fn decode_b_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, pps: &Pps, l0: &[(&Frame, i32)], l1: &[(&Frame, i32)], cur_poc: i32, col: &MotionField, bipred: (i32, i32)) -> anyhow::Result<(Frame, BMotionField)> {
     let width = sps.pic_width_in_mbs as usize;
     let (fw, fh) = (width * 16, sps.pic_height_in_map_units as usize * 16);
     let (cw, ch) = (fw / 2, fh / 2);
@@ -1266,13 +1336,13 @@ pub fn decode_b_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
 
         if slices.len() < 2 {
             let bufs = bufs_list.pop().unwrap();
-            decode_b_frame_one(slices, nal_ref_idc, idr, sps, pps, l0, l1, col, bipred, bufs)?
+            decode_b_frame_one(slices, nal_ref_idc, idr, sps, pps, l0, l1, cur_poc, col, bipred, bufs)?
         } else {
             let results: Vec<anyhow::Result<(usize, (u32, i32, i32))>> = std::thread::scope(|scope| {
                 let handles: Vec<_> = slices
                     .iter()
                     .zip(bufs_list)
-                    .map(|(sl, bufs)| scope.spawn(move || decode_b_frame_one(std::slice::from_ref(sl), nal_ref_idc, idr, sps, pps, l0, l1, col, bipred, bufs)))
+                    .map(|(sl, bufs)| scope.spawn(move || decode_b_frame_one(std::slice::from_ref(sl), nal_ref_idc, idr, sps, pps, l0, l1, cur_poc, col, bipred, bufs)))
                     .collect();
                 handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("B-slice decode thread panicked")))).collect()
             });
@@ -1767,5 +1837,58 @@ pub fn deblock_b(frame: &mut Frame, mf: &BMotionField, chroma_off: i32) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod temporal_direct_tests {
+    use super::*;
+
+    // One 4×4 co-located block with L0 motion `mv` referencing POC `refpoc`.
+    fn col1(mv: (i32, i32), refpoc: i32) -> MotionField {
+        MotionField { mv: vec![mv], refidx: vec![0], refpoc: vec![refpoc], nz: vec![false], bw4: 1, bh4: 1 }
+    }
+
+    #[test]
+    fn temporal_scales_by_poc_distance() {
+        // colPic (L1[0]) at POC 8 references POC 0; current B at POC 2.
+        // td = 8, tb = 2 → mvL0 = mvCol/4, mvL1 = mvL0 − mvCol.
+        let col = col1((40, -20), 0);
+        let poc = [vec![0], vec![8]];
+        let (mv0, mv1, r0, r1, u0, u1) = temporal_direct(&col, 0, &poc, 2);
+        assert_eq!(mv0, (10, -5));
+        assert_eq!(mv1, (10 - 40, -5 + 20));
+        assert_eq!((r0, r1), (0, 0));
+        assert!(u0 && u1);
+    }
+
+    #[test]
+    fn map_col_to_list0_matches_by_poc() {
+        // L0 = [POC 4, POC 0]; the co-located block referenced POC 0 → refIdxL0 1.
+        let col = col1((16, 0), 0);
+        let poc = [vec![4, 0], vec![8]];
+        let (_, _, r0, r1, ..) = temporal_direct(&col, 0, &poc, 2);
+        assert_eq!((r0, r1), (1, 0));
+    }
+
+    #[test]
+    fn intra_colocated_block_is_zero_motion() {
+        // refIdxCol < 0 (intra) ⇒ both MVs zero, refIdxL0 = 0.
+        let col = MotionField { mv: vec![(99, 99)], refidx: vec![-1], refpoc: vec![-1], nz: vec![false], bw4: 1, bh4: 1 };
+        let poc = [vec![0], vec![8]];
+        let (mv0, mv1, r0, _, u0, u1) = temporal_direct(&col, 0, &poc, 2);
+        assert_eq!((mv0, mv1), ((0, 0), (0, 0)));
+        assert_eq!(r0, 0);
+        assert!(u0 && u1);
+    }
+
+    #[test]
+    fn zero_poc_distance_uses_colocated_mv_directly() {
+        // td == 0 (degenerate) ⇒ mvL0 = mvCol, mvL1 = 0.
+        let col = col1((12, 8), 8);
+        let poc = [vec![8], vec![8]]; // p0 == p1 == 8
+        let (mv0, mv1, ..) = temporal_direct(&col, 0, &poc, 2);
+        assert_eq!(mv0, (12, 8));
+        assert_eq!(mv1, (0, 0));
     }
 }
