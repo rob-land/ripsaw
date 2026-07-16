@@ -46,6 +46,30 @@ pub struct SliceHeader {
     /// prediction is active (P with `weighted_pred_flag`, B with
     /// `weighted_bipred_idc == 1`); `None` for default (unweighted) prediction.
     pub pred_weights: Option<PredWeights>,
+    /// IDR only: mark this frame as a long-term reference (LongTermFrameIdx 0)
+    /// instead of short-term (`long_term_reference_flag`, § 7.3.3.3).
+    pub long_term_reference_flag: bool,
+    /// Non-IDR adaptive reference-picture marking operations (§ 7.3.3.3), in
+    /// order; empty for sliding-window marking. Drives long-term marking and
+    /// DPB eviction (§ 8.2.5.4).
+    pub mmco: Vec<Mmco>,
+}
+
+/// Memory-management control operation (§ 7.3.3.3 / § 8.2.5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mmco {
+    /// 1: mark a short-term picture (CurrPicNum − diff) as unused.
+    ForgetShort { diff_pic_nums_minus1: u32 },
+    /// 2: mark the long-term picture `long_term_pic_num` as unused.
+    ForgetLong { long_term_pic_num: u32 },
+    /// 3: assign `long_term_frame_idx` to a short-term picture (CurrPicNum − diff).
+    ShortToLong { diff_pic_nums_minus1: u32, long_term_frame_idx: u32 },
+    /// 4: set MaxLongTermFrameIdx = value − 1 (evicts higher long-term indices).
+    SetMaxLong { max_long_term_frame_idx_plus1: u32 },
+    /// 5: mark all reference pictures unused (and reset MaxLongTermFrameIdx).
+    ResetAll,
+    /// 6: mark the current picture as long-term with `long_term_frame_idx`.
+    CurrentToLong { long_term_frame_idx: u32 },
 }
 
 /// Parsed `pred_weight_table()` — per reference-index luma/chroma weight+offset
@@ -155,10 +179,12 @@ pub fn parse_slice_header(
         None
     };
 
-    // dec_ref_pic_marking() — consume only.
-    if nal_ref_idc != 0 {
-        consume_dec_ref_pic_marking(reader, idr_pic_flag)?;
-    }
+    // dec_ref_pic_marking() — retain the long-term / MMCO marking.
+    let (long_term_reference_flag, mmco) = if nal_ref_idc != 0 {
+        parse_dec_ref_pic_marking(reader, idr_pic_flag)?
+    } else {
+        (false, Vec::new())
+    };
 
     let cabac_init_idc = if pps.entropy_coding_mode_flag
         && !matches!(slice_kind, SliceKind::I | SliceKind::Si)
@@ -217,6 +243,8 @@ pub fn parse_slice_header(
         slice_alpha_c0_offset_div2,
         slice_beta_offset_div2,
         pred_weights,
+        long_term_reference_flag,
+        mmco,
     })
 }
 
@@ -265,44 +293,38 @@ fn parse_weight_list(
     Ok((luma, chroma))
 }
 
-/// `dec_ref_pic_marking()` (§ 7.3.3.3). Walked for positioning only.
-fn consume_dec_ref_pic_marking(
+/// `dec_ref_pic_marking()` (§ 7.3.3.3). Returns `(long_term_reference_flag,
+/// mmco ops)` — the fields that drive DPB reference marking (§ 8.2.5).
+fn parse_dec_ref_pic_marking(
     reader: &mut BitReader<'_>,
     idr_pic_flag: bool,
-) -> Result<(), ReadError> {
+) -> Result<(bool, Vec<Mmco>), ReadError> {
     if idr_pic_flag {
         let _no_output_of_prior_pics_flag = reader.read_bit()?;
-        let _long_term_reference_flag = reader.read_bit()?;
-    } else {
-        let adaptive_ref_pic_marking_mode_flag = reader.read_bit()?;
-        if adaptive_ref_pic_marking_mode_flag {
-            loop {
-                let op = reader.read_ue()?;
-                match op {
-                    0 => break,
-                    1 => {
-                        let _difference_of_pic_nums_minus1 = reader.read_ue()?;
-                    }
-                    2 => {
-                        let _long_term_pic_num = reader.read_ue()?;
-                    }
-                    3 => {
-                        let _difference_of_pic_nums_minus1 = reader.read_ue()?;
-                        let _long_term_frame_idx = reader.read_ue()?;
-                    }
-                    4 => {
-                        let _max_long_term_frame_idx_plus1 = reader.read_ue()?;
-                    }
-                    5 => {}
-                    6 => {
-                        let _long_term_frame_idx = reader.read_ue()?;
-                    }
-                    _ => break,
-                }
+        let long_term_reference_flag = reader.read_bit()?;
+        return Ok((long_term_reference_flag, Vec::new()));
+    }
+    let mut mmco = Vec::new();
+    let adaptive_ref_pic_marking_mode_flag = reader.read_bit()?;
+    if adaptive_ref_pic_marking_mode_flag {
+        loop {
+            let op = reader.read_ue()?;
+            match op {
+                0 => break,
+                1 => mmco.push(Mmco::ForgetShort { diff_pic_nums_minus1: reader.read_ue()? }),
+                2 => mmco.push(Mmco::ForgetLong { long_term_pic_num: reader.read_ue()? }),
+                3 => mmco.push(Mmco::ShortToLong {
+                    diff_pic_nums_minus1: reader.read_ue()?,
+                    long_term_frame_idx: reader.read_ue()?,
+                }),
+                4 => mmco.push(Mmco::SetMaxLong { max_long_term_frame_idx_plus1: reader.read_ue()? }),
+                5 => mmco.push(Mmco::ResetAll),
+                6 => mmco.push(Mmco::CurrentToLong { long_term_frame_idx: reader.read_ue()? }),
+                _ => break,
             }
         }
     }
-    Ok(())
+    Ok((false, mmco))
 }
 
 #[cfg(test)]
