@@ -469,6 +469,17 @@ where
     let mut pending: Vec<(i32, Frame, Frame)> = Vec::new();
     let mut frames = 0usize;
 
+    // Broken leading pictures at stream start: when the stream is extracted from
+    // the middle of an open GOP (no leading IDR), the first anchor is a plain I
+    // frame and the B(s) displayed just before it reference a picture preceding
+    // the extract — which was never decoded. JM decodes them (concealed) but does
+    // not output them. We track the first-decoded POC of the current clean run
+    // (reset at each IDR); any picture displayed before it, before any IDR has
+    // established a self-contained start, is such a broken leading picture and is
+    // decoded (for anyone referencing it — these are non-reference in practice)
+    // but withheld from output.
+    let mut first_decoded_poc: Option<i32> = None;
+    let mut seen_idr = false;
     let flush = |pending: &mut Vec<(i32, Frame, Frame)>, on_frame: &mut F| -> anyhow::Result<()> {
         pending.sort_by_key(|(p, ..)| *p);
         for (_, b, d) in pending.drain(..) {
@@ -491,6 +502,8 @@ where
             drefs.clear();
             pmsb = 0;
             plsb = 0;
+            seen_idr = true;
+            first_decoded_poc = None;
         }
         // Full POC (§8.2.1.1): resolve the LSB wrap against the last ref pic.
         let msb = if au.base_idr {
@@ -549,7 +562,15 @@ where
                 drefs.remove(0);
             }
         }
-        pending.push((poc, bf, df));
+        // Withhold a broken leading picture (displayed before the first frame of
+        // this open-GOP run, no IDR yet) from output; still counts as decoded.
+        let leading = !seen_idr && first_decoded_poc.map(|fp| poc < fp).unwrap_or(false);
+        if first_decoded_poc.is_none() {
+            first_decoded_poc = Some(poc);
+        }
+        if !leading {
+            pending.push((poc, bf, df));
+        }
         // Bump the lowest-POC frame out once the buffer exceeds the reorder
         // depth — keeps memory bounded instead of holding a whole GOP.
         while pending.len() > reorder_cap {
