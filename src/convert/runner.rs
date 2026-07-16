@@ -77,9 +77,9 @@ async fn run_stereo3d_filter(
     for a in &encoder.encoder_args {
         cmd.arg(a);
     }
-    cmd.arg("-c:a").arg("copy")
-        .arg("-c:s").arg("copy")
-        .arg(&plan.output)
+    cmd.arg("-c:a").arg("copy").arg("-c:s").arg("copy");
+    apply_stereo_mode_tag(&mut cmd, plan.format);
+    cmd.arg(&plan.output)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -311,9 +311,9 @@ async fn run_mvc_pipeline(
     for a in &encoder.encoder_args {
         cmd.arg(a);
     }
+    cmd.arg("-c:a").arg("copy").arg("-c:s").arg("copy");
+    apply_stereo_mode_tag(&mut cmd, plan.format);
     let status = cmd
-        .arg("-c:a").arg("copy")
-        .arg("-c:s").arg("copy")
         .arg(&plan.output)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -384,9 +384,9 @@ async fn decode_pipe_encode(
     for a in &encoder.encoder_args {
         cmd.arg(a);
     }
+    cmd.arg("-c:a").arg("copy").arg("-c:s").arg("copy");
+    apply_stereo_mode_tag(&mut cmd, plan.format);
     let mut child = cmd
-        .arg("-c:a").arg("copy")
-        .arg("-c:s").arg("copy")
         .arg(&plan.output)
         .stdin(Stdio::from(pipe_reader))
         .stdout(Stdio::null())
@@ -458,6 +458,17 @@ fn build_decoder_cfg(input: &Path, output_yuv: &Path) -> String {
         input = input.display(),
         output = output_yuv.display(),
     )
+}
+
+/// Tag the output video track with its Matroska `StereoMode` so 3D-aware
+/// players split the frame per eye and render soft subtitles into both eyes.
+/// A no-op for layouts with no spatial packing (frame-sequential). Must be
+/// added before the output filename (it's an output-file option) and targets
+/// output video stream 0 — the composed `[v]` we always map first.
+fn apply_stereo_mode_tag(cmd: &mut Command, format: OutputFormat) {
+    if let Some(mode) = format.matroska_stereo_mode() {
+        cmd.arg("-metadata:s:v:0").arg(format!("stereo_mode={mode}"));
+    }
 }
 
 fn compose_filter(format: OutputFormat) -> String {

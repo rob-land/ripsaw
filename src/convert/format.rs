@@ -63,6 +63,27 @@ impl OutputFormat {
             OutputFormat::FrameSequential => "al",
         }
     }
+
+    /// The Matroska `StereoMode` tag value (as ffmpeg's matroska muxer names
+    /// it) that declares this packing on the output video track, so a
+    /// 3D-aware player (Kodi, VR players, 3D TVs) splits the frame per eye —
+    /// and, crucially, renders soft/toggleable subtitles into *both* eyes with
+    /// a depth offset instead of onto one half. Set via
+    /// `-metadata:s:v:0 stereo_mode=<value>`.
+    ///
+    /// Both SBS layouts are left-eye-first side-by-side (`left_right`, Matroska
+    /// value 1); both TAB layouts are left-eye-on-top (`top_bottom`, value 3) —
+    /// the half variants only downsample, the packing declaration is the same.
+    /// Frame-sequential is a *temporal* interleave, not a spatial packing, so
+    /// there is no meaningful `StereoMode` for it (returns `None`; left
+    /// untagged).
+    pub fn matroska_stereo_mode(self) -> Option<&'static str> {
+        match self {
+            OutputFormat::FullSbs | OutputFormat::HalfSbs => Some("left_right"),
+            OutputFormat::FullTab | OutputFormat::HalfTab => Some("top_bottom"),
+            OutputFormat::FrameSequential => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -76,6 +97,17 @@ mod tests {
         assert_eq!(OutputFormat::FullTab.output_dimensions(1920, 1080), (1920, 2160));
         assert_eq!(OutputFormat::HalfTab.output_dimensions(1920, 1080), (1920, 1080));
         assert_eq!(OutputFormat::FrameSequential.output_dimensions(1920, 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn matroska_stereo_mode_matches_packing() {
+        // Both SBS variants declare left-first side-by-side; both TAB variants
+        // declare left-on-top top-bottom; frame-sequential has no spatial tag.
+        assert_eq!(OutputFormat::FullSbs.matroska_stereo_mode(), Some("left_right"));
+        assert_eq!(OutputFormat::HalfSbs.matroska_stereo_mode(), Some("left_right"));
+        assert_eq!(OutputFormat::FullTab.matroska_stereo_mode(), Some("top_bottom"));
+        assert_eq!(OutputFormat::HalfTab.matroska_stereo_mode(), Some("top_bottom"));
+        assert_eq!(OutputFormat::FrameSequential.matroska_stereo_mode(), None);
     }
 
     #[test]
