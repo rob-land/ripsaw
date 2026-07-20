@@ -239,7 +239,7 @@ fn decode_intra_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
         let cabac_start = (r.position_bits() + 7) / 8;
         let mut e = CabacEngine::new(&rbsp[cabac_start..]);
         let mut hctx = MbHeaderContexts::new(slice_qp);
-        let mut rctx = ResidualContexts::new(slice_qp, false);
+        let mut rctx = ResidualContexts::new(slice_qp, false, 0);
         let mut last_dquant = 0;
         let mut qp = slice_qp;
         let mut addr = slice_start;

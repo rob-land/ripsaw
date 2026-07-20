@@ -111,12 +111,13 @@ pub struct ResidualContexts {
     bcbp: [[CtxState; 4]; 6],
 }
 impl ResidualContexts {
-    /// Build the per-category residual contexts at `slice_qp`. `inter`
-    /// selects the P-slice (cabac_init_idc model 0) init tables.
-    pub fn new(slice_qp: i32, inter: bool) -> Self {
+    /// Build the per-category residual contexts at `slice_qp`. `inter` selects
+    /// the P-slice init tables, indexed by the slice's cabac_init_idc `model`
+    /// (0..2); intra slices always use model 0.
+    pub fn new(slice_qp: i32, inter: bool, model: usize) -> Self {
         ResidualContexts {
-            coeff: CATS.iter().map(|c| c.coeff_contexts(slice_qp, inter)).collect(),
-            bcbp: std::array::from_fn(|i| CATS[i].bcbp_contexts(slice_qp, inter)),
+            coeff: CATS.iter().map(|c| c.coeff_contexts(slice_qp, inter, model)).collect(),
+            bcbp: std::array::from_fn(|i| CATS[i].bcbp_contexts(slice_qp, inter, model)),
         }
     }
 }

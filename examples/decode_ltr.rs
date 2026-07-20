@@ -8,13 +8,12 @@
 //
 // Resolution is read from the SPS. Frames are single-slice, no AUDs (each VCL
 // NAL is one picture); decode order == display order for the IPPP test streams.
+// Selects the PPS by pic_parameter_set_id (lencod emits several PPS variants).
 //
-// STATUS: the LTR reference-list construction + marking (the `reflist` module)
-// is exercised and correct (see reflist unit tests), but this harness does not
-// yet complete on the lencod SetFirstAsLongTerm stream — it hits a SEPARATE,
-// LTR-independent multi-reference P-slice CABAC desync (a bogus ref_idx in the
-// MB layer) that also needs investigating. x264/Blu-ray multi-ref P decodes
-// bit-exact, so it is a stream-specific parse issue, tracked separately.
+// Decodes the JM lencod `SetFirstAsLongTerm` stream (~/ltr/ltr.264) bit-exact vs
+// ldecod — this exercises the long-term reference DPB path AND the cabac_init_idc
+// 1/2 context-init tables (that stream switches cabac_init_idc mid-sequence).
+// MMCO-marked streams still bail (see reflist unit tests for the MMCO logic).
 
 use ripsaw::mvc::annexb::NalSplitter;
 use ripsaw::mvc::bitstream::BitReader;

@@ -166,7 +166,7 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         let cabac_start = (sr.position_bits() + 7) / 8;
         let mut e = CabacEngine::new(&rbsp[cabac_start..]);
         let mut ctx = InterContexts::new(idc, slice_qp);
-        let mut rctx = ResidualContexts::new(slice_qp, true);
+        let mut rctx = ResidualContexts::new(slice_qp, true, idc as usize % 3);
         let num_ref = (sh.num_ref_idx_l0_active_minus1 + 1) as usize;
         let pw = sh.pred_weights.clone();
         let mut last_dquant = 0;
@@ -891,7 +891,7 @@ fn decode_b_frame_one(
         let cabac_start = (sr.position_bits() + 7) / 8;
         let mut e = CabacEngine::new(&rbsp[cabac_start..]);
         let mut ctx = InterContexts::new(idc, slice_qp);
-        let mut rctx = ResidualContexts::new(slice_qp, true);
+        let mut rctx = ResidualContexts::new(slice_qp, true, idc as usize % 3);
         let pw = sh.pred_weights.clone();
         let mut last_dquant = 0;
         let mut qp = slice_qp;
