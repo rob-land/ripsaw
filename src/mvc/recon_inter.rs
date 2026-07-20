@@ -583,14 +583,44 @@ fn band_bounds(row_ends: &[usize], fw: usize, cw: usize, bw4: usize, width: usiz
 /// Per-4×4-block, two-list motion for a B-frame: per list an MV and the POC of
 /// the referenced picture (`-1` = list unused); plus the intra flag and the
 /// luma nonzero-coefficient flag. Drives the two-list deblock bS ([`deblock_b`])
-/// and could serve as a co-located source (B-frames here are non-reference).
+/// and, for a b-pyramid *referenced* B, serves as the co-located source for a
+/// later frame's temporal direct (via [`BMotionField::colocated`]).
 pub struct BMotionField {
     pub mv: [Vec<(i32, i32)>; 2],
+    pub refidx: [Vec<i32>; 2],
     pub refpoc: [Vec<i32>; 2],
     pub intra: Vec<bool>,
     pub nz: Vec<bool>,
     pub bw4: usize,
     pub bh4: usize,
+}
+
+impl BMotionField {
+    /// Reduce this B-frame's two-list motion to a single co-located
+    /// [`MotionField`] (§ 8.4.1.2.1): per 4×4 block use L0 when it predicts from
+    /// L0 (refpoc[0] ≥ 0), else L1; an intra block contributes refIdx −1. The
+    /// resulting `refpoc` carries the referenced picture's POC (temporal-direct
+    /// `MapColToList0`); `refidx` is 0 for an inter block (only its sign matters
+    /// downstream — refIdx < 0 flags intra) and `mv` the chosen list's vector.
+    pub fn colocated(&self) -> MotionField {
+        let n = self.mv[0].len();
+        let mut mv = vec![(0, 0); n];
+        let mut refidx = vec![-1i32; n];
+        let mut refpoc = vec![-1i32; n];
+        for i in 0..n {
+            let (list, rp) = if self.refpoc[0][i] >= 0 {
+                (0, self.refpoc[0][i])
+            } else if self.refpoc[1][i] >= 0 {
+                (1, self.refpoc[1][i])
+            } else {
+                continue; // intra / no motion → refidx stays −1
+            };
+            mv[i] = self.mv[list][i];
+            refidx[i] = self.refidx[list][i].max(0); // chosen list's refIdxCol (for colZeroFlag)
+            refpoc[i] = rp;
+        }
+        MotionField { mv, refidx, refpoc, nz: self.nz.clone(), bw4: self.bw4, bh4: self.bh4 }
+    }
 }
 
 fn b_sub_geom(s: i64) -> (u8, &'static [(usize, usize, usize, usize)]) {
@@ -1374,7 +1404,7 @@ pub fn decode_b_frame(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         slice_alpha_c0_offset_div2: alpha,
         slice_beta_offset_div2: beta,
     };
-    let bmf = BMotionField { mv: [mv0, mv1], refpoc: [refpoc0, refpoc1], intra: intra_grid, nz, bw4, bh4 };
+    let bmf = BMotionField { mv: [mv0, mv1], refidx: [refi0, refi1], refpoc: [refpoc0, refpoc1], intra: intra_grid, nz, bw4, bh4 };
     Ok((frame, bmf))
 }
 

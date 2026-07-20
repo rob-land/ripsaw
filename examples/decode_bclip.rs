@@ -146,6 +146,12 @@ fn main() -> anyhow::Result<()> {
             let (mut f, bmf) = decode_b_frame(&slices, au.idc, false, sps, pps, &[(&l0.1, l0.0)], &[(&l1.1, l1.0)], poc, &l1.2, (32, 32))?;
             check_pre(&f, dcidx, st);
             deblock_b(&mut f, &bmf, pps.chroma_qp_index_offset);
+            // A b-pyramid referenced B (nal_ref_idc > 0) joins the DPB with its
+            // co-located motion field, so a later frame's temporal direct can use
+            // it as RefPicList1[0].
+            if au.idc != 0 {
+                refs.push((poc, clone_frame(&f), bmf.colocated()));
+            }
             out.push((disp, f));
         }
         dcidx += 1;

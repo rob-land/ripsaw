@@ -441,7 +441,10 @@ fn decode_hier_view(
         let col: MotionField = l1[0].2.cloned().unwrap_or_else(empty_motion_field);
         let (mut f, bmf) = decode_b_frame(slices, idc, idr, sps, pps, &l0p, &l1p, poc, &col, (32, 32))?;
         deblock_b(&mut f, &bmf, pps.chroma_qp_index_offset);
-        Ok((f, None))
+        // A b-pyramid *referenced* B (idc != 0) can be a later frame's co-located
+        // picture, so surface its reduced motion field (§ 8.4.1.2.1). Non-ref B
+        // frames aren't stored by the caller, so this is a no-op for them.
+        Ok((f, Some(bmf.colocated())))
     }
 }
 
