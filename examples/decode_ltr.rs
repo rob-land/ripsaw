@@ -13,7 +13,8 @@
 // Decodes the JM lencod `SetFirstAsLongTerm` stream (~/ltr/ltr.264) bit-exact vs
 // ldecod — this exercises the long-term reference DPB path AND the cabac_init_idc
 // 1/2 context-init tables (that stream switches cabac_init_idc mid-sequence).
-// MMCO-marked streams still bail (see reflist unit tests for the MMCO logic).
+// Also decodes an MMCO-marked multi-ref stream (~/ltr/mref.264), validating the
+// full § 8.2.5 marking (sliding-window + adaptive/MMCO) end-to-end.
 
 use ripsaw::mvc::annexb::NalSplitter;
 use ripsaw::mvc::bitstream::BitReader;
@@ -22,7 +23,7 @@ use ripsaw::mvc::pps::{parse_pic_parameter_set, Pps};
 use ripsaw::mvc::rbsp::extract_rbsp;
 use ripsaw::mvc::recon::{decode_intra_frame, Frame};
 use ripsaw::mvc::recon_inter::{deblock_inter, decode_p_frame};
-use ripsaw::mvc::reflist::{init_p_list0, sliding_window_victim, DpbRef};
+use ripsaw::mvc::reflist::{apply_mmco, init_p_list0, sliding_window_victim, DpbRef};
 use ripsaw::mvc::slice_header::parse_slice_header;
 use ripsaw::mvc::sps::{parse_seq_parameter_set_data, Sps};
 
@@ -63,9 +64,11 @@ fn main() -> anyhow::Result<()> {
     let max_lsb = 1i32 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
     let num_ref_frames = sps.max_num_ref_frames.max(1) as usize;
 
-    // DPB: reference marking record + the decoded (deblocked) frame, in lockstep.
+    // DPB: reference marking records (dpb) + the decoded frames keyed by POC.
+    // A POC-keyed map (not a parallel Vec) keeps frames in sync when MMCO marking
+    // relabels/removes DPB entries by predicate rather than by index.
     let mut dpb: Vec<DpbRef> = Vec::new();
-    let mut frames: Vec<Frame> = Vec::new();
+    let mut frames: std::collections::HashMap<i32, Frame> = std::collections::HashMap::new();
     let mut out: Vec<Frame> = Vec::new();
     let (mut prev_msb, mut prev_lsb) = (0i32, 0i32);
 
@@ -119,7 +122,7 @@ fn main() -> anyhow::Result<()> {
             let order = init_p_list0(&dpb, frame_num, max_frame_num);
             let num_active = (sh.num_ref_idx_l0_active_minus1 + 1) as usize;
             anyhow::ensure!(order.len() >= num_active, "DPB has fewer refs ({}) than num_ref_idx_l0_active ({num_active})", order.len());
-            let refs: Vec<&Frame> = order.iter().take(num_active).map(|&i| &frames[i]).collect();
+            let refs: Vec<&Frame> = order.iter().take(num_active).map(|&i| &frames[&dpb[i].poc]).collect();
             let (mut f, mf) = decode_p_frame(&slices, pic.idc, pic.idr, sps, pps, &refs)?;
             deblock_inter(&mut f, &mf, pps.chroma_qp_index_offset);
             f
@@ -134,22 +137,24 @@ fn main() -> anyhow::Result<()> {
                 if sh.long_term_reference_flag {
                     current_lt = Some(0);
                 }
-            } else {
-                // MMCO marking (apply_mmco) is covered by reflist unit tests; the
-                // LTR test streams use sliding-window marking only, so keep the
-                // parallel frames vec trivially in sync and bail on MMCO here.
-                anyhow::ensure!(sh.mmco.is_empty(), "MMCO marking not handled by this harness (see reflist unit tests)");
-                if let Some(v) = sliding_window_victim(&dpb, frame_num, max_frame_num, num_ref_frames) {
-                    dpb.remove(v);
-                    frames.remove(v);
-                }
+            } else if !sh.mmco.is_empty() {
+                // Adaptive (MMCO) marking (§ 8.2.5.4): apply to the DPB, then prune
+                // the frames map to the surviving POCs (MMCO may drop/relabel refs).
+                current_lt = apply_mmco(&mut dpb, &sh.mmco, frame_num, max_frame_num);
+                let live: std::collections::HashSet<i32> = dpb.iter().map(|r| r.poc).collect();
+                frames.retain(|p, _| live.contains(p));
+            } else if let Some(v) = sliding_window_victim(&dpb, frame_num, max_frame_num, num_ref_frames) {
+                // Sliding-window marking (§ 8.2.5.3).
+                let p = dpb[v].poc;
+                dpb.remove(v);
+                frames.remove(&p);
             }
             let rec = match current_lt {
                 Some(idx) => DpbRef { frame_num, poc, long_term: true, long_term_frame_idx: idx },
                 None => DpbRef::short(frame_num, poc),
             };
             dpb.push(rec);
-            frames.push(clone_frame(&frame));
+            frames.insert(poc, clone_frame(&frame));
         }
         out.push(frame);
     }
