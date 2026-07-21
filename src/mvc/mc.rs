@@ -82,6 +82,18 @@ pub fn mc_luma(refp: &Plane, bx: i32, by: i32, mvx: i32, mvy: i32, bw: usize, bh
     // the high side. Border blocks keep the clamped `at`.
     let (w, h) = (refp.w as i32, refp.h as i32);
     let interior = ox >= 2 && oy >= 2 && ox + bw as i32 + 3 <= w && oy + bh as i32 + 3 <= h;
+    #[cfg(target_arch = "x86_64")]
+    {
+        // A 16-wide SIMD read needs a wider right margin than the scalar interior
+        // (it always reads a full vector, ox-2..ox+18); when that fits and the
+        // case isn't a centre 'j', take the bit-exact AVX2 path.
+        if interior && ox + 19 <= w && avx2::handles(fx, fy) && std::is_x86_feature_detected!("avx2") {
+            unsafe {
+                avx2::luma_block(refp.data, refp.w, ox, oy, fx, fy, bw, bh, &mut out);
+            }
+            return out;
+        }
+    }
     if interior {
         luma_block(&|x, y| refp.raw(x, y), ox, oy, fx, fy, bw, bh, &mut out);
     } else {
@@ -170,6 +182,98 @@ fn chroma_block<S: Fn(i32, i32) -> i32>(s: &S, ox: i32, oy: i32, fx: i32, fy: i3
         for i in 0..bw {
             let x = ox + i as i32;
             row[i] = ((w00 * s(x, y) + w10 * s(x + 1, y) + w01 * s(x, y + 1) + w11 * s(x + 1, y + 1) + 32) >> 6) as u8;
+        }
+    }
+}
+
+// ---- AVX2 luma interpolation (x86-64) ----
+//
+// Bit-exact SIMD of the scalar `luma_block` for the 11 non-centre fractional
+// cases (the ones built only from the horizontal/vertical 6-tap + averaging).
+// The 6-tap output fits in i16, so a row of 16 is filtered in one 256-bit
+// register; `_mm_packus_epi16` reproduces `clip1` (saturate to 0..255) and
+// `_mm_avg_epu8` reproduces `(a+b+1)>>1` exactly. The 5 centre ('j') cases need
+// i32 intermediates and stay on the scalar path, as do border/edge blocks.
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use core::arch::x86_64::*;
+
+    /// True for the fractional cases this module handles (everything except the
+    /// centre 'j' positions, which need i32 precision).
+    #[inline]
+    pub fn handles(fx: i32, fy: i32) -> bool {
+        !matches!((fx, fy), (2, 2) | (2, 1) | (2, 3) | (1, 2) | (3, 2))
+    }
+
+    /// Load 16 reference samples at (x, y), zero-extended to 16 × i16.
+    #[inline]
+    unsafe fn ld(data: &[u8], w: usize, x: i32, y: i32) -> __m256i {
+        let p = data.as_ptr().add(y as usize * w + x as usize);
+        _mm256_cvtepu8_epi16(_mm_loadu_si128(p as *const __m128i))
+    }
+
+    /// Horizontal 6-tap [1,-5,20,20,-5,1] at (x,y) for 16 outputs → 16 × i16
+    /// (unrounded, fits in i16). Matches the scalar `h6`.
+    #[inline]
+    unsafe fn h6(data: &[u8], w: usize, x: i32, y: i32) -> __m256i {
+        let a = _mm256_add_epi16(ld(data, w, x - 2, y), ld(data, w, x + 3, y));
+        let b = _mm256_add_epi16(ld(data, w, x, y), ld(data, w, x + 1, y));
+        let c = _mm256_add_epi16(ld(data, w, x - 1, y), ld(data, w, x + 2, y));
+        let t = _mm256_add_epi16(a, _mm256_mullo_epi16(b, _mm256_set1_epi16(20)));
+        _mm256_sub_epi16(t, _mm256_mullo_epi16(c, _mm256_set1_epi16(5)))
+    }
+
+    /// Vertical 6-tap at (x,y) for 16 outputs → 16 × i16. Matches scalar `v6`.
+    #[inline]
+    unsafe fn v6(data: &[u8], w: usize, x: i32, y: i32) -> __m256i {
+        let a = _mm256_add_epi16(ld(data, w, x, y - 2), ld(data, w, x, y + 3));
+        let b = _mm256_add_epi16(ld(data, w, x, y), ld(data, w, x, y + 1));
+        let c = _mm256_add_epi16(ld(data, w, x, y - 1), ld(data, w, x, y + 2));
+        let t = _mm256_add_epi16(a, _mm256_mullo_epi16(b, _mm256_set1_epi16(20)));
+        _mm256_sub_epi16(t, _mm256_mullo_epi16(c, _mm256_set1_epi16(5)))
+    }
+
+    /// clip1((v + 16) >> 5) → 16 × u8. `packus` saturates to 0..255 = clip1.
+    #[inline]
+    unsafe fn half(v: __m256i) -> __m128i {
+        let r = _mm256_srai_epi16(_mm256_add_epi16(v, _mm256_set1_epi16(16)), 5);
+        _mm_packus_epi16(_mm256_castsi256_si128(r), _mm256_extracti128_si256::<1>(r))
+    }
+
+    /// 16 integer-position samples at (x, y) → 16 × u8.
+    #[inline]
+    unsafe fn integ(data: &[u8], w: usize, x: i32, y: i32) -> __m128i {
+        _mm_loadu_si128(data.as_ptr().add(y as usize * w + x as usize) as *const __m128i)
+    }
+
+    /// Fill `bw`×`bh` block. Caller guarantees `handles(fx,fy)` and that a 16-wide
+    /// read is in-bounds: ox ≥ 2, ox+19 ≤ w, oy ≥ 2, oy+bh+3 ≤ h.
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn luma_block(data: &[u8], w: usize, ox: i32, oy: i32, fx: i32, fy: i32, bw: usize, bh: usize, out: &mut [u8]) {
+        for j in 0..bh {
+            let y = oy + j as i32;
+            let r: __m128i = match (fx, fy) {
+                (0, 0) => integ(data, w, ox, y),
+                (2, 0) => half(h6(data, w, ox, y)),
+                (0, 2) => half(v6(data, w, ox, y)),
+                (1, 0) => _mm_avg_epu8(integ(data, w, ox, y), half(h6(data, w, ox, y))),
+                (3, 0) => _mm_avg_epu8(integ(data, w, ox + 1, y), half(h6(data, w, ox, y))),
+                (0, 1) => _mm_avg_epu8(integ(data, w, ox, y), half(v6(data, w, ox, y))),
+                (0, 3) => _mm_avg_epu8(integ(data, w, ox, y + 1), half(v6(data, w, ox, y))),
+                (1, 1) => _mm_avg_epu8(half(h6(data, w, ox, y)), half(v6(data, w, ox, y))),
+                (3, 1) => _mm_avg_epu8(half(h6(data, w, ox, y)), half(v6(data, w, ox + 1, y))),
+                (1, 3) => _mm_avg_epu8(half(h6(data, w, ox, y + 1)), half(v6(data, w, ox, y))),
+                (3, 3) => _mm_avg_epu8(half(h6(data, w, ox, y + 1)), half(v6(data, w, ox + 1, y))),
+                _ => unreachable!(),
+            };
+            let row = &mut out[j * bw..j * bw + bw];
+            if bw == 16 {
+                _mm_storeu_si128(row.as_mut_ptr() as *mut __m128i, r);
+            } else {
+                let mut tmp = [0u8; 16];
+                _mm_storeu_si128(tmp.as_mut_ptr() as *mut __m128i, r);
+                row.copy_from_slice(&tmp[..bw]);
+            }
         }
     }
 }
