@@ -453,45 +453,44 @@ fn decode_hier_view(
     }
 }
 
-/// Decode one access unit's base + dependent frames at display POC `poc`,
-/// reading the (immutable) reference DPBs `brefs`/`drefs`. Base and dependent
-/// views decode in parallel unless the dependent view is inter-view predicted
-/// from the base of this same AU (anchor or an inter-view ref-list mod), which
-/// forces base-then-dep. Pure w.r.t. the DPBs — it only reads them — so several
-/// non-reference AUs (which never mutate a DPB) can run this concurrently.
-#[allow(clippy::type_complexity)]
-fn decode_au(
-    au: &Au, poc: i32,
-    bsps: &Sps, bpps_global: &Pps, dsps: &Sps, dpps_global: &Pps,
-    brefs: &[ViewRef], drefs: &[ViewRef],
-) -> anyhow::Result<((Frame, Option<MotionField>), (Frame, Option<MotionField>))> {
-    let bpps = au.bpps.as_ref().unwrap_or(bpps_global);
+/// Does this AU's dependent view inter-view predict from the base of the SAME
+/// AU (anchor, or a non-anchor whose ref-list mod adds the inter-view ref)?
+fn dep_is_inter_view(au: &Au, dsps: &Sps, dpps_global: &Pps) -> anyhow::Result<bool> {
+    if au.dep_anchor {
+        return Ok(true);
+    }
     let dpps = au.dpps.as_ref().unwrap_or(dpps_global);
-    let bs: Vec<&[u8]> = au.base.iter().map(|s| s.as_slice()).collect();
-    let ds: Vec<&[u8]> = au.dep.iter().map(|s| s.as_slice()).collect();
-    let bsh = parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, bsps, bpps)?;
     let dsh = parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, dsps, dpps)?;
-    let (bst, dst) = (bsh.slice_type % 5, dsh.slice_type % 5);
+    let has_iv = |m: &Option<Vec<RefPicListModification>>| m.as_ref().map(|c| c.iter().any(|x| matches!(x, RefPicListModification::InterViewAdd { .. } | RefPicListModification::InterViewSub { .. }))).unwrap_or(false);
+    Ok(has_iv(&dsh.ref_pic_list_modifications.list0) || has_iv(&dsh.ref_pic_list_modifications.list1))
+}
+
+/// Decode one AU's base view at display POC `poc`, reading the immutable base
+/// DPB `brefs`.
+fn decode_base(au: &Au, poc: i32, bsps: &Sps, bpps_global: &Pps, brefs: &[ViewRef]) -> anyhow::Result<(Frame, Option<MotionField>)> {
+    let bpps = au.bpps.as_ref().unwrap_or(bpps_global);
+    let bs: Vec<&[u8]> = au.base.iter().map(|s| s.as_slice()).collect();
+    let bsh = parse_slice_header(&mut BitReader::new(&au.base[0]), au.base_idr, au.base_idc, bsps, bpps)?;
     let bnum = (bsh.num_ref_idx_l0_active_minus1 + 1) as usize;
     let bnum1 = (bsh.num_ref_idx_l1_active_minus1 + 1) as usize;
+    let (bm0, bm1) = (&bsh.ref_pic_list_modifications.list0, &bsh.ref_pic_list_modifications.list1);
+    decode_hier_view(&bs, au.base_idr, au.base_idc, bsh.slice_type % 5, poc, bnum, bnum1, bsps, bpps, brefs, None, bm0, bm1)
+}
+
+/// Decode one AU's dependent view at display POC `poc`, reading the immutable
+/// dependent DPB `drefs`. `base` is this AU's decoded base frame — used as the
+/// inter-view reference iff the dependent view is inter-view predicted.
+fn decode_dep(au: &Au, poc: i32, dsps: &Sps, dpps_global: &Pps, drefs: &[ViewRef], base: Option<&Frame>) -> anyhow::Result<(Frame, Option<MotionField>)> {
+    let dpps = au.dpps.as_ref().unwrap_or(dpps_global);
+    let ds: Vec<&[u8]> = au.dep.iter().map(|s| s.as_slice()).collect();
+    let dsh = parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, dsps, dpps)?;
     let dnum = (dsh.num_ref_idx_l0_active_minus1 + 1) as usize;
     let dnum1 = (dsh.num_ref_idx_l1_active_minus1 + 1) as usize;
-    let (bm0, bm1) = (&bsh.ref_pic_list_modifications.list0, &bsh.ref_pic_list_modifications.list1);
     let (dm0, dm1) = (&dsh.ref_pic_list_modifications.list0, &dsh.ref_pic_list_modifications.list1);
     let has_iv = |m: &Option<Vec<RefPicListModification>>| m.as_ref().map(|c| c.iter().any(|x| matches!(x, RefPicListModification::InterViewAdd { .. } | RefPicListModification::InterViewSub { .. }))).unwrap_or(false);
-    let dep_inter_view = au.dep_anchor || has_iv(dm0) || has_iv(dm1);
-    if dep_inter_view {
-        let base = decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bnum, bnum1, bsps, bpps, brefs, None, bm0, bm1)?;
-        let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dnum, dnum1, dsps, dpps, drefs, Some(&base.0), dm0, dm1)?;
-        Ok((base, dep))
-    } else {
-        std::thread::scope(|scope| -> anyhow::Result<_> {
-            let bh = scope.spawn(|| decode_hier_view(&bs, au.base_idr, au.base_idc, bst, poc, bnum, bnum1, bsps, bpps, brefs, None, bm0, bm1));
-            let dep = decode_hier_view(&ds, au.dep_idr, au.dep_idc, dst, poc, dnum, dnum1, dsps, dpps, drefs, None, dm0, dm1)?;
-            let base = bh.join().map_err(|_| anyhow::anyhow!("base-view decode thread panicked"))??;
-            Ok((base, dep))
-        })
-    }
+    let inter_view = au.dep_anchor || has_iv(dm0) || has_iv(dm1);
+    let iv = if inter_view { base } else { None };
+    decode_hier_view(&ds, au.dep_idr, au.dep_idc, dsh.slice_type % 5, poc, dnum, dnum1, dsps, dpps, drefs, iv, dm0, dm1)
 }
 
 /// POC-ordered decode for a hierarchical (B-slice) MVC stream, emitting frame
@@ -556,34 +555,33 @@ where
         Ok(())
     };
 
-    // Consecutive fully-non-reference AUs (both views nal_ref_idc = 0) never
-    // mutate a DPB and are mutually independent, so they all read the SAME DPB
-    // state and decode concurrently. They're deferred into `batch` and flushed
-    // in parallel at the next reference AU (which is where the DPB next changes)
-    // and at end. Emission is unchanged: batch frames enter the reorder buffer
-    // before that reference AU's frame, exactly as in serial decode order.
-    let mut batch: Vec<(Au, i32, bool)> = Vec::new();
-    let flush_batch = |batch: &mut Vec<(Au, i32, bool)>, brefs: &[ViewRef], drefs: &[ViewRef], pending: &mut Vec<(i32, Frame, Frame)>, on_frame: &mut F, frames: &mut usize| -> anyhow::Result<()> {
-        if batch.is_empty() {
-            return Ok(());
+    // Base∥dependent software pipeline. The dependent view of an inter-view AU
+    // needs that AU's base, so within an AU base→dep is serial — the dominant
+    // cost. But dep_n (needs base_n + the dep DPB) and base_{n+1} (needs the base
+    // DPB, already holding base_n) are INDEPENDENT, so they decode concurrently.
+    // We keep the base one AU ahead: `held` is a decoded base whose dependent
+    // view is decoded — alongside the NEXT base — one step later. Every frame's
+    // DPB snapshot is identical to serial decode (see the reasoning in the loop),
+    // so output is bit-exact; the reorder buffer just trails by one AU.
+    struct Held {
+        au: Au,
+        poc: i32,
+        leading: bool,
+        bf: Frame,
+    }
+    let mut held: Option<Held> = None;
+    // Decode one held base's dependent view against the current dep DPB, update
+    // the dep DPB, and emit the (base, dep) pair.
+    let finish_held = |h: Held, drefs: &mut Vec<ViewRef>, pending: &mut Vec<(i32, Frame, Frame)>, on_frame: &mut F, frames: &mut usize| -> anyhow::Result<()> {
+        let (df, dmf) = decode_dep(&h.au, h.poc, dsps, dpps, drefs, Some(&h.bf))?;
+        if h.au.dep_idc != 0 {
+            drefs.push((h.poc, Arc::new(clone_frame(&df)), Arc::new(dmf.unwrap_or_else(empty_motion_field))));
+            if drefs.len() > ref_window {
+                drefs.remove(0);
+            }
         }
-        let results: Vec<anyhow::Result<(i32, bool, Frame, Frame)>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = batch
-                .iter()
-                .map(|(au, poc, leading)| scope.spawn(move || -> anyhow::Result<_> {
-                    let ((bf, _), (df, _)) = decode_au(au, *poc, bsps, bpps, dsps, dpps, brefs, drefs)?;
-                    Ok((*poc, *leading, bf, df))
-                }))
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("non-reference batch decode thread panicked")))).collect()
-        });
-        for r in results {
-            let (poc, leading, bf, df) = r?;
-            *frames += 1;
-            push_emit(pending, on_frame, poc, leading, bf, df)?;
-        }
-        batch.clear();
-        Ok(())
+        *frames += 1;
+        push_emit(pending, on_frame, h.poc, h.leading, h.bf, df)
     };
 
     for au in aus {
@@ -597,23 +595,12 @@ where
             else { pmsb }
         };
 
-        // A fully-non-reference AU: defer to the batch (POC + leading computed
-        // here, in decode order, since the DPB/POC state won't change until the
-        // next reference AU).
-        if au.base_idc == 0 && au.dep_idc == 0 && !au.base_idr {
-            let poc = msb_of(pmsb, plsb) + lsb;
-            let leading = !seen_idr && first_decoded_poc.map(|fp| poc < fp).unwrap_or(false);
-            if first_decoded_poc.is_none() {
-                first_decoded_poc = Some(poc);
-            }
-            batch.push((au, poc, leading));
-            continue;
-        }
-
-        // An IDR clears the DPB the batch reads, so the batch (previous GOP) must
-        // decode first, then the IDR resets and decodes against an empty DPB.
+        // An IDR resets the GOP: finish the held base (previous GOP) against the
+        // pre-reset DPB, flush the reorder buffer, then reset.
         if au.base_idr {
-            flush_batch(&mut batch, &brefs, &drefs, &mut pending, &mut on_frame, &mut frames)?;
+            if let Some(h) = held.take() {
+                finish_held(h, &mut drefs, &mut pending, &mut on_frame, &mut frames)?;
+            }
             flush(&mut pending, &mut on_frame)?;
             brefs.clear();
             drefs.clear();
@@ -621,80 +608,61 @@ where
             plsb = 0;
             seen_idr = true;
             first_decoded_poc = None;
-            let poc = lsb; // msb = 0 at an IDR
-            pmsb = 0;
-            plsb = lsb;
-            let ((bf, bmf), (df, dmf)) = decode_au(&au, poc, bsps, bpps, dsps, dpps, &brefs, &drefs)?;
-            brefs.push((poc, Arc::new(clone_frame(&bf)), Arc::new(bmf.unwrap_or_else(empty_motion_field))));
-            if au.dep_idc != 0 {
-                drefs.push((poc, Arc::new(clone_frame(&df)), Arc::new(dmf.unwrap_or_else(empty_motion_field))));
-            }
-            if first_decoded_poc.is_none() {
-                first_decoded_poc = Some(poc);
-            }
-            push_emit(&mut pending, &mut on_frame, poc, false, bf, df)?;
-            frames += 1;
-            continue;
         }
 
-        // Non-IDR reference AU: decode it CONCURRENTLY with the deferred
-        // non-reference batch — all tasks read the SAME immutable DPB, which is
-        // only mutated afterwards. This fills otherwise-idle cores on the common
-        // IbPbP structure, where each B is a lone non-reference frame between
-        // reference frames (a plain per-AU batch of one would serialise).
-        let msb = msb_of(pmsb, plsb);
+        let msb = if au.base_idr { 0 } else { msb_of(pmsb, plsb) };
         let poc = msb + lsb;
         if au.base_idc != 0 {
             pmsb = msb;
             plsb = lsb;
         }
+        let leading = !seen_idr && first_decoded_poc.map(|fp| poc < fp).unwrap_or(false);
+        if first_decoded_poc.is_none() {
+            first_decoded_poc = Some(poc);
+        }
+
+        // Decode this AU's BASE concurrently with the held AU's DEPENDENT view.
+        // brefs already holds the held base, so this base's references are
+        // complete; the held dep reads drefs. Both DPBs are immutable here (only
+        // mutated below), so each view sees exactly the DPB it would in serial
+        // decode — the output is identical, just pipelined by one AU.
         #[allow(clippy::type_complexity)]
-        let (ref_res, batch_res): (
-            anyhow::Result<((Frame, Option<MotionField>), (Frame, Option<MotionField>))>,
-            Vec<anyhow::Result<(i32, bool, Frame, Frame)>>,
+        let (base_res, dep_res): (
+            anyhow::Result<(Frame, Option<MotionField>)>,
+            Option<anyhow::Result<(Frame, Option<MotionField>)>>,
         ) = std::thread::scope(|scope| {
             let (brefs_r, drefs_r) = (&brefs, &drefs);
-            let bhandles: Vec<_> = batch
-                .iter()
-                .map(|(bau, bpoc, bleading)| scope.spawn(move || -> anyhow::Result<_> {
-                    let ((bf, _), (df, _)) = decode_au(bau, *bpoc, bsps, bpps, dsps, dpps, brefs_r, drefs_r)?;
-                    Ok((*bpoc, *bleading, bf, df))
-                }))
-                .collect();
-            let ref_res = decode_au(&au, poc, bsps, bpps, dsps, dpps, brefs_r, drefs_r);
-            let batch_res = bhandles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("non-reference batch decode thread panicked")))).collect();
-            (ref_res, batch_res)
+            let dep_handle = held.as_ref().map(|h| scope.spawn(move || decode_dep(&h.au, h.poc, dsps, dpps, drefs_r, Some(&h.bf))));
+            let base_res = decode_base(&au, poc, bsps, bpps, brefs_r);
+            let dep_res = dep_handle.map(|hd| hd.join().unwrap_or_else(|_| Err(anyhow::anyhow!("dependent-view pipeline thread panicked"))));
+            (base_res, dep_res)
         });
-        let ((bf, bmf), (df, dmf)) = ref_res?;
+        let (bf, bmf) = base_res?;
 
-        // DPB update from the reference AU (after the concurrent reads finish).
+        // Finish (DPB-update + emit) the held pair, which precedes this AU in
+        // decode order, then add this base to the base DPB and hold it.
+        if let Some(h) = held.take() {
+            let (df, dmf) = dep_res.expect("a dep is decoded iff a base was held")?;
+            if h.au.dep_idc != 0 {
+                drefs.push((h.poc, Arc::new(clone_frame(&df)), Arc::new(dmf.unwrap_or_else(empty_motion_field))));
+                if drefs.len() > ref_window {
+                    drefs.remove(0);
+                }
+            }
+            frames += 1;
+            push_emit(&mut pending, &mut on_frame, h.poc, h.leading, h.bf, df)?;
+        }
         if au.base_idc != 0 {
             brefs.push((poc, Arc::new(clone_frame(&bf)), Arc::new(bmf.unwrap_or_else(empty_motion_field))));
             if brefs.len() > ref_window {
                 brefs.remove(0);
             }
         }
-        if au.dep_idc != 0 {
-            drefs.push((poc, Arc::new(clone_frame(&df)), Arc::new(dmf.unwrap_or_else(empty_motion_field))));
-            if drefs.len() > ref_window {
-                drefs.remove(0);
-            }
-        }
-        // Emit the batch (precedes this AU in decode order) then this AU.
-        for r in batch_res {
-            let (bpoc, bleading, bbf, bdf) = r?;
-            frames += 1;
-            push_emit(&mut pending, &mut on_frame, bpoc, bleading, bbf, bdf)?;
-        }
-        batch.clear();
-        let leading = !seen_idr && first_decoded_poc.map(|fp| poc < fp).unwrap_or(false);
-        if first_decoded_poc.is_none() {
-            first_decoded_poc = Some(poc);
-        }
-        push_emit(&mut pending, &mut on_frame, poc, leading, bf, df)?;
-        frames += 1;
+        held = Some(Held { au, poc, leading, bf });
     }
-    flush_batch(&mut batch, &brefs, &drefs, &mut pending, &mut on_frame, &mut frames)?;
+    if let Some(h) = held.take() {
+        finish_held(h, &mut drefs, &mut pending, &mut on_frame, &mut frames)?;
+    }
     flush(&mut pending, &mut on_frame)?;
 
     Ok(ClipInfo { width: bsps.width, height: bsps.height, frames })
