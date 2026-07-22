@@ -55,6 +55,7 @@ regex = "1"
 url = "2"
 which = "7"
 tempfile = "3"
+wide = "0.7.33"
 
 [build-dependencies]
 glib-build-tools = "0.20"
