@@ -142,21 +142,21 @@ fn main() -> anyhow::Result<()> {
                         eprintln!("addr {addr}: coded mb_type {mb_type}");
                     }
                     // Build the partition list (P_8x8 expands per sub_mb_type).
-                    let parts: Vec<(usize, usize, usize, usize, Option<Directional>)> = if mb_type == 4 {
+                    let parts: &[(usize, usize, usize, usize, Option<Directional>)] = if mb_type == 4 {
                         let subs: Vec<i64> = (0..4).map(|_| decode_sub_mb_type(&mut e, &mut ctx)).collect();
                         if std::env::var("DBG").is_ok() {
                             eprintln!("addr {addr}: subs {subs:?}");
                         }
                         assert!(subs.iter().all(|&s| s == 0), "only P_L0_8x8 sub-partitions handled");
                         // 8x8 sub-blocks in raster order.
-                        vec![(0, 0, 2, 2, None), (2, 0, 2, 2, None), (0, 2, 2, 2, None), (2, 2, 2, 2, None)]
+                        &[(0, 0, 2, 2, None), (2, 0, 2, 2, None), (0, 2, 2, 2, None), (2, 2, 2, 2, None)]
                     } else {
                         partitions(mb_type)
                     };
 
                     // Decode each partition's mvd, predict MV, fill grids.
                     let mut part_mv = Vec::new();
-                    for &(bx4, by4, w4, h4, dir) in &parts {
+                    for &(bx4, by4, w4, h4, dir) in parts {
                         let (gx, gy) = (mbx4 + bx4, mby4 + by4);
                         // mvd context: neighbour-|mvd| sum, per component.
                         let lmvd = nb_mvd(&g_mvd, &g_ref, gx as i32 - 1, gy as i32, bw4);

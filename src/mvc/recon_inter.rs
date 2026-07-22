@@ -58,12 +58,14 @@ impl MotionField {
     }
 }
 
-fn partitions(mb_type: i64) -> Vec<(usize, usize, usize, usize, Option<Directional>)> {
+/// Partition shapes (bx4, by4, w4, h4, directional-predictor) for a non-P_8x8
+/// inter `mb_type` (§ 7.4.5). Returns `&'static` data — no allocation per MB.
+fn partitions(mb_type: i64) -> &'static [(usize, usize, usize, usize, Option<Directional>)] {
     match mb_type {
-        1 => vec![(0, 0, 4, 4, None)],
-        2 => vec![(0, 0, 4, 2, Some(Directional::Above)), (0, 2, 4, 2, Some(Directional::Left))],
-        3 => vec![(0, 0, 2, 4, Some(Directional::Left)), (2, 0, 2, 4, Some(Directional::AboveRight))],
-        _ => vec![],
+        1 => &[(0, 0, 4, 4, None)],
+        2 => &[(0, 0, 4, 2, Some(Directional::Above)), (0, 2, 4, 2, Some(Directional::Left))],
+        3 => &[(0, 0, 2, 4, Some(Directional::Left)), (2, 0, 2, 4, Some(Directional::AboveRight))],
+        _ => &[],
     }
 }
 
@@ -174,6 +176,11 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         let mut addr = slice_start;
         sh_last = Some(sh);
 
+    // Per-MB partition/motion scratch, reused across MBs (cleared, not
+    // re-allocated, each MB) — a P MB has ≤16 sub-partitions, so after the
+    // first few MBs these never re-grow: no allocation on the inter-MB hot path.
+    let mut parts: Vec<(usize, usize, usize, usize, Option<Directional>, usize)> = Vec::new();
+    let mut part_mv: Vec<(usize, usize, usize, usize, (i32, i32), i32)> = Vec::new();
     loop {
         anyhow::ensure!(addr < width * (fh / 16), "decode ran past the frame (desync — unsupported feature?) at addr {addr}");
         let mbx = addr % width;
@@ -304,10 +311,16 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         // MB's transform_size_8x8_flag below. For every non-P_8x8 mb_type the
         // partitions are ≥ 8x8, so it stays true.
         let mut no_sub_lt_8x8 = true;
-        let (parts, ngroups): (Vec<(usize, usize, usize, usize, Option<Directional>, usize)>, usize) = if mb_type == 4 {
-            let subs: Vec<i64> = (0..4).map(|_| decode_sub_mb_type(&mut e, &mut ctx)).collect();
+        // (bx4, by4, w4, h4, directional-predictor, group). ≤16 per MB (P_8x8
+        // all-4×4). Reuses the hoisted buffer's capacity.
+        parts.clear();
+        let ngroups: usize;
+        if mb_type == 4 {
+            let mut subs = [0i64; 4];
+            for s in subs.iter_mut() {
+                *s = decode_sub_mb_type(&mut e, &mut ctx);
+            }
             no_sub_lt_8x8 = subs.iter().all(|&s| s == 0);
-            let mut parts = Vec::new();
             for b8 in 0..4usize {
                 let (gx0, gy0) = ((b8 & 1) * 2, (b8 >> 1) * 2);
                 let sp: &[(usize, usize, usize, usize)] = match subs[b8] {
@@ -320,17 +333,20 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
                     parts.push((gx0 + dx, gy0 + dy, w4, h4, None, b8));
                 }
             }
-            (parts, 4)
+            ngroups = 4;
         } else {
             let base = partitions(mb_type);
-            let n = base.len();
-            (base.into_iter().enumerate().map(|(i, (a, b, c, d, e))| (a, b, c, d, e, i)).collect(), n)
-        };
+            ngroups = base.len();
+            for (i, &(a, b, c, d, dir)) in base.iter().enumerate() {
+                parts.push((a, b, c, d, dir, i));
+            }
+        }
 
         // ref_idx_l0 per group (before the mvds — § 7.3.5.1), when > 1 L0
         // reference. Fill g_ref so later groups'/MBs' ref_idx contexts + MV
         // prediction see it.
-        let mut group_ref = vec![0i32; ngroups];
+        // ≤4 groups (P_8x8's four b8, else one per partition).
+        let mut group_ref = [0i32; 4];
         if num_ref > 1 {
             for g in 0..ngroups {
                 let &(bx4, by4, ..) = parts.iter().find(|p| p.5 == g).unwrap();
@@ -349,7 +365,9 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             }
         }
 
-        let mut part_mv = Vec::new();
+        // (bx4, by4, w4, h4, mv, ref_idx) per partition, held between the MV
+        // decode above and the reconstruction below (cbp/residual decode between).
+        part_mv.clear();
         // Which of the MB's 16 4×4 cells are already decoded (filled). A
         // sub-partition's up-right (C) neighbour can point into a LATER
         // sub-partition of the SAME MB (e.g. b8_2's lower block → the not-yet-
@@ -361,7 +379,7 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
         // even single-ref P since sub-partitions predict via the median, not a
         // directional predictor.)
         let mut mb_dec = [false; 16];
-        for &(bx4, by4, w4, h4, dir, group) in &parts {
+        for &(bx4, by4, w4, h4, dir, group) in parts.iter() {
             let ridx = group_ref[group];
             let (gx, gy) = (mbx4 + bx4, mby4 + by4);
             let lmvd = nb_mvd(&g_mvd, &g_ref, gx as i32 - 1, gy as i32, bw4, width, slice_start, bh4);
@@ -422,7 +440,7 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             }
         }
 
-        for (bx4, by4, w4, h4, mv, ridx) in part_mv {
+        for &(bx4, by4, w4, h4, mv, ridx) in part_mv.iter() {
             let (px, py) = (mbx * 16 + bx4 * 4, mby * 16 + by4 * 4);
             // A ref_idx past the supplied reference list means this P-slice uses
             // more L0 references than the caller built — currently the case for a
