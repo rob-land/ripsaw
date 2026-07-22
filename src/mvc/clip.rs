@@ -755,16 +755,143 @@ pub fn write_fsbs_yuv420(left: &Frame, right: &Frame, w: usize, h: usize, out: &
     Ok(())
 }
 
+/// Pixel format the FSBS packer emits into the encode pipe. `Yuv420p` is the
+/// planar form software encoders (libx264/265) consume directly. `Nv12` is the
+/// semi-planar form VAAPI (and other HW encoders) require — emitting it here
+/// fuses the yuv420p→nv12 colour-space conversion into the packer, so ffmpeg's
+/// swscale doesn't run a separate CSC pass before `hwupload`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FsbsPixFmt {
+    Yuv420p,
+    Nv12,
+}
+
+impl FsbsPixFmt {
+    /// The ffmpeg `-pixel_format` token for a rawvideo input of this format.
+    pub fn ffmpeg_name(self) -> &'static str {
+        match self {
+            FsbsPixFmt::Yuv420p => "yuv420p",
+            FsbsPixFmt::Nv12 => "nv12",
+        }
+    }
+}
+
+/// Pack a stereo pair as one full-SBS NV12 frame (view0 left / view1 right): the
+/// Y plane (2w×h, left row then right row) followed by an interleaved UV plane
+/// (2w×h/2). NV12's Y plane is byte-identical to yuv420p's; its UV plane is the
+/// U and V samples interleaved (U0 V0 U1 V1 …) at half resolution. Producing
+/// NV12 directly is the CSC-fusion: `format=nv12` in ffmpeg becomes a no-op.
+pub fn write_fsbs_nv12(left: &Frame, right: &Frame, w: usize, h: usize, out: &mut impl Write) -> io::Result<()> {
+    // Y plane — identical packing to yuv420p.
+    for y in 0..h {
+        out.write_all(&left.y[y * left.fw..y * left.fw + w])?;
+        out.write_all(&right.y[y * right.fw..y * right.fw + w])?;
+    }
+    // Interleaved UV plane, half height. Each row is left's interleaved UV
+    // (over `cw` chroma samples) then right's, for a 2w-byte row. A scratch row
+    // coalesces the interleave into one write per row.
+    let (cw, ch) = (w / 2, h / 2);
+    let mut row = vec![0u8; 2 * w];
+    for y in 0..ch {
+        let lcb = &left.cb[y * left.cw..y * left.cw + cw];
+        let lcr = &left.cr[y * left.cw..y * left.cw + cw];
+        let rcb = &right.cb[y * right.cw..y * right.cw + cw];
+        let rcr = &right.cr[y * right.cw..y * right.cw + cw];
+        for i in 0..cw {
+            row[2 * i] = lcb[i];
+            row[2 * i + 1] = lcr[i];
+            row[2 * cw + 2 * i] = rcb[i];
+            row[2 * cw + 2 * i + 1] = rcr[i];
+        }
+        out.write_all(&row)?;
+    }
+    Ok(())
+}
+
+/// Pack a stereo pair as one full-SBS frame in the requested pixel format.
+pub fn write_fsbs(left: &Frame, right: &Frame, w: usize, h: usize, pixfmt: FsbsPixFmt, out: &mut impl Write) -> io::Result<()> {
+    match pixfmt {
+        FsbsPixFmt::Yuv420p => write_fsbs_yuv420(left, right, w, h, out),
+        FsbsPixFmt::Nv12 => write_fsbs_nv12(left, right, w, h, out),
+    }
+}
+
 /// Decode an MVC Annex B stream (read incrementally from `reader`) and write
-/// each access unit as one full-side-by-side frame ([`write_fsbs_yuv420`]) to
-/// `out` — the streaming decode → encode bridge used by the conversion runner.
-/// `out` is consumed and flushed (then dropped by the caller to signal EOF).
-pub fn decode_annex_b_to_fsbs_writer<R: Read, W: Write>(reader: R, out: W) -> anyhow::Result<ClipInfo> {
+/// each access unit as one full-side-by-side frame ([`write_fsbs`]) to `out` in
+/// `pixfmt` — the streaming decode → encode bridge used by the conversion
+/// runner. `out` is consumed and flushed (then dropped by the caller for EOF).
+pub fn decode_annex_b_to_fsbs_writer<R: Read, W: Write>(reader: R, out: W, pixfmt: FsbsPixFmt) -> anyhow::Result<ClipInfo> {
     let mut w = io::BufWriter::with_capacity(1 << 20, out);
     let info = decode_annex_b_reader(reader, |bf, df, dw, dh| {
-        write_fsbs_yuv420(bf, df, dw as usize, dh as usize, &mut w)?;
+        write_fsbs(bf, df, dw as usize, dh as usize, pixfmt, &mut w)?;
         Ok(())
     })?;
     w.flush()?;
     Ok(info)
+}
+
+#[cfg(test)]
+mod fsbs_tests {
+    use super::*;
+    use crate::mvc::recon::Frame;
+
+    /// A `w×h` frame whose Y/Cb/Cr are filled with distinct position-dependent
+    /// ramps (so plane mix-ups are caught). `fw`/`cw` add right-padding to
+    /// exercise the packer's stride handling (fw > w).
+    fn ramp_frame(w: usize, h: usize, base: u8) -> Frame {
+        let (fw, cw, ch) = (w + 8, w / 2 + 4, h / 2);
+        let mut y = vec![0u8; fw * h];
+        for row in 0..h {
+            for col in 0..w {
+                y[row * fw + col] = base.wrapping_add((row * 7 + col * 3) as u8);
+            }
+        }
+        let mut cb = vec![0u8; cw * ch];
+        let mut cr = vec![0u8; cw * ch];
+        for row in 0..ch {
+            for col in 0..w / 2 {
+                cb[row * cw + col] = base.wrapping_add(0x40).wrapping_add((row + col) as u8);
+                cr[row * cw + col] = base.wrapping_add(0x80).wrapping_add((row * 2 + col) as u8);
+            }
+        }
+        Frame {
+            y, cb, cr, fw, fh: h, cw, ch,
+            width_mbs: w / 16, mb_info: Vec::new(), qp: Vec::new(),
+            disable_deblock_idc: 0, slice_alpha_c0_offset_div2: 0, slice_beta_offset_div2: 0,
+        }
+    }
+
+    /// NV12 packing must equal the yuv420p→nv12 transform of the SAME FSBS
+    /// frame: identical Y plane, and a UV plane that is exactly the yuv420p U/V
+    /// planes interleaved (U0 V0 U1 V1 …). This is what makes ffmpeg's
+    /// `format=nv12` a no-op — the CSC-fusion correctness guarantee.
+    #[test]
+    fn nv12_equals_yuv420p_to_nv12_transform() {
+        let (w, h) = (32usize, 16usize);
+        let (left, right) = (ramp_frame(w, h, 10), ramp_frame(w, h, 200));
+
+        let mut p420 = Vec::new();
+        write_fsbs_yuv420(&left, &right, w, h, &mut p420).unwrap();
+        let mut pnv12 = Vec::new();
+        write_fsbs_nv12(&left, &right, w, h, &mut pnv12).unwrap();
+
+        let fw = 2 * w; // packed FSBS width
+        let (cw, ch) = (fw / 2, h / 2);
+        let ysz = fw * h;
+        let planesz = cw * ch;
+        assert_eq!(p420.len(), ysz + 2 * planesz);
+        assert_eq!(pnv12.len(), ysz + 2 * planesz);
+
+        // Y planes identical.
+        assert_eq!(&pnv12[..ysz], &p420[..ysz], "Y plane differs");
+
+        // NV12 UV plane == interleave(yuv420p U, yuv420p V).
+        let u = &p420[ysz..ysz + planesz];
+        let v = &p420[ysz + planesz..ysz + 2 * planesz];
+        let uv = &pnv12[ysz..ysz + 2 * planesz];
+        for i in 0..planesz {
+            assert_eq!(uv[2 * i], u[i], "UV[{}] U mismatch", 2 * i);
+            assert_eq!(uv[2 * i + 1], v[i], "UV[{}] V mismatch", 2 * i + 1);
+        }
+    }
 }

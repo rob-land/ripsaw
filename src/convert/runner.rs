@@ -363,6 +363,13 @@ async fn decode_pipe_encode(
         }
         None => compose,
     };
+    // CSC fusion: when the encoder wants NV12 (VAAPI's `format=nv12,hwupload`),
+    // the packer emits NV12 directly so ffmpeg's `format=nv12` is a no-op — no
+    // separate swscale colour-space pass. Software encoders take yuv420p.
+    let pixfmt = match &encoder.pre_input_vf {
+        Some(vf) if vf.contains("nv12") => crate::mvc::clip::FsbsPixFmt::Nv12,
+        _ => crate::mvc::clip::FsbsPixFmt::Yuv420p,
+    };
     // One full-SBS frame per AU: 2×(per-view width) × height.
     let fsbs_size = format!("{}x{}", width * 2, height);
 
@@ -372,7 +379,7 @@ async fn decode_pipe_encode(
         cmd.arg(a);
     }
     cmd.arg("-f").arg("rawvideo")
-        .arg("-pixel_format").arg("yuv420p")
+        .arg("-pixel_format").arg(pixfmt.ffmpeg_name())
         .arg("-video_size").arg(&fsbs_size)
         .arg("-framerate").arg(frame_rate)
         .arg("-i").arg("pipe:0")
@@ -402,7 +409,7 @@ async fn decode_pipe_encode(
     let decode = tokio::task::spawn_blocking(move || -> Result<crate::mvc::clip::ClipInfo> {
         let file = std::fs::File::open(&h264)
             .with_context(|| format!("opening {}", h264.display()))?;
-        crate::mvc::clip::decode_annex_b_to_fsbs_writer(std::io::BufReader::new(file), pipe_writer)
+        crate::mvc::clip::decode_annex_b_to_fsbs_writer(std::io::BufReader::new(file), pipe_writer, pixfmt)
     });
 
     // Await the decode. ffmpeg consumes the pipe concurrently at the OS level and
