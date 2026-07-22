@@ -42,6 +42,22 @@ pub const POS2CTX_IDENTITY_4X4: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
 /// `pos2ctx_last[type]`); both must have at least `max_num_coeff` entries.
 /// `cat_gt1_cap` is the cap on `numDecodAbsLevelGt1` for the bin≥1 level
 /// context — 4 for most categories, 3 for chroma DC.
+/// Fixed-capacity scan-order coefficient buffer (≤ 64 = an 8×8 block). Returned
+/// by value from [`decode_residual_block`] to avoid a heap allocation per coded
+/// block on the hot residual path; derefs to the `len` (= `max_num_coeff`,
+/// zero-padded) coefficient slice so callers use it exactly like the old `Vec`.
+pub struct Coeffs {
+    data: [i32; 64],
+    len: usize,
+}
+impl std::ops::Deref for Coeffs {
+    type Target = [i32];
+    #[inline]
+    fn deref(&self) -> &[i32] {
+        &self.data[..self.len]
+    }
+}
+
 pub fn decode_residual_block(
     e: &mut CabacEngine,
     ctx: &mut CoeffContexts,
@@ -49,8 +65,11 @@ pub fn decode_residual_block(
     pos2ctx_map: &[u8],
     pos2ctx_last: &[u8],
     cat_gt1_cap: u32,
-) -> Vec<i32> {
-    let mut sig = vec![false; max_num_coeff];
+) -> Coeffs {
+    // Significance map — at most 64 coefficients (8×8 block), so a stack array
+    // avoids a heap alloc per coded block on the hot residual path.
+    let mut sig = [false; 64];
+    let sig = &mut sig[..max_num_coeff];
     let mut num_coeff = max_num_coeff;
 
     // Significance map (§ 7.3.5.3.3). The last scanned coefficient is
@@ -71,7 +90,7 @@ pub fn decode_residual_block(
     // Levels, decoded in *reverse* scan order (§ 9.3.3.1.1.9). The context
     // for the first abs-level bin depends on how many ±1 levels have been
     // seen so far; subsequent bins on how many >1 levels.
-    let mut coeffs = vec![0i32; max_num_coeff];
+    let mut coeffs = [0i32; 64];
     let mut num_eq1 = 0u32;
     let mut num_gt1 = 0u32;
     for pos in (0..num_coeff).rev() {
@@ -88,7 +107,7 @@ pub fn decode_residual_block(
         let sign = e.decode_bypass();
         coeffs[pos] = if sign == 1 { -(abs_level as i32) } else { abs_level as i32 };
     }
-    coeffs
+    Coeffs { data: coeffs, len: max_num_coeff }
 }
 
 /// coeff_abs_level_minus1: UEG0 binarisation (§ 9.3.2.3) — a truncated
@@ -348,7 +367,7 @@ mod tests {
         let mut dctx = fresh_ctx(n_sig, n_last);
         let mut dec = CabacEngine::new(&bytes);
         let got = decode_residual_block(&mut dec, &mut dctx, max, map, last_map, cap);
-        assert_eq!(got, coeffs, "round-trip mismatch");
+        assert_eq!(&got[..], coeffs, "round-trip mismatch");
         assert_eq!(dec.decode_terminate(), 1);
     }
 

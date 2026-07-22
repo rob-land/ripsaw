@@ -15,7 +15,7 @@
 
 use super::cabac::{CabacEngine, CtxState};
 use super::mb_header::MbInfo;
-use super::residual::{decode_residual_block, CoeffContexts};
+use super::residual::{decode_residual_block, Coeffs, CoeffContexts};
 use super::residual_ctx::ResidualCat;
 use super::scaling::ScalingLists;
 use super::transform::{
@@ -195,7 +195,7 @@ fn decode_block<T: ResTrace>(
     cbf_ctx: usize,
     name: &'static str,
     out: &mut T,
-) -> Option<Vec<i32>> {
+) -> Option<Coeffs> {
     let ci = cat_index(cat);
     let cbf = e.decode_decision(&mut ctxs.bcbp[ci][cbf_ctx]) == 1;
     if cbf {
