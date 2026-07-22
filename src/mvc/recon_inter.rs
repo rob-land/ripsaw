@@ -15,7 +15,7 @@ use crate::mvc::mb_inter::{
     InterContexts,
 };
 use crate::mvc::mb_residual::{decode_mb_residual, CbfNeighbours, CbpBits, ResidualContexts};
-use crate::mvc::mc::{mc_chroma, mc_luma, Plane};
+use crate::mvc::mc::{mc_chroma_into, mc_luma_into, Plane};
 use crate::mvc::mv::{predict_mv, predict_skip_mv, Directional, Neighbour};
 use crate::mvc::pps::Pps;
 use crate::mvc::recon::{reconstruct_intra_mb, split_bands, Band, Frame, Plane as OutPlane};
@@ -1425,7 +1425,7 @@ fn b_recon_block<'a>(
     // set (weighted_bipred_idc == 1); otherwise the default average (`wt`).
     // `cw0`/`cw1` are the per-list (weight, offset) for this component, `denom`
     // its log2 weight denominator.
-    let comb = |a: &Option<Vec<u8>>, b: &Option<Vec<u8>>, k: usize, cw0: (i32, i32), cw1: (i32, i32), denom: i32| -> i32 {
+    let comb = |a: Option<&[u8]>, b: Option<&[u8]>, k: usize, cw0: (i32, i32), cw1: (i32, i32), denom: i32| -> i32 {
         match (a, b) {
             (Some(a), Some(b)) => {
                 let (av, bv) = (a[k] as i32, b[k] as i32);
@@ -1441,12 +1441,13 @@ fn b_recon_block<'a>(
         }
     };
     let (w0, w1) = wp.unwrap_or((WPred { luma: (1, 0), luma_denom: 0, chroma: [(1, 0); 2], chroma_denom: 0 }, WPred { luma: (1, 0), luma_denom: 0, chroma: [(1, 0); 2], chroma_denom: 0 }));
-    let p0 = if use0 { Some(mc_luma(&pl[0][ref0].0, px as i32, py as i32, mv0.0, mv0.1, w, h)) } else { None };
-    let p1 = if use1 { Some(mc_luma(&pl[1][ref1].0, px as i32, py as i32, mv1.0, mv1.1, w, h)) } else { None };
+    let (mut lb0, mut lb1) = ([0u8; 256], [0u8; 256]);
+    let p0: Option<&[u8]> = if use0 { mc_luma_into(&pl[0][ref0].0, px as i32, py as i32, mv0.0, mv0.1, w, h, &mut lb0[..w * h]); Some(&lb0[..w * h]) } else { None };
+    let p1: Option<&[u8]> = if use1 { mc_luma_into(&pl[1][ref1].0, px as i32, py as i32, mv1.0, mv1.1, w, h, &mut lb1[..w * h]); Some(&lb1[..w * h]) } else { None };
     let (rx, ry) = (px % 16, py % 16);
     for j in 0..h {
         for i in 0..w {
-            let pred = comb(&p0, &p1, j * w + i, w0.luma, w1.luma, w0.luma_denom);
+            let pred = comb(p0, p1, j * w + i, w0.luma, w1.luma, w0.luma_denom);
             y.set(px + i, py + j, pred + res.luma[ry + j][rx + i]);
         }
     }
@@ -1456,12 +1457,13 @@ fn b_recon_block<'a>(
         let rp0 = if pi == 0 { &pl[0][ref0].1 } else { &pl[0][ref0].2 };
         let rp1 = if pi == 0 { &pl[1][ref1].1 } else { &pl[1][ref1].2 };
         let plane: &mut OutPlane = if pi == 0 { &mut *cb } else { &mut *cr };
-        let c0 = if use0 { Some(mc_chroma(rp0, cpx as i32, cpy as i32, mv0.0, mv0.1, cww, chh)) } else { None };
-        let c1 = if use1 { Some(mc_chroma(rp1, cpx as i32, cpy as i32, mv1.0, mv1.1, cww, chh)) } else { None };
+        let (mut cb0, mut cb1) = ([0u8; 64], [0u8; 64]);
+        let c0: Option<&[u8]> = if use0 { mc_chroma_into(rp0, cpx as i32, cpy as i32, mv0.0, mv0.1, cww, chh, &mut cb0[..cww * chh]); Some(&cb0[..cww * chh]) } else { None };
+        let c1: Option<&[u8]> = if use1 { mc_chroma_into(rp1, cpx as i32, cpy as i32, mv1.0, mv1.1, cww, chh, &mut cb1[..cww * chh]); Some(&cb1[..cww * chh]) } else { None };
         let resc = if pi == 0 { &res.cb } else { &res.cr };
         for j in 0..chh {
             for i in 0..cww {
-                let pred = comb(&c0, &c1, j * cww + i, w0.chroma[pi], w1.chroma[pi], w0.chroma_denom);
+                let pred = comb(c0, c1, j * cww + i, w0.chroma[pi], w1.chroma[pi], w0.chroma_denom);
                 plane.set(cpx + i, cpy + j, pred + resc[cry + j][crx + i]);
             }
         }
@@ -1537,7 +1539,9 @@ fn recon_part<'a>(
 ) {
     let _ = (fw, cw);
     let (rpy, rpcb, rpcr) = (&rp.0, &rp.1, &rp.2);
-    let pred = mc_luma(rpy, px as i32, py as i32, mv.0, mv.1, w, h);
+    let mut pbuf = [0u8; 256];
+    let pred = &mut pbuf[..w * h];
+    mc_luma_into(rpy, px as i32, py as i32, mv.0, mv.1, w, h, pred);
     for j in 0..h {
         for i in 0..w {
             let mut s = pred[j * w + i] as i32;
@@ -1548,8 +1552,10 @@ fn recon_part<'a>(
         }
     }
     let (cpx, cpy, cww, chh, crx, cry) = (px / 2, py / 2, w / 2, h / 2, rx / 2, ry / 2);
+    let mut cbuf = [0u8; 64];
     for (ci, (plane, res, rp)) in [(&mut *cb, rcb, rpcb), (&mut *cr, rcr, rpcr)].into_iter().enumerate() {
-        let p = mc_chroma(rp, cpx as i32, cpy as i32, mv.0, mv.1, cww, chh);
+        let p = &mut cbuf[..cww * chh];
+        mc_chroma_into(rp, cpx as i32, cpy as i32, mv.0, mv.1, cww, chh, p);
         for j in 0..chh {
             for i in 0..cww {
                 let mut s = p[j * cww + i] as i32;

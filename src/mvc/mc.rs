@@ -71,11 +71,20 @@ impl Plane<'_> {
 
 /// Predict a `bw`×`bh` luma block at destination block origin (`bx`,`by`)
 /// using a quarter-pel motion vector (`mvx`,`mvy`, units of ¼ sample).
-/// Returns the predicted samples, row-major.
+/// Returns the predicted samples, row-major. Convenience wrapper that allocates;
+/// hot callers use [`mc_luma_into`] with a reusable buffer.
 pub fn mc_luma(refp: &Plane, bx: i32, by: i32, mvx: i32, mvy: i32, bw: usize, bh: usize) -> Vec<u8> {
+    let mut out = vec![0u8; bw * bh];
+    mc_luma_into(refp, bx, by, mvx, mvy, bw, bh, &mut out);
+    out
+}
+
+/// Predict a `bw`×`bh` luma block into `out` (row-major, len ≥ `bw*bh`). No heap
+/// allocation — the hot inter-recon path passes a stack buffer, since a fresh
+/// `Vec` per motion-compensated partition is a real allocation-churn cost.
+pub fn mc_luma_into(refp: &Plane, bx: i32, by: i32, mvx: i32, mvy: i32, bw: usize, bh: usize, out: &mut [u8]) {
     let (fx, fy) = (mvx & 3, mvy & 3);
     let (ox, oy) = (bx + (mvx >> 2), by + (mvy >> 2));
-    let mut out = vec![0u8; bw * bh];
     // Interior blocks (the common case) index the reference directly — no
     // per-sample border clamp — via `raw`. The 6-tap reads columns/rows
     // ox-2 .. ox+bw+2, so require a 2-sample margin on the low side and 3 on
@@ -86,15 +95,14 @@ pub fn mc_luma(refp: &Plane, bx: i32, by: i32, mvx: i32, mvy: i32, bw: usize, bh
     // (it always reads a full vector, ox-2..ox+18); when that fits and the case
     // isn't a centre 'j', take the portable-SIMD path (bit-exact vs scalar).
     if !force_scalar() && interior && ox + 19 <= w && portable::handles(fx, fy) {
-        portable::luma_block(refp.data, refp.w, ox, oy, fx, fy, bw, bh, &mut out);
-        return out;
+        portable::luma_block(refp.data, refp.w, ox, oy, fx, fy, bw, bh, out);
+        return;
     }
     if interior {
-        luma_block(&|x, y| refp.raw(x, y), ox, oy, fx, fy, bw, bh, &mut out);
+        luma_block(&|x, y| refp.raw(x, y), ox, oy, fx, fy, bw, bh, out);
     } else {
-        luma_block(&|x, y| refp.at(x, y), ox, oy, fx, fy, bw, bh, &mut out);
+        luma_block(&|x, y| refp.at(x, y), ox, oy, fx, fy, bw, bh, out);
     }
-    out
 }
 
 /// Fill a `bw`×`bh` luma block for a fixed fractional position (`fx`,`fy`) ∈
@@ -151,18 +159,24 @@ fn run_luma<P: Fn(i32, i32) -> u8>(ox: i32, oy: i32, bw: usize, bh: usize, out: 
 /// MVs. `mvx`/`mvy` are in chroma eighth-sample units (= luma quarter-pel MV
 /// for 4:2:0, where the chroma MV has 1/8 precision).
 pub fn mc_chroma(refp: &Plane, bx: i32, by: i32, mvx: i32, mvy: i32, bw: usize, bh: usize) -> Vec<u8> {
+    let mut out = vec![0u8; bw * bh];
+    mc_chroma_into(refp, bx, by, mvx, mvy, bw, bh, &mut out);
+    out
+}
+
+/// Predict a `bw`×`bh` chroma block into `out` (row-major, len ≥ `bw*bh`). No
+/// heap allocation — the allocation-free counterpart to [`mc_chroma`].
+pub fn mc_chroma_into(refp: &Plane, bx: i32, by: i32, mvx: i32, mvy: i32, bw: usize, bh: usize, out: &mut [u8]) {
     let (fx, fy) = (mvx & 7, mvy & 7);
     let (ox, oy) = (bx + (mvx >> 3), by + (mvy >> 3));
-    let mut out = vec![0u8; bw * bh];
     // Bilinear reads (x,y)..(x+1,y+1); interior needs a 1-sample high margin.
     let (w, h) = (refp.w as i32, refp.h as i32);
     let interior = ox >= 0 && oy >= 0 && ox + bw as i32 + 1 <= w && oy + bh as i32 + 1 <= h;
     if interior {
-        chroma_block(&|x, y| refp.raw(x, y), ox, oy, fx, fy, bw, bh, &mut out);
+        chroma_block(&|x, y| refp.raw(x, y), ox, oy, fx, fy, bw, bh, out);
     } else {
-        chroma_block(&|x, y| refp.at(x, y), ox, oy, fx, fy, bw, bh, &mut out);
+        chroma_block(&|x, y| refp.at(x, y), ox, oy, fx, fy, bw, bh, out);
     }
-    out
 }
 
 /// Fill a `bw`×`bh` chroma block: bilinear over eighth-pel positions with the
