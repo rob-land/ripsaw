@@ -126,6 +126,42 @@ impl ResidualContexts {
 /// trace lines so the macroblock decoder can be diffed against ldecod.
 pub type ResElem = (String, i64, Option<i64>);
 
+/// Sink for the per-coefficient residual trace. Production decode passes the
+/// no-op `()` sink, which monomorphises away entirely — no per-coefficient
+/// String/Vec allocation on the hottest path; the trace-diff examples pass a
+/// `Vec<ResElem>` to collect the JM-matching (name, level, run) lines.
+pub trait ResTrace {
+    fn coded(&mut self, name: &'static str, coeffs: &[i32]);
+    fn zero(&mut self, name: &'static str);
+    fn luma8x8(&mut self, coeffs: &[i32]);
+}
+
+impl ResTrace for () {
+    #[inline]
+    fn coded(&mut self, _: &'static str, _: &[i32]) {}
+    #[inline]
+    fn zero(&mut self, _: &'static str) {}
+    #[inline]
+    fn luma8x8(&mut self, _: &[i32]) {}
+}
+
+impl ResTrace for Vec<ResElem> {
+    fn coded(&mut self, name: &'static str, coeffs: &[i32]) {
+        for (lvl, run) in level_run(coeffs) {
+            self.push((name.to_string(), lvl, Some(run)));
+        }
+    }
+    fn zero(&mut self, name: &'static str) {
+        self.push((name.to_string(), 0, Some(0)));
+    }
+    fn luma8x8(&mut self, coeffs: &[i32]) {
+        for (idx, (lvl, run)) in level_run(coeffs).into_iter().enumerate() {
+            let name = if idx == 0 { "Luma8x8 DC sng" } else { "Luma8x8 sng" };
+            self.push((name.to_string(), lvl, Some(run)));
+        }
+    }
+}
+
 /// scan-order coefficients -> JM (level, run) pairs + the trailing (0,0).
 fn level_run(coeffs: &[i32]) -> Vec<(i64, i64)> {
     let mut out = Vec::new();
@@ -152,13 +188,13 @@ fn luma4x4_bit(bx: u32, by: u32) -> u32 {
 /// Decode + emit one cbf-gated residual block, returning its scan-order
 /// coefficients (None when coded_block_flag = 0).
 #[allow(clippy::too_many_arguments)]
-fn decode_block(
+fn decode_block<T: ResTrace>(
     e: &mut CabacEngine,
     ctxs: &mut ResidualContexts,
     cat: ResidualCat,
     cbf_ctx: usize,
-    name: &str,
-    out: &mut Vec<ResElem>,
+    name: &'static str,
+    out: &mut T,
 ) -> Option<Vec<i32>> {
     let ci = cat_index(cat);
     let cbf = e.decode_decision(&mut ctxs.bcbp[ci][cbf_ctx]) == 1;
@@ -172,12 +208,10 @@ fn decode_block(
             d.pos2ctx_last,
             d.gt1_cap,
         );
-        for (lvl, run) in level_run(&coeffs) {
-            out.push((name.into(), lvl, Some(run)));
-        }
+        out.coded(name, &coeffs);
         Some(coeffs)
     } else {
-        out.push((name.into(), 0, 0.into()));
+        out.zero(name);
         None
     }
 }
@@ -187,7 +221,7 @@ fn decode_block(
 /// Updates `neigh.cur` with this MB's cbf bits (for the next MB's context).
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
-pub fn decode_mb_residual(
+pub fn decode_mb_residual<T: ResTrace>(
     e: &mut CabacEngine,
     ctxs: &mut ResidualContexts,
     info: &MbInfo,
@@ -196,7 +230,7 @@ pub fn decode_mb_residual(
     chroma_qp_index_offset: i32,
     is_inter: bool,
     scaling: &ScalingLists,
-    out: &mut Vec<ResElem>,
+    out: &mut T,
 ) -> MbResidual {
     let cbp_luma = info.cbp & 0x0f;
     let cbp_chroma = info.cbp >> 4;
@@ -323,7 +357,8 @@ fn place4x4(luma: &mut [[i32; 16]; 16], bx: usize, by: usize, block: [[i32; 4]; 
 /// decoding each per the 8×8-region cbp bit. Used for I_16x16 AC (start at
 /// scan position 1, category LUMA_16AC) and I_4x4 (LUMA_4x4).
 #[allow(clippy::too_many_arguments)]
-fn decode_luma_4x4_blocks(
+#[allow(clippy::too_many_arguments)]
+fn decode_luma_4x4_blocks<T: ResTrace>(
     e: &mut CabacEngine,
     ctxs: &mut ResidualContexts,
     neigh: &mut CbfNeighbours,
@@ -334,7 +369,7 @@ fn decode_luma_4x4_blocks(
     db: u32,
     weight: &[[i32; 4]; 4],
     luma: &mut [[i32; 16]; 16],
-    out: &mut Vec<ResElem>,
+    out: &mut T,
 ) {
     // s_cbp bits for the 4×4 neighbours are set as we go, so the context
     // derivation reads back the current MB's already-decoded blocks. Only
@@ -383,7 +418,7 @@ fn decode_luma_4x4_blocks(
 /// Decode one coded 8×8 luma block (no cbf), emitting "Luma8x8 DC sng" for
 /// the first (level, run) and "Luma8x8 sng" for the rest; returns the
 /// reconstructed 8×8 residual samples scaled by `weight` (the 8×8 list).
-fn decode_luma8x8(e: &mut CabacEngine, ctxs: &mut ResidualContexts, qp: i32, weight: &[[i32; 8]; 8], out: &mut Vec<ResElem>) -> [[i32; 8]; 8] {
+fn decode_luma8x8<T: ResTrace>(e: &mut CabacEngine, ctxs: &mut ResidualContexts, qp: i32, weight: &[[i32; 8]; 8], out: &mut T) -> [[i32; 8]; 8] {
     let cat = ResidualCat::Luma8x8;
     let d = cat.desc();
     let coeffs = decode_residual_block(
@@ -394,10 +429,7 @@ fn decode_luma8x8(e: &mut CabacEngine, ctxs: &mut ResidualContexts, qp: i32, wei
         d.pos2ctx_last,
         d.gt1_cap,
     );
-    for (idx, (lvl, run)) in level_run(&coeffs).into_iter().enumerate() {
-        let name = if idx == 0 { "Luma8x8 DC sng" } else { "Luma8x8 sng" };
-        out.push((name.into(), lvl, Some(run)));
-    }
+    out.luma8x8(&coeffs);
     let mut scan = [0i32; 64];
     scan.copy_from_slice(&coeffs[..64]);
     reconstruct_residual_8x8(&inverse_scan_8x8(&scan), qp, weight)

@@ -274,9 +274,8 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
                 left: if mbx != 0 { Some(cbp_grid[addr - 1]) } else { None },
                 up: if mb_top { Some(cbp_grid[addr - width]) } else { None },
             };
-            let mut sink = Vec::new();
             // Intra residual (is_inter=false → cbf default_bit 1, I_16x16 DC path).
-            let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut sink);
+            let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut ());
             reconstruct_intra_mb(&mut y, &mut cb, &mut cr, &mut modes, &info, &raw, &res, mbx, mby, width, bw4, fw, mb_top);
             for by in 0..4u32 {
                 for bx in 0..4u32 {
@@ -410,8 +409,7 @@ fn decode_p_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sps, p
             left: if mbx != 0 { Some(cbp_grid[addr - 1]) } else { None },
             up: if mb_top { Some(cbp_grid[addr - width]) } else { None },
         };
-        let mut sink = Vec::new();
-        let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &scaling, &mut sink);
+        let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &scaling, &mut ());
         cbp_grid[addr] = rneigh.cur;
         cbpv[addr] = cbp as u8;
         mb_info[addr] = info;
@@ -979,8 +977,7 @@ fn decode_b_frame_one(
                     left: if mbx != 0 { Some(cbp_grid[addr - 1]) } else { None },
                     up: if mb_top { Some(cbp_grid[addr - width]) } else { None },
                 };
-                let mut sink = Vec::new();
-                let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut sink);
+                let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut ());
                 reconstruct_intra_mb(&mut y, &mut cb, &mut cr, &mut modes, &info, &raw, &res, mbx, mby, width, bw4, fw, mb_top);
                 for by in 0..4usize {
                     for bx in 0..4usize {
@@ -1218,8 +1215,7 @@ fn decode_b_frame_one(
                     left: if mbx != 0 { Some(cbp_grid[addr - 1]) } else { None },
                     up: if mb_top { Some(cbp_grid[addr - width]) } else { None },
                 };
-                let mut sink = Vec::new();
-                res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &scaling, &mut sink);
+                res = decode_mb_residual(&mut e, &mut rctx, &info, &mut rneigh, qp, pps.chroma_qp_index_offset, true, &scaling, &mut ());
                 for by in 0..4u32 {
                     for bx in 0..4u32 {
                         if rneigh.cur.luma4x4_nonzero(bx, by) {

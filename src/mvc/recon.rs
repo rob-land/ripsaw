@@ -227,7 +227,6 @@ fn decode_intra_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
     let IBufs { mut y, mut cb, mut cr, mut modes, mut grid, mut cbp_grid, mut qp_grid } = bufs;
     let bw4 = width * 4;
     let mut decoded_mbs = 0usize;
-    let mut sink = Vec::new();
     // Deblock params come from the last slice header parsed (all equal here).
     let mut sh_last = None;
 
@@ -264,7 +263,7 @@ fn decode_intra_frame_one(slices: &[&[u8]], nal_ref_idc: u8, idr: bool, sps: &Sp
             left: if mbx != 0 { Some(cbp_grid[addr - 1]) } else { None },
             up: if mb_top { Some(cbp_grid[addr - width]) } else { None },
         };
-        let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut neigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut sink);
+        let res = decode_mb_residual(&mut e, &mut rctx, &info, &mut neigh, qp, pps.chroma_qp_index_offset, false, &scaling, &mut ());
 
         reconstruct_intra_mb(&mut y, &mut cb, &mut cr, &mut modes, &info, &raw, &res, mbx, mby, width, bw4, fw, mb_top);
 
