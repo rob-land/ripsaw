@@ -453,18 +453,6 @@ fn decode_hier_view(
     }
 }
 
-/// Does this AU's dependent view inter-view predict from the base of the SAME
-/// AU (anchor, or a non-anchor whose ref-list mod adds the inter-view ref)?
-fn dep_is_inter_view(au: &Au, dsps: &Sps, dpps_global: &Pps) -> anyhow::Result<bool> {
-    if au.dep_anchor {
-        return Ok(true);
-    }
-    let dpps = au.dpps.as_ref().unwrap_or(dpps_global);
-    let dsh = parse_slice_header(&mut BitReader::new(&au.dep[0]), au.dep_idr, au.dep_idc, dsps, dpps)?;
-    let has_iv = |m: &Option<Vec<RefPicListModification>>| m.as_ref().map(|c| c.iter().any(|x| matches!(x, RefPicListModification::InterViewAdd { .. } | RefPicListModification::InterViewSub { .. }))).unwrap_or(false);
-    Ok(has_iv(&dsh.ref_pic_list_modifications.list0) || has_iv(&dsh.ref_pic_list_modifications.list1))
-}
-
 /// Decode one AU's base view at display POC `poc`, reading the immutable base
 /// DPB `brefs`.
 fn decode_base(au: &Au, poc: i32, bsps: &Sps, bpps_global: &Pps, brefs: &[ViewRef]) -> anyhow::Result<(Frame, Option<MotionField>)> {

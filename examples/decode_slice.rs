@@ -53,7 +53,7 @@ fn level_run_pairs(coeffs: &[i32]) -> Vec<(i64, i64)> {
 fn decode_luma8x8(e: &mut CabacEngine, slice_qp: i32, out: &mut Vec<Elem>) {
     let cat = ResidualCat::Luma8x8;
     let d = cat.desc();
-    let mut ctx = cat.coeff_contexts(slice_qp, false);
+    let mut ctx = cat.coeff_contexts(slice_qp, false, 0);
     let coeffs = decode_residual_block(e, &mut ctx, d.max_num_coeff, d.pos2ctx_map, d.pos2ctx_last, d.gt1_cap);
     for (idx, (lvl, run)) in level_run_pairs(&coeffs).into_iter().enumerate() {
         let name = if idx == 0 { "Luma8x8 DC sng" } else { "Luma8x8 sng" };

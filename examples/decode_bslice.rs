@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
                 let cabac_start = (r.position_bits() + 7) / 8;
                 let mut e = CabacEngine::new(&rbsp[cabac_start..]);
                 let mut ctx = InterContexts::new(idc, slice_qp);
-                let mut rctx = ResidualContexts::new(slice_qp, true);
+                let mut rctx = ResidualContexts::new(slice_qp, true, 0);
 
                 let mut skip_grid: Vec<bool> = Vec::new();
                 let mut mbtype_grid: Vec<i64> = Vec::new(); // 0 for skip/direct

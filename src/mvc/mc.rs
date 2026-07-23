@@ -32,40 +32,16 @@ impl Plane<'_> {
     fn raw(&self, x: i32, y: i32) -> i32 {
         self.data[y as usize * self.w + x as usize] as i32
     }
-    /// Un-rounded horizontal 6-tap (the `b1` intermediate, § 8.4.2.2.1).
+    /// Un-rounded horizontal 6-tap (the `b1` intermediate, § 8.4.2.2.1). Only
+    /// the tests use this now — production interpolation goes through
+    /// `luma_block`'s local closures / the portable-SIMD path.
+    #[cfg(test)]
     #[inline]
     fn h6(&self, x: i32, y: i32) -> i32 {
         self.at(x - 2, y) - 5 * self.at(x - 1, y) + 20 * self.at(x, y)
             + 20 * self.at(x + 1, y)
             - 5 * self.at(x + 2, y)
             + self.at(x + 3, y)
-    }
-    /// Un-rounded vertical 6-tap.
-    #[inline]
-    fn v6(&self, x: i32, y: i32) -> i32 {
-        self.at(x, y - 2) - 5 * self.at(x, y - 1) + 20 * self.at(x, y)
-            + 20 * self.at(x, y + 1)
-            - 5 * self.at(x, y + 2)
-            + self.at(x, y + 3)
-    }
-    /// Rounded half-pel horizontal (`b`).
-    #[inline]
-    fn half_h(&self, x: i32, y: i32) -> i32 {
-        clip1((self.h6(x, y) + 16) >> 5) as i32
-    }
-    /// Rounded half-pel vertical (`h`).
-    #[inline]
-    fn half_v(&self, x: i32, y: i32) -> i32 {
-        clip1((self.v6(x, y) + 16) >> 5) as i32
-    }
-    /// Centre half-pel (`j`): 6-tap of the un-rounded horizontal halves.
-    #[inline]
-    fn center(&self, x: i32, y: i32) -> i32 {
-        let j1 = self.h6(x, y - 2) - 5 * self.h6(x, y - 1) + 20 * self.h6(x, y)
-            + 20 * self.h6(x, y + 1)
-            - 5 * self.h6(x, y + 2)
-            + self.h6(x, y + 3);
-        clip1((j1 + 512) >> 10) as i32
     }
 }
 

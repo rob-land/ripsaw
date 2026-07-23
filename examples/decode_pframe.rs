@@ -24,12 +24,12 @@ use ripsaw::mvc::slice_header::parse_slice_header;
 use ripsaw::mvc::sps::{parse_seq_parameter_set_data, Sps};
 
 /// (bx4, by4, w4, h4, directional) partition layout per mb_type (4x4 units).
-fn partitions(mb_type: i64) -> Vec<(usize, usize, usize, usize, Option<Directional>)> {
+fn partitions(mb_type: i64) -> &'static [(usize, usize, usize, usize, Option<Directional>)] {
     match mb_type {
-        1 => vec![(0, 0, 4, 4, None)],                                              // P_16x16
-        2 => vec![(0, 0, 4, 2, Some(Directional::Above)), (0, 2, 4, 2, Some(Directional::Left))], // P_16x8
-        3 => vec![(0, 0, 2, 4, Some(Directional::Left)), (2, 0, 2, 4, Some(Directional::AboveRight))], // P_8x16
-        _ => vec![],
+        1 => &[(0, 0, 4, 4, None)],                                              // P_16x16
+        2 => &[(0, 0, 4, 2, Some(Directional::Above)), (0, 2, 4, 2, Some(Directional::Left))], // P_16x8
+        3 => &[(0, 0, 2, 4, Some(Directional::Left)), (2, 0, 2, 4, Some(Directional::AboveRight))], // P_8x16
+        _ => &[],
     }
 }
 
@@ -79,7 +79,7 @@ fn main() -> anyhow::Result<()> {
                 let cabac_start = (sr.position_bits() + 7) / 8;
                 let mut e = CabacEngine::new(&rbsp[cabac_start..]);
                 let mut ctx = InterContexts::new(idc, slice_qp);
-                let mut rctx = ResidualContexts::new(slice_qp, true);
+                let mut rctx = ResidualContexts::new(slice_qp, true, 0);
 
                 let mut y = vec![0u8; ysz];
                 let mut cb = vec![0u8; csz];

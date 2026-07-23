@@ -171,7 +171,7 @@ async fn main() -> Result<()> {
         // Execute the rips sequentially. The orchestrator in the GUI
         // does exactly this; we replicate the loop here so the
         // example doesn't need GTK.
-        for (q_i, item) in plan.iter().enumerate() {
+        for item in plan.iter() {
             let title_started = Instant::now();
             tokio::fs::create_dir_all(&item.output_dir).await?;
             let (tx, mut rx) = tokio::sync::mpsc::channel::<ExtractEvent>(64);

@@ -123,7 +123,7 @@ fn decode_one_slice(rbsp: &[u8], sps: &Sps, pps: &Pps, nal_ref_idc: u8, width: u
             let resid = if info.cbp & (1 << b) != 0 {
                 let cat = ResidualCat::Luma8x8;
                 let d = cat.desc();
-                let mut cctx = cat.coeff_contexts(slice_qp, false);
+                let mut cctx = cat.coeff_contexts(slice_qp, false, 0);
                 let coeffs = decode_residual_block(&mut e, &mut cctx, d.max_num_coeff, d.pos2ctx_map, d.pos2ctx_last, d.gt1_cap);
                 let mut scan = [0i32; 64];
                 scan.copy_from_slice(&coeffs[..64]);
