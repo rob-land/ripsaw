@@ -976,6 +976,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libmvc"
+version = "0.1.0"
+source = "git+https://github.com/rob-land/libmvc.git?tag=v0.1.0#9867e9f48d0b569071bfde80ded94d88efbe358d"
+dependencies = [
+ "anyhow",
+ "serde",
+ "thiserror",
+ "wide",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1363,6 +1374,7 @@ dependencies = [
  "glib-build-tools",
  "gtk4",
  "libadwaita",
+ "libmvc",
  "md-5",
  "once_cell",
  "quick-xml",

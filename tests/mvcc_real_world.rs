@@ -12,11 +12,11 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use ripsaw::mvc::ebml::EbmlReader;
-use ripsaw::mvc::mvcc::{find_mvcc_bytes, parse, MvcDecoderConfigurationRecord};
-use ripsaw::mvc::nal::{parse_nal_unit_header, NAL_SUBSET_SPS};
-use ripsaw::mvc::rbsp::extract_rbsp;
-use ripsaw::mvc::sps::parse_subset_sps_rbsp;
+use libmvc::ebml::EbmlReader;
+use libmvc::mvcc::{find_mvcc_bytes, parse, MvcDecoderConfigurationRecord};
+use libmvc::nal::{parse_nal_unit_header, NAL_SUBSET_SPS};
+use libmvc::rbsp::extract_rbsp;
+use libmvc::sps::parse_subset_sps_rbsp;
 
 fn sample_mkv() -> Option<PathBuf> {
     let path =

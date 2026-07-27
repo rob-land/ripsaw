@@ -10,7 +10,6 @@ pub mod settings;
 pub mod identify;
 pub mod rip;
 pub mod transcode;
-pub mod mvc;
 pub mod naming;
 
 pub const APP_ID: &str = "land.rob.ripsaw";

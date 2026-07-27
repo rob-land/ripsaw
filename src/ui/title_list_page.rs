@@ -141,8 +141,8 @@ impl TitleListPage {
                 .as_ref()
                 .and_then(|p| std::fs::File::open(p).ok())
                 .map(|f| {
-                    let mut r = crate::mvc::ebml::EbmlReader::new(f);
-                    matches!(crate::mvc::mvcc::find_mvcc_bytes(&mut r), Ok(Some(_)))
+                    let mut r = libmvc::ebml::EbmlReader::new(f);
+                    matches!(libmvc::mvcc::find_mvcc_bytes(&mut r), Ok(Some(_)))
                 })
                 .unwrap_or(false);
             if has_mvcc_bytes {

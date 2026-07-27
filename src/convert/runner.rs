@@ -117,7 +117,7 @@ enum MvcExtractor {
     /// stereo-mode 13/14 sources where the full MVC bitstream lives
     /// in the regular video track.
     Mkvextract,
-    /// `crate::mvc::mkv_extract::extract_to_annex_b` -- our own
+    /// `libmvc::mkv_extract::extract_to_annex_b` -- our own
     /// EBML walker for mvcC BlockAdditionMapping sources.
     Builtin,
 }
@@ -201,11 +201,11 @@ async fn run_mvc_pipeline(
             let stats = tokio::task::spawn_blocking(move || -> Result<_> {
                 let file = std::fs::File::open(&input)
                     .with_context(|| format!("opening {}", input.display()))?;
-                let mut reader = crate::mvc::ebml::EbmlReader::new(file);
+                let mut reader = libmvc::ebml::EbmlReader::new(file);
                 let out_file = std::fs::File::create(&out_path)
                     .with_context(|| format!("creating {}", out_path.display()))?;
                 let mut writer = std::io::BufWriter::new(out_file);
-                let stats = crate::mvc::mkv_extract::extract_to_annex_b(
+                let stats = libmvc::mkv_extract::extract_to_annex_b(
                     &mut reader,
                     &mut writer,
                 )?;
@@ -367,8 +367,8 @@ async fn decode_pipe_encode(
     // the packer emits NV12 directly so ffmpeg's `format=nv12` is a no-op — no
     // separate swscale colour-space pass. Software encoders take yuv420p.
     let pixfmt = match &encoder.pre_input_vf {
-        Some(vf) if vf.contains("nv12") => crate::mvc::clip::FsbsPixFmt::Nv12,
-        _ => crate::mvc::clip::FsbsPixFmt::Yuv420p,
+        Some(vf) if vf.contains("nv12") => libmvc::clip::FsbsPixFmt::Nv12,
+        _ => libmvc::clip::FsbsPixFmt::Yuv420p,
     };
     // One full-SBS frame per AU: 2×(per-view width) × height.
     let fsbs_size = format!("{}x{}", width * 2, height);
@@ -406,10 +406,10 @@ async fn decode_pipe_encode(
     // Decode on a blocking thread, writing composed FSBS frames into the pipe.
     // When the closure returns, `pipe_writer` drops → EOF → ffmpeg finalises.
     let h264 = h264_path.to_path_buf();
-    let decode = tokio::task::spawn_blocking(move || -> Result<crate::mvc::clip::ClipInfo> {
+    let decode = tokio::task::spawn_blocking(move || -> Result<libmvc::clip::ClipInfo> {
         let file = std::fs::File::open(&h264)
             .with_context(|| format!("opening {}", h264.display()))?;
-        crate::mvc::clip::decode_annex_b_to_fsbs_writer(std::io::BufReader::new(file), pipe_writer, pixfmt)
+        libmvc::clip::decode_annex_b_to_fsbs_writer(std::io::BufReader::new(file), pipe_writer, pixfmt)
     });
 
     // Await the decode. ffmpeg consumes the pipe concurrently at the OS level and

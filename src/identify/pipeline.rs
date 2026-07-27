@@ -23,8 +23,8 @@ use crate::identify::{
     thediscdb::TheDiscDbClient,
     DiscType, Identity,
 };
-use crate::mvc::ebml::EbmlReader;
-use crate::mvc::mvcc::scan_3d_info;
+use libmvc::ebml::EbmlReader;
+use libmvc::mvcc::scan_3d_info;
 use crate::rip::{
     iso_mount::MountedIso,
     makemkv::{scan, ScanSource},

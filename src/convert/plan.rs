@@ -92,8 +92,8 @@ impl ConversionPlan {
 /// but for now MakeMKV-produced MVC sources are the only thing this
 /// helper is used for).
 pub fn detect_stereo_source(path: &Path) -> Option<StereoSource> {
-    use crate::mvc::ebml::EbmlReader;
-    use crate::mvc::mvcc::scan_3d_info;
+    use libmvc::ebml::EbmlReader;
+    use libmvc::mvcc::scan_3d_info;
     let file = std::fs::File::open(path).ok()?;
     let mut reader = EbmlReader::new(file);
     let info = scan_3d_info(&mut reader).ok()?;
