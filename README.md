@@ -14,9 +14,22 @@ decided.
 
 ## Status
 
-**Design sketch.** The repository currently contains documentation and
-skeleton code. Nothing is functional yet. See [`docs/`](docs/) for the
-per-subsystem design.
+**Working.** Disc identification, MakeMKV-driven ripping, Jellyfin/Plex/Kodi
+naming, and the 3D MVC → SBS conversion pipeline are functional. The native 3D
+decode path is bit-exact against the JM reference decoder on real 3D Blu-ray
+content (both views) and is factored out as the standalone
+[`libmvc`](https://github.com/rob-land/libmvc) crate, which ripsaw depends on.
+See [`docs/`](docs/) for the per-subsystem design.
+
+### Development
+
+ripsaw pins `libmvc` to a released tag. To co-develop against a local `libmvc`
+checkout, add an uncommitted `.cargo/config.toml`:
+
+```toml
+[patch."https://github.com/rob-land/libmvc.git"]
+libmvc = { path = "../libmvc" }
+```
 
 ## What this is not
 
