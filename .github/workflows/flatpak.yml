@@ -1,0 +1,78 @@
+name: Flatpak build & publish
+
+# Builds the ripsaw Flatpak and publishes it to the personal Flatpak repo
+# (github.com/rob-land/flatpak-repo, served via GitHub Pages as an OSTree repo).
+# Install with:
+#   flatpak remote-add --if-not-exists ripsaw \
+#     https://rob-land.github.io/flatpak-repo/ripsaw.flatpakrepo
+#   flatpak install ripsaw land.rob.ripsaw
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: flatpak-publish
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
+      options: --privileged
+    steps:
+      - name: Checkout ripsaw
+        uses: actions/checkout@v4
+
+      - name: Build Flatpak into an OSTree repo
+        run: |
+          flatpak-builder --user --disable-rofiles-fuse \
+            --install-deps-from=flathub \
+            --repo=repo --force-clean \
+            builddir build-aux/flatpak/land.rob.ripsaw.json
+
+      - name: Clone the Flatpak repo (deploy key)
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.FLATPAK_REPO_DEPLOY_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes'
+          echo "GIT_SSH_COMMAND=$GIT_SSH_COMMAND" >> "$GITHUB_ENV"
+          git clone git@github.com:rob-land/flatpak-repo.git site
+
+      - name: Merge into the published OSTree repo
+        run: |
+          flatpak build-update-repo repo
+          if [ -d site/repo ]; then
+            ostree --repo=site/repo pull-local repo
+          else
+            cp -a repo site/repo
+          fi
+          flatpak build-update-repo --generate-static-deltas --prune site/repo
+          # .flatpakrepo descriptor + a landing page + disable Jekyll so the
+          # OSTree object dirs are served verbatim.
+          touch site/.nojekyll
+          cat > site/ripsaw.flatpakrepo <<'EOF'
+          [Flatpak Repo]
+          Title=Rob Land Flatpaks
+          Url=https://rob-land.github.io/flatpak-repo/repo/
+          Homepage=https://github.com/rob-land/ripsaw
+          Description=Personal Flatpak repository
+          NoGpgVerify=true
+          EOF
+
+      - name: Commit & push
+        run: |
+          cd site
+          git config user.name 'ripsaw-ci'
+          git config user.email 'ci@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No repo changes to publish."
+          else
+            git commit -m "Publish land.rob.ripsaw from ${GITHUB_SHA::12}"
+            git push origin HEAD:main
+          fi

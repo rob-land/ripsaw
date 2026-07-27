@@ -1,5 +1,5 @@
 {
-  "_comment": "Stub Flatpak manifest. MakeMKV is not bundled — invoked on the host via flatpak-spawn --host. See docs/architecture.md § Sandboxing & Flatpak.",
+  "_comment": "MakeMKV is not bundled — invoked on the host via flatpak-spawn --host. See docs/architecture.md § Sandboxing & Flatpak. cargo fetches crates (incl. the libmvc git dep) during the build, so the ripsaw module builds with --share=network (fine for a personal repo; Flathub would require vendored cargo-sources).",
 
   "id": "land.rob.ripsaw",
   "runtime": "org.gnome.Platform",
@@ -28,7 +28,8 @@
   ],
 
   "build-options": {
-    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm18/bin",
+    "build-args": ["--share=network"],
     "env": {
       "CARGO_HOME": "/run/build/ripsaw/cargo"
     }
@@ -53,7 +54,8 @@
       "sources": [
         {
           "type": "dir",
-          "path": "../.."
+          "path": "../..",
+          "skip": [".git", "build", "target", ".flatpak-builder", ".github"]
         }
       ]
     }
