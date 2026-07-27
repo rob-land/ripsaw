@@ -28,6 +28,8 @@ jobs:
 
       - name: Build Flatpak into an OSTree repo
         run: |
+          flatpak remote-add --if-not-exists --user \
+            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak-builder --user --disable-rofiles-fuse \
             --install-deps-from=flathub \
             --repo=repo --force-clean \
