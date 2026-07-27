@@ -59,17 +59,31 @@ Two parser gotchas, both real:
   `rsmvh-aBQ0` did). Use dash-free paths, or run with `cwd` set and
   relative filenames.
 
-**Decode round-trip — does NOT work on this host (open risk).** Muxing
-the raw `.265` to MKV (mkvmerge or `ffmpeg -c copy`) and decoding with
-`ffmpeg -view_ids 0/1/-1` recovers **only the base view** — 96 frames,
-with `SPS 1 does not exist`. ffmpeg is **8.1.1** (newer than the 7.1 that
-`docs/xreal.md` assumed "works"). So the layer-1 parameter sets aren't
-reaching the decoder. Likely causes: mkvmerge / `-c copy` doesn't
-preserve MV-HEVC layered signaling (the enhancement-layer SPS/PPS and the
-`oinf`/`lhvC` operating-point info), and/or ffmpeg's MV-HEVC decode path
-expects a specific container/track layout. **This was never actually
-verified before — `docs/xreal.md` only checked that the `-view_ids`
-decoder *option* exists, not that a real MV-HEVC file decodes.**
+**Decode round-trip — RESOLVED (2026-07-27, different host).** Re-run
+on the desktop with **ffmpeg 7.1.5** against a fresh 240-frame
+x265-multiview encode (LR_Pattern views decoded by libmvc):
+
+- **Raw `.265`, ffmpeg-muxed MP4, and ffmpeg-muxed MKV all decode both
+  views**: `-view_ids 0` → 240 left, `1` → 240 right, `-1` → 480
+  interleaved. No `SPS 1 does not exist`.
+- **The June failure was mkvmerge**: muxing the same `.265` with
+  `mkvmerge` and decoding with `-view_ids -1` yields only 240 frames
+  plus SPS errors — it drops the enhancement-layer signaling. Archive
+  rule: **mux MV-HEVC with ffmpeg (raw → MP4 → MKV works), never
+  mkvmerge.** (The 8.1.1-vs-7.1.5 ffmpeg delta on the other host is
+  unexcluded as a second factor, but mkvmerge alone reproduces the
+  failure here.)
+- **How views surface**: NOT as two streams. `-view_ids -1` produces
+  **one** video stream of alternating left/right frames with stereo3d
+  "frame alternate" side data. The playback graph is
+  `-view_ids -1` (input option) + `stereo3d=al:sbsl` filter → packed
+  full-SBS in a single decode (240 composed frames verified). A
+  dual-input `[0:v][1:v]hstack` with per-input `-view_ids 0`/`1` also
+  works at 2× decode cost.
+- **Detection gotcha**: ffprobe reports plain profile "Main" for the
+  multiview file — no "Multiview" string, no side data. The reliable
+  probe is a 1-frame decode with `-view_ids 1`: mono prints "View ID 1
+  not present in VPS", multiview is silent. (ripplay now does this.)
 
 ## Implications
 
@@ -118,13 +132,11 @@ decoder *option* exists, not that a real MV-HEVC file decodes.**
 
 ## Recommendation
 
-The encode is the easy, proven part; **do not build the MV-HEVC output
-branch until the decode/playback round-trip is verified on a real
-target.** Right now we can *produce* MV-HEVC but have not *played* it
-anywhere — and playback is the whole point. Next concrete step: get one
-end-to-end decode working (most promising: an Apple VideoToolbox target
-with correct `.mov` packaging, or chase the Linux/ffmpeg container
-signaling). Until then, FSBS H.264/HEVC (which plays everywhere today,
-and now HW-encoded by default) remains the shipping output;
-`docs/xreal.md`'s "archive MV-HEVC" plan carries an unproven-playback
-asterisk it didn't have before.
+~~Do not build the MV-HEVC output branch until the decode round-trip is
+verified.~~ **Verified 2026-07-27** (see PoC results above): encode +
+Linux ffmpeg decode of both views works end-to-end when ffmpeg does the
+muxing; mkvmerge is the one tool that breaks the layer signaling. The
+MV-HEVC output branch is unblocked. Implementation notes for when it's
+built: mux with ffmpeg only, and remember downstream detection needs
+the 1-frame `-view_ids 1` probe (ffprobe alone can't tell MV-HEVC from
+plain Main-profile HEVC).
