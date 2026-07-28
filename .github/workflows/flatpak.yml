@@ -1,80 +1,114 @@
-name: Flatpak build & publish
+name: Flatpak
 
-# Builds the ripsaw Flatpak and publishes it to the personal Flatpak repo
-# (github.com/rob-land/flatpak-repo, served via GitHub Pages as an OSTree repo).
-# Install with:
-#   flatpak remote-add --if-not-exists ripsaw \
-#     https://rob-land.github.io/flatpak-repo/ripsaw.flatpakrepo
-#   flatpak install ripsaw land.rob.ripsaw
+# Builds ripsaw for x86_64 and aarch64 (GitHub's free arm runners — no
+# qemu). On every push to main the per-arch OSTree repos and .flatpak
+# bundles are uploaded to the rolling `continuous` release; the shared
+# rob-land/flatpak-repo aggregator picks those up (hourly cron or manual
+# dispatch), merges every app, GPG-signs, and publishes the combined repo:
+#
+#   flatpak remote-add --user rob-land \
+#     https://rob-land.github.io/flatpak-repo/rob-land.flatpakrepo
+#   flatpak install --user rob-land land.rob.ripsaw
+#
+# No secrets required here — signing happens only in the aggregator.
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: flatpak-publish
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_ID: land.rob.ripsaw
+  MANIFEST: build-aux/flatpak/land.rob.ripsaw.json
+  RUNTIME_VERSION: "47"
 
 jobs:
-  build-and-publish:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
-      options: --privileged
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
-      - name: Checkout ripsaw
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Build Flatpak into an OSTree repo
+      - name: Install flatpak-builder
         run: |
-          flatpak remote-add --if-not-exists --user \
-            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak-builder --user --disable-rofiles-fuse \
-            --install-deps-from=flathub \
-            --repo=repo --force-clean \
-            builddir build-aux/flatpak/land.rob.ripsaw.json
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder elfutils appstream librsvg2-common
 
-      - name: Clone the Flatpak repo (deploy key)
+      - name: Add flathub remote
         run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.FLATPAK_REPO_DEPLOY_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          GSC='ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
-          export GIT_SSH_COMMAND="$GSC"
-          echo "GIT_SSH_COMMAND=$GSC" >> "$GITHUB_ENV"
-          git clone git@github.com:rob-land/flatpak-repo.git site
+          flatpak remote-add --user --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
 
-      - name: Merge into the published OSTree repo
-        run: |
-          flatpak build-update-repo repo
-          if [ -d site/repo ]; then
-            ostree --repo=site/repo pull-local repo
-          else
-            cp -a repo site/repo
-          fi
-          flatpak build-update-repo --generate-static-deltas --prune site/repo
-          # .flatpakrepo descriptor + a landing page + disable Jekyll so the
-          # OSTree object dirs are served verbatim.
-          touch site/.nojekyll
-          cat > site/ripsaw.flatpakrepo <<'EOF'
-          [Flatpak Repo]
-          Title=Rob Land Flatpaks
-          Url=https://rob-land.github.io/flatpak-repo/repo/
-          Homepage=https://github.com/rob-land/ripsaw
-          Description=Personal Flatpak repository
-          NoGpgVerify=true
-          EOF
+      - name: Cache flatpak-builder state
+        uses: actions/cache@v4
+        with:
+          path: .flatpak-builder
+          key: flatpak-builder-${{ matrix.arch }}-${{ hashFiles('build-aux/flatpak/*.json') }}
+          restore-keys: flatpak-builder-${{ matrix.arch }}-
 
-      - name: Commit & push
+      - name: Build
         run: |
-          cd site
-          git config user.name 'ripsaw-ci'
-          git config user.email 'ci@users.noreply.github.com'
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No repo changes to publish."
-          else
-            git commit -m "Publish land.rob.ripsaw from ${GITHUB_SHA::12}"
-            git push origin HEAD:main
-          fi
+          flatpak-builder --user --arch=${{ matrix.arch }} --force-clean \
+            --disable-rofiles-fuse --install-deps-from=flathub \
+            --repo=repo _flatpak "$MANIFEST"
+
+      - name: Bundle
+        run: |
+          flatpak build-bundle --arch=${{ matrix.arch }} repo \
+            "ripsaw-${{ matrix.arch }}.flatpak" "$APP_ID"
+
+      - name: Pack the OSTree repo for the aggregator
+        run: tar -cf "repo-${{ matrix.arch }}.tar" -C repo .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ripsaw-${{ matrix.arch }}.flatpak
+          path: ripsaw-${{ matrix.arch }}.flatpak
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repo-${{ matrix.arch }}
+          path: repo-${{ matrix.arch }}.tar
+
+  release:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Update the rolling continuous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create continuous --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "Continuous build" \
+            --notes "Rolling artifacts consumed by rob-land/flatpak-repo. Bundles are unsigned; prefer installing from the signed shared repo." \
+            --latest=false 2>/dev/null || true
+          gh release upload continuous --repo "$GITHUB_REPOSITORY" --clobber \
+            repo-x86_64.tar repo-aarch64.tar \
+            ripsaw-x86_64.flatpak ripsaw-aarch64.flatpak
+
+      - name: Nudge the aggregator (best-effort)
+        env:
+          GH_TOKEN: ${{ secrets.AGGREGATOR_DISPATCH_TOKEN }}
+        run: |
+          [ -z "$GH_TOKEN" ] && { echo "no dispatch token — aggregator cron will pick this up"; exit 0; }
+          gh workflow run aggregate.yml --repo rob-land/flatpak-repo || true
