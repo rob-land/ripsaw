@@ -363,13 +363,19 @@ fn format_size(bytes: u64) -> String {
 /// returns successfully with `mount: None` and `content_hash: None`; the
 /// caller can show partial results.
 pub async fn identify_iso(iso_path: PathBuf) -> Result<IdentificationResult> {
-    let source = ScanSource::Iso(iso_path.clone());
-
-    // Scan and mount in parallel — they're independent network/IO and
-    // typically take similar wall-time (a few seconds each).
-    let (scan_res, mount_res) = tokio::join!(scan(&source), MountedIso::mount(&iso_path));
-    let scan_data = scan_res.context("running makemkvcon scan")?;
-    let mount = mount_res.ok();
+    // makemkvcon's built-in `iso:` UDF reader chokes on some images — notably
+    // the UDF 2.x that many 3D Blu-rays ship — that the kernel loop-mounts
+    // fine. So mount the ISO first (unprivileged, via udisksctl/UDisks2) and
+    // point makemkvcon at the mounted directory (`file:`), which is robust and
+    // is the same mount content-hashing needs. Fall back to `iso:` only when
+    // mounting is unavailable (no udisks2 / headless). The mount is tracked by
+    // the caller and stays alive through the later rip, which reuses `source`.
+    let mount = MountedIso::mount(&iso_path).await.ok();
+    let source = match &mount {
+        Some(m) => ScanSource::Folder(m.mount_point.clone()),
+        None => ScanSource::Iso(iso_path.clone()),
+    };
+    let scan_data = scan(&source).await.context("running makemkvcon scan")?;
 
     let (disc_type, content_hash_value, identities, lookup_status) = match &mount {
         Some(m) => {

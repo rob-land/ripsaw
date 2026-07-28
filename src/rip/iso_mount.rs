@@ -83,15 +83,39 @@ impl MountedIso {
 }
 
 static LOOP_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(/dev/loop\d+)").expect("static regex"));
-static MOUNT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?:at|on)\s+[`']?(/[^`'\s]+)").expect("static regex"));
 
 pub fn parse_loop_device(text: &str) -> Option<PathBuf> {
     LOOP_RE.captures(text).map(|c| PathBuf::from(&c[1]))
 }
 
+/// Extract the mount point from `udisksctl mount` output. Mount points can
+/// contain spaces — udisks derives the directory name from the volume label
+/// (e.g. `/run/media/rob/37. Fantastic Four First Steps 3D (2025)1`) — so we
+/// must NOT stop at the first whitespace. udisksctl prints one of:
+///   `Mounted /dev/loop3 at /run/media/rob/My Disc`             (success)
+///   ``... already mounted at `/run/media/rob/My Disc'.``        (already-mounted)
 pub fn parse_mount_point(text: &str) -> Option<PathBuf> {
-    MOUNT_RE.captures(text).map(|c| PathBuf::from(c[1].trim_end_matches(['.', '`', '\''])))
+    for line in text.lines() {
+        // Backtick-quoted form (the AlreadyMounted error): take everything
+        // between the backtick and the closing single quote.
+        if let Some(i) = line.find("mounted at `") {
+            let rest = &line[i + "mounted at `".len()..];
+            if let Some(end) = rest.find('\'') {
+                let p = &rest[..end];
+                if p.starts_with('/') {
+                    return Some(PathBuf::from(p));
+                }
+            }
+        }
+        // Success form: the mount point is the rest of the line after ` at /`.
+        if let Some(i) = line.find(" at /") {
+            let p = line[i + 4..].trim_end().trim_end_matches('.');
+            if p.starts_with('/') {
+                return Some(PathBuf::from(p));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -108,6 +132,22 @@ mod tests {
     fn parses_mount_point_from_success_output() {
         let out = "Mounted /dev/loop3 at /run/media/rob/MY_DISC";
         assert_eq!(parse_mount_point(out), Some(PathBuf::from("/run/media/rob/MY_DISC")));
+    }
+
+    #[test]
+    fn parses_mount_point_with_spaces() {
+        // udisks names the mount dir from the volume label, which often has
+        // spaces — the parser must not truncate at the first one.
+        let success = "Mounted /dev/loop2 at /run/media/rob/37. Fantastic Four First Steps 3D (2025)1";
+        assert_eq!(
+            parse_mount_point(success),
+            Some(PathBuf::from("/run/media/rob/37. Fantastic Four First Steps 3D (2025)1"))
+        );
+        let already = "Error mounting /dev/loop2: GDBus.Error:org.freedesktop.UDisks2.Error.AlreadyMounted: Device /dev/loop2 is already mounted at `/run/media/rob/37. Fantastic Four First Steps 3D (2025)1'.";
+        assert_eq!(
+            parse_mount_point(already),
+            Some(PathBuf::from("/run/media/rob/37. Fantastic Four First Steps 3D (2025)1"))
+        );
     }
 
     #[test]
