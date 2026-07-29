@@ -78,7 +78,7 @@ pub struct FfprobeChapter {
 /// Run `ffprobe -of json -show_format -show_streams -show_chapters PATH`
 /// and parse the result.
 pub async fn probe(path: &Path) -> Result<FfprobeReport> {
-    let output = Command::new("ffprobe")
+    let output = crate::hostcmd::host_command("ffprobe")
         .args([
             "-v",
             "error",

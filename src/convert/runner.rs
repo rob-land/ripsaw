@@ -60,7 +60,7 @@ async fn run_stereo3d_filter(
         format!("stereo3d={}:{}", input_layout, plan.format.ffmpeg_stereo3d_out());
     let encoder = resolve_encoder_args(plan, event_tx.as_ref());
 
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = crate::hostcmd::host_command("ffmpeg");
     cmd.arg("-hide_banner").arg("-y");
     // VAAPI's `-vaapi_device` has to come before `-i`.
     for a in &encoder.init {
@@ -175,7 +175,7 @@ async fn run_mvc_pipeline(
         MvcExtractor::Mkvextract => {
             log(&event_tx, "Extracting H.264 track from MKV (mkvextract)...");
             let mkvextract_arg = format!("0:{}", h264_path.display());
-            let status = Command::new("mkvextract")
+            let status = crate::hostcmd::host_command("mkvextract")
                 .arg(&plan.input)
                 .arg("tracks")
                 .arg(&mkvextract_arg)
@@ -291,7 +291,7 @@ async fn run_mvc_pipeline(
         None => compose,
     };
 
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = crate::hostcmd::host_command("ffmpeg");
     cmd.arg("-y").arg("-hide_banner");
     for a in &encoder.init {
         cmd.arg(a);
@@ -468,7 +468,7 @@ async fn decode_pipe_encode(
     // One full-SBS frame per AU: 2×(per-view width) × height.
     let fsbs_size = format!("{}x{}", width * 2, height);
 
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = crate::hostcmd::host_command("ffmpeg");
     cmd.arg("-y").arg("-hide_banner");
     for a in &encoder.init {
         cmd.arg(a);

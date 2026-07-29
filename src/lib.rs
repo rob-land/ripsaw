@@ -1,3 +1,4 @@
+pub mod hostcmd;
 pub mod application;
 pub mod convert;
 pub mod integrations;

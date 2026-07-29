@@ -34,7 +34,7 @@ pub async fn probe() -> ProbeOutcome {
     // banner of any invocation. The cheapest probe is `makemkvcon -r info`
     // with no source — it errors quickly but prints the MakeMKV version
     // in its first MSG record.
-    let output = match Command::new("makemkvcon").arg("-r").arg("info").output().await {
+    let output = match crate::hostcmd::host_command("makemkvcon").arg("-r").arg("info").output().await {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ProbeOutcome::Missing,
         Err(_) => return ProbeOutcome::Missing,
@@ -121,7 +121,7 @@ impl ScanSource {
 /// whole output in memory first.
 pub async fn scan(source: &ScanSource) -> Result<MakemkvScan> {
     let arg = source.as_argument();
-    let mut child = Command::new("makemkvcon")
+    let mut child = crate::hostcmd::host_command("makemkvcon")
         .arg("-r")
         .arg("--noscan")
         .arg("--messages=-stdout")
@@ -270,7 +270,7 @@ pub async fn extract_title(
     let (_profile_dir, profile_path) = write_keep_mvc_profile()?;
 
     let arg = source.as_argument();
-    let mut child = Command::new("makemkvcon")
+    let mut child = crate::hostcmd::host_command("makemkvcon")
         .arg("-r")
         .arg("--noscan")
         .arg(format!("--profile={}", profile_path.display()))

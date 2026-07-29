@@ -67,7 +67,7 @@ async fn apply_chapter_titles(path: &Path, titles: &[String]) -> Result<()> {
     //    "destination" syntax (mode 2) writes the XML to a file --
     //    there is no stdout mode in current mkvextract.
     let chapters_xml = path.with_extension("chapters.xml.tmp");
-    let extracted = Command::new("mkvextract")
+    let extracted = crate::hostcmd::host_command("mkvextract")
         .arg(path)
         .arg("chapters")
         .arg(&chapters_xml)
@@ -109,7 +109,7 @@ async fn apply_chapter_titles(path: &Path, titles: &[String]) -> Result<()> {
         .await
         .context("writing spliced chapters.xml")?;
 
-    let status = Command::new("mkvpropedit")
+    let status = crate::hostcmd::host_command("mkvpropedit")
         .arg(path)
         .arg("-c")
         .arg(&chapters_xml)
@@ -127,7 +127,7 @@ async fn apply_chapter_titles(path: &Path, titles: &[String]) -> Result<()> {
 }
 
 async fn apply_segment_title(path: &Path, title: &str) -> Result<()> {
-    let status = Command::new("mkvpropedit")
+    let status = crate::hostcmd::host_command("mkvpropedit")
         .arg(path)
         .arg("--edit")
         .arg("info")

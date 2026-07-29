@@ -183,7 +183,7 @@ impl HwSupport {
 /// path should treat as the safe default).
 pub fn probe_hw_support() -> HwSupport {
     let mut support = HwSupport::default();
-    if let Ok(out) = std::process::Command::new("ffmpeg")
+    if let Ok(out) = crate::hostcmd::host_command_std("ffmpeg")
         .arg("-hide_banner")
         .arg("-encoders")
         .output()
@@ -381,7 +381,7 @@ pub fn encoder_smoke_test(
         return true;
     }
     let args = encoder_args(backend, codec, 23, vaapi_device);
-    let mut cmd = std::process::Command::new("ffmpeg");
+    let mut cmd = crate::hostcmd::host_command_std("ffmpeg");
     cmd.arg("-hide_banner").arg("-loglevel").arg("error").arg("-nostdin");
     for a in &args.init {
         cmd.arg(a);

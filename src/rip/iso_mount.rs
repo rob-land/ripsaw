@@ -20,7 +20,7 @@ impl MountedIso {
     /// Loop-set-up and mount the ISO. The returned guard does NOT
     /// auto-unmount on drop — call `unmount` explicitly when finished.
     pub async fn mount(iso: &Path) -> Result<Self> {
-        let setup_out = Command::new("udisksctl")
+        let setup_out = crate::hostcmd::host_command("udisksctl")
             .args(["loop-setup", "-r", "-f"])
             .arg(iso)
             .output()
@@ -43,7 +43,7 @@ impl MountedIso {
         // udisks2 sometimes auto-mounts the loop device. `mount` then either
         // succeeds with the new mount point, or fails saying "already mounted
         // at <path>". We grep the mount point out of either case.
-        let mount_out = Command::new("udisksctl")
+        let mount_out = crate::hostcmd::host_command("udisksctl")
             .args(["mount", "-b"])
             .arg(&loop_device)
             .output()
@@ -68,12 +68,12 @@ impl MountedIso {
     /// Best-effort unmount. Tolerates "not mounted" / "no such device" since
     /// udisks2's bookkeeping may already have cleaned up.
     pub async fn unmount(&self) -> Result<()> {
-        let _ = Command::new("udisksctl")
+        let _ = crate::hostcmd::host_command("udisksctl")
             .args(["unmount", "-b"])
             .arg(&self.loop_device)
             .output()
             .await;
-        let _ = Command::new("udisksctl")
+        let _ = crate::hostcmd::host_command("udisksctl")
             .args(["loop-delete", "-b"])
             .arg(&self.loop_device)
             .output()

@@ -21,6 +21,7 @@
     "--filesystem=xdg-videos",
     "--filesystem=xdg-music",
     "--filesystem=xdg-pictures",
+    "--filesystem=/run/media:ro",
     "--talk-name=org.freedesktop.Flatpak",
     "--talk-name=org.freedesktop.secrets",
     "--talk-name=org.freedesktop.UDisks2.*",
