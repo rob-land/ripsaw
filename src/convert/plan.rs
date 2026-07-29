@@ -74,15 +74,31 @@ impl PackedInputLayout {
 
 impl ConversionPlan {
     /// Generate a default output path next to the input. For
-    /// `/in/foo.mkv` and `FullSbs` returns `/in/foo.fsbs.mkv`.
+    /// `/in/foo.mkv` and `FullSbs` returns `/in/foo.3d.fsbs.mkv`.
+    ///
+    /// The `3d` token satisfies Kodi's filename flagging (its default
+    /// regexes require a separated `3d` token before the packing token)
+    /// and marks the file for humans/other tools; the packing slug is a
+    /// Jellyfin-native token (see [`OutputFormat::slug`]). When the stem
+    /// already carries a separated `3d`/`3D` token (e.g.
+    /// `Avatar (2009) - 3D`), it isn't duplicated.
     pub fn default_output_path(input: &Path, format: OutputFormat) -> PathBuf {
         let stem = input
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "output".to_string());
         let parent = input.parent().unwrap_or_else(|| Path::new("."));
-        parent.join(format!("{stem}.{}.mkv", format.slug()))
+        let three_d = if has_3d_token(&stem) { "" } else { "3d." };
+        parent.join(format!("{stem}.{three_d}{}.mkv", format.slug()))
     }
+}
+
+/// Whether `stem` already contains a separated `3d` token (Kodi-style
+/// delimiters: space, dot, dash, underscore, brackets, parens).
+fn has_3d_token(stem: &str) -> bool {
+    let low = stem.to_ascii_lowercase();
+    let is_sep = |c: char| " ._-[]()".contains(c);
+    low.split(is_sep).any(|tok| tok == "3d")
 }
 
 /// Detect the StereoSource flavour of an MKV at `path`. Returns
@@ -112,7 +128,8 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn default_output_path_adds_format_slug_before_extension() {
+    fn default_output_path_keeps_existing_3d_token() {
+        // Stem already carries "- 3D": don't duplicate the token.
         let p = ConversionPlan::default_output_path(
             Path::new("/lib/Movies/Avatar (2009)/Avatar (2009) - 3D.mkv"),
             OutputFormat::FullSbs,
@@ -124,11 +141,31 @@ mod tests {
     }
 
     #[test]
-    fn default_output_path_for_top_level_input() {
+    fn default_output_path_adds_3d_token_and_slug() {
         let p = ConversionPlan::default_output_path(
             Path::new("/x.mkv"),
             OutputFormat::HalfSbs,
         );
-        assert_eq!(p, Path::new("/x.hsbs.mkv"));
+        assert_eq!(p, Path::new("/x.3d.hsbs.mkv"));
+    }
+
+    #[test]
+    fn default_output_path_uses_jellyfin_tab_tokens() {
+        let p = ConversionPlan::default_output_path(
+            Path::new("/x.mkv"),
+            OutputFormat::HalfTab,
+        );
+        // htab (not the old hou): a Jellyfin Format3DParser token.
+        assert_eq!(p, Path::new("/x.3d.htab.mkv"));
+    }
+
+    #[test]
+    fn stray_3d_substrings_do_not_suppress_the_token() {
+        // "3Delight" is not a separated 3d token.
+        let p = ConversionPlan::default_output_path(
+            Path::new("/lib/3Delight.mkv"),
+            OutputFormat::FullSbs,
+        );
+        assert_eq!(p, Path::new("/lib/3Delight.3d.fsbs.mkv"));
     }
 }

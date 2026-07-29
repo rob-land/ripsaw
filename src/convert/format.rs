@@ -28,12 +28,19 @@ impl OutputFormat {
         }
     }
 
+    /// Filename token identifying this packing. These are chosen to be
+    /// Jellyfin `Format3DParser` standalone tokens (`fsbs`/`hsbs`/
+    /// `ftab`/`htab` map to the matching `Video3DFormat`), so a Ripsaw
+    /// output dropped into a Jellyfin library is tagged 3D with the
+    /// right packing automatically. Kodi is covered by the Matroska
+    /// `StereoMode` tag we also write (container info beats filename
+    /// in Kodi's detection order).
     pub fn slug(self) -> &'static str {
         match self {
             OutputFormat::FullSbs => "fsbs",
             OutputFormat::HalfSbs => "hsbs",
-            OutputFormat::FullTab => "fou",
-            OutputFormat::HalfTab => "hou",
+            OutputFormat::FullTab => "ftab",
+            OutputFormat::HalfTab => "htab",
             OutputFormat::FrameSequential => "fs",
         }
     }
