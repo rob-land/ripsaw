@@ -977,11 +977,10 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libmvc"
-version = "0.1.0"
-source = "git+https://github.com/rob-land/libmvc.git?tag=v0.1.0#9867e9f48d0b569071bfde80ded94d88efbe358d"
+version = "0.3.0"
+source = "git+https://github.com/rob-land/libmvc.git?tag=v0.3.0#e0b32a33602f37c53a99599f36134573ec45cdd3"
 dependencies = [
  "anyhow",
- "serde",
  "thiserror",
  "wide",
 ]

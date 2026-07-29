@@ -230,7 +230,10 @@ async fn run_mvc_pipeline(
     // needs no tens-of-GB intermediate YUV on disk. If libmvc can't handle the
     // stream (an unsupported feature, or a panic), fall back to the JM reference
     // decoder, which writes per-view YUV files that ffmpeg then composes.
-    match decode_pipe_encode(plan, &event_tx, &h264_path, width, height, &frame_rate).await? {
+    let video: Box<dyn std::io::Read + Send> = Box::new(std::io::BufReader::new(
+        std::fs::File::open(&h264_path).with_context(|| format!("opening {}", h264_path.display()))?,
+    ));
+    match decode_pipe_encode(plan, &event_tx, video, &plan.input, width, height, &frame_rate).await? {
         PipeOutcome::Success => return Ok(plan.output.clone()),
         PipeOutcome::DecodeFailed(e) => {
             log(
@@ -335,6 +338,41 @@ enum PipeOutcome {
     DecodeFailed(anyhow::Error),
 }
 
+/// Convert a Blu-ray 3D SSIF straight to packed-stereo output, with **no
+/// makemkvcon and no intermediate MKV**. libmvc's [`libmvc::ssif::SsifReader`]
+/// de-interleaves the stereoscopic transport stream and decodes it into
+/// full-side-by-side frames (natively, bit-exact vs JM), which stream into
+/// ffmpeg for the packed-stereo encode; audio and subtitles are muxed from
+/// `av_source` — the title's `.m2ts`. `plan` supplies the output path, layout,
+/// codec and HW backend. Only works for unencrypted discs (no AACS).
+pub async fn convert_bd_ssif(
+    ssif: &Path,
+    av_source: &Path,
+    plan: &ConversionPlan,
+    event_tx: Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
+) -> Result<PathBuf> {
+    ensure_parent_dir(&plan.output).await?;
+    // Per-view geometry + frame rate from the base-view m2ts (the widest video
+    // stream — the m2ts can also surface the MVC substream with no dimensions).
+    let report = ffprobe::probe(av_source).await?;
+    let vstream = report
+        .video_streams()
+        .max_by_key(|v| v.width.unwrap_or(0))
+        .ok_or_else(|| anyhow!("no video stream in {}", av_source.display()))?;
+    let width = vstream.width.unwrap_or(1920);
+    let height = vstream.height.unwrap_or(1080);
+    let frame_rate = vstream.r_frame_rate.clone().unwrap_or_else(|| "24000/1001".to_string());
+
+    log(&event_tx, "Decoding the Blu-ray SSIF natively (libmvc) — no makemkvcon, no intermediate…");
+    let video: Box<dyn std::io::Read + Send> = Box::new(
+        libmvc::ssif::SsifReader::open(ssif).with_context(|| format!("opening SSIF {}", ssif.display()))?,
+    );
+    match decode_pipe_encode(plan, &event_tx, video, av_source, width, height, &frame_rate).await? {
+        PipeOutcome::Success => Ok(plan.output.clone()),
+        PipeOutcome::DecodeFailed(e) => Err(e.context("decoding the Blu-ray SSIF")),
+    }
+}
+
 /// Decode the extracted MVC stream with libmvc and stream composed full-SBS
 /// frames straight into ffmpeg over a pipe — no intermediate YUV on disk. The
 /// decoder (blocking, CPU-bound) and ffmpeg run concurrently: the decoder writes
@@ -345,7 +383,13 @@ enum PipeOutcome {
 async fn decode_pipe_encode(
     plan: &ConversionPlan,
     event_tx: &Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
-    h264_path: &Path,
+    // The FSBS video source: a reader that libmvc decodes into full-side-by-side
+    // frames — an Annex B track file for the MKV path, or an `SsifReader` reading
+    // a Blu-ray SSIF directly.
+    video: Box<dyn std::io::Read + Send>,
+    // What ffmpeg reads audio + subtitles from (input #1): the source MKV, or the
+    // title's `.m2ts` for the SSIF path.
+    av_source: &Path,
     width: u32,
     height: u32,
     frame_rate: &str,
@@ -383,7 +427,7 @@ async fn decode_pipe_encode(
         .arg("-video_size").arg(&fsbs_size)
         .arg("-framerate").arg(frame_rate)
         .arg("-i").arg("pipe:0")
-        .arg("-i").arg(&plan.input)
+        .arg("-i").arg(av_source)
         .arg("-filter_complex").arg(&filter_complex)
         .arg("-map").arg("[v]")
         .arg("-map").arg("1:a?")
@@ -405,11 +449,8 @@ async fn decode_pipe_encode(
 
     // Decode on a blocking thread, writing composed FSBS frames into the pipe.
     // When the closure returns, `pipe_writer` drops → EOF → ffmpeg finalises.
-    let h264 = h264_path.to_path_buf();
     let decode = tokio::task::spawn_blocking(move || -> Result<libmvc::clip::ClipInfo> {
-        let file = std::fs::File::open(&h264)
-            .with_context(|| format!("opening {}", h264.display()))?;
-        libmvc::clip::decode_annex_b_to_fsbs_writer(std::io::BufReader::new(file), pipe_writer, pixfmt)
+        libmvc::clip::decode_annex_b_to_fsbs_writer(video, pipe_writer, pixfmt)
     });
 
     // Await the decode. ffmpeg consumes the pipe concurrently at the OS level and
