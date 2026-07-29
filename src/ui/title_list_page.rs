@@ -1644,7 +1644,10 @@ impl TitleListPage {
             &role_overrides,
             &format_by_index,
         );
-        let queue: Vec<RipQueueItem> = plan.into_iter().map(RipQueueItem::from).collect();
+        let mut queue: Vec<RipQueueItem> = plan.into_iter().map(RipQueueItem::from).collect();
+        // For an unencrypted 3D Blu-ray, let the orchestrator decode the feature
+        // straight off the disc (SSIF) instead of a makemkvcon rip + convert.
+        attach_ssif_feature(&mut queue, &source, &identification_for_plan);
 
         let progress = RipProgressPage::default();
         progress.set_queue(&queue);
@@ -1665,6 +1668,41 @@ impl TitleListPage {
         }
 
         crate::rip::orchestrator::run_rip_queue(source, queue, progress.downgrade());
+    }
+}
+
+/// For an unencrypted 3D-Blu-ray `Folder` source, attach the feature's SSIF
+/// clips to the queue item whose title IS the feature — matched by duration, so
+/// it can't pick the wrong title. The orchestrator then decodes that item's SSIF
+/// directly (no makemkvcon rip, no intermediate MKV). No-op for anything else
+/// (physical/encrypted discs, non-3D, no matching title) → the makemkvcon path.
+fn attach_ssif_feature(
+    queue: &mut [RipQueueItem],
+    source: &crate::rip::makemkv::ScanSource,
+    ident: &IdentificationResult,
+) {
+    use crate::rip::bd_playlist::{find_feature_3d, is_encrypted};
+    use crate::rip::makemkv::ScanSource;
+
+    let ScanSource::Folder(mount) = source else { return };
+    if is_encrypted(mount) {
+        return;
+    }
+    let Some(feature) = find_feature_3d(mount) else { return };
+    let clips = feature.clip_paths(mount);
+    let feat_secs = feature.duration_seconds();
+    for item in queue.iter_mut() {
+        if item.conversion_format.is_none() {
+            continue;
+        }
+        let Some(t) = ident.scan.titles.iter().find(|t| t.index == item.title_index) else { continue };
+        // The makemkvcon title and the .mpls feature are the same movie, so
+        // their runtimes match closely; require within ~5 % (min 3 s).
+        let tol = (feat_secs / 20).max(3);
+        if t.has_mvc_stream() && feat_secs.abs_diff(t.duration_seconds.unwrap_or(0)) <= tol {
+            item.ssif_clips = Some(clips.clone());
+            break;
+        }
     }
 }
 

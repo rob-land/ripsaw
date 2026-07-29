@@ -22,6 +22,10 @@ pub struct RipQueueItem {
     pub conversion_format: Option<crate::convert::format::OutputFormat>,
     pub conversion_codec: crate::convert::hw::EncodeCodec,
     pub conversion_hw_backend: crate::convert::hw::HwBackend,
+    /// When set (an unencrypted 3D-BD feature, attached by the title list), the
+    /// orchestrator decodes these SSIF clips directly instead of ripping with
+    /// makemkvcon — disc → full-SBS output, no intermediate MKV.
+    pub ssif_clips: Option<Vec<(PathBuf, PathBuf)>>,
 }
 
 impl From<PlannedTitle> for RipQueueItem {
@@ -37,6 +41,7 @@ impl From<PlannedTitle> for RipQueueItem {
             conversion_format: p.conversion_format,
             conversion_codec: p.conversion_codec,
             conversion_hw_backend: p.conversion_hw_backend,
+            ssif_clips: None, // attached later by the title list for a 3D-BD feature
         }
     }
 }

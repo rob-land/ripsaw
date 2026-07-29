@@ -89,6 +89,12 @@ pub fn parse_mpls(data: &[u8]) -> Option<Vec<PlayItem>> {
     Some(items)
 }
 
+/// True if the mounted disc looks AACS-encrypted (an AACS directory present).
+/// The native SSIF path only works on decrypted / unencrypted discs.
+pub fn is_encrypted(mount: &Path) -> bool {
+    mount.join("AACS").is_dir() || mount.join("BDMV/AACS").is_dir()
+}
+
 /// Scan a mounted Blu-ray's playlists and return the 3D feature: the longest
 /// playlist all of whose clips have an SSIF and a base m2ts on disk. `None` if
 /// the disc has no 3D playlist (not a 3D BD, or a layout we don't recognise).

@@ -55,6 +55,43 @@ pub fn run_rip_queue(
                 continue;
             }
 
+            // SSIF fast path: an unencrypted 3D-Blu-ray feature (clips attached by
+            // the title list) decodes straight off the disc into the packed-stereo
+            // output — no makemkvcon rip, no intermediate MKV.
+            if let (Some(clips), Some(format)) = (&item.ssif_clips, item.conversion_format) {
+                let would_be_mkv = item
+                    .final_path
+                    .clone()
+                    .unwrap_or_else(|| item.output_dir.join(&item.expected_output_filename));
+                let output =
+                    crate::convert::plan::ConversionPlan::default_output_path(&would_be_mkv, format);
+                let plan = crate::convert::plan::ConversionPlan {
+                    input: PathBuf::new(),
+                    output: output.clone(),
+                    format,
+                    source: crate::convert::plan::StereoSource::MvcWithBlockAdditions, // unused
+                    codec: item.conversion_codec,
+                    hw_backend: item.conversion_hw_backend,
+                };
+                let _ = rip_tx
+                    .send(RipMessage::Event(ExtractEvent::Message(
+                        crate::rip::makemkv_parse::MsgRecord {
+                            code: 0,
+                            priority: 0,
+                            text: format!(
+                                "Decoding 3D feature from disc (SSIF, no rip) → {}",
+                                output.display()
+                            ),
+                        },
+                    )))
+                    .await;
+                let result = crate::convert::runner::convert_bd_ssif(clips, &plan, None)
+                    .await
+                    .map(|_| output);
+                let _ = rip_tx.send(RipMessage::Finished(index_in_queue, result)).await;
+                continue;
+            }
+
             let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ExtractEvent>(64);
 
             let extract_handle = {

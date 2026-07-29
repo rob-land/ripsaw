@@ -23,7 +23,7 @@ use ripsaw::convert::hw::{EncodeCodec, HwBackend};
 use ripsaw::convert::plan::{detect_stereo_source, ConversionPlan, StereoSource};
 use ripsaw::convert::runner::{convert_bd_ssif, run_conversion, ConversionEvent};
 use ripsaw::identify::pipeline::identify_iso;
-use ripsaw::rip::bd_playlist::find_feature_3d;
+use ripsaw::rip::bd_playlist::{find_feature_3d, is_encrypted};
 use ripsaw::rip::iso_mount::MountedIso;
 use ripsaw::rip::makemkv::{extract_title, ExtractEvent};
 use tokio::sync::mpsc;
@@ -170,12 +170,6 @@ async fn main() -> Result<()> {
 
     eprintln!("Done → {}", output.display());
     Ok(())
-}
-
-/// True if the mounted disc looks AACS-encrypted (an AACS directory present).
-/// The native SSIF path only works on decrypted / unencrypted discs.
-fn is_encrypted(mount: &Path) -> bool {
-    mount.join("AACS").is_dir() || mount.join("BDMV/AACS").is_dir()
 }
 
 fn spawn_convert_printer(mut rx: mpsc::Receiver<ConversionEvent>) -> tokio::task::JoinHandle<()> {
