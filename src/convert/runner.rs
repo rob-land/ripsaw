@@ -338,36 +338,87 @@ enum PipeOutcome {
     DecodeFailed(anyhow::Error),
 }
 
-/// Convert a Blu-ray 3D SSIF straight to packed-stereo output, with **no
-/// makemkvcon and no intermediate MKV**. libmvc's [`libmvc::ssif::SsifReader`]
-/// de-interleaves the stereoscopic transport stream and decodes it into
-/// full-side-by-side frames (natively, bit-exact vs JM), which stream into
-/// ffmpeg for the packed-stereo encode; audio and subtitles are muxed from
-/// `av_source` — the title's `.m2ts`. `plan` supplies the output path, layout,
-/// codec and HW backend. Only works for unencrypted discs (no AACS).
+/// Reads a sequence of SSIF files as one continuous Annex B MVC stream — each
+/// de-interleaved by libmvc's `SsifReader`, concatenated in play order for a
+/// multi-clip feature. SSIFs are opened lazily (one at a time) to keep memory
+/// bounded; each clip begins with its own parameter sets + IDR, so the join is
+/// clean for the decoder.
+struct SeqSsifReader {
+    remaining: std::vec::IntoIter<PathBuf>,
+    cur: Option<libmvc::ssif::SsifReader<std::io::BufReader<std::fs::File>>>,
+}
+
+impl SeqSsifReader {
+    fn open(paths: Vec<PathBuf>) -> std::io::Result<Self> {
+        let mut remaining = paths.into_iter();
+        let cur = remaining.next().map(libmvc::ssif::SsifReader::open).transpose()?;
+        Ok(SeqSsifReader { remaining, cur })
+    }
+}
+
+impl std::io::Read for SeqSsifReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match self.cur.as_mut() {
+                None => return Ok(0),
+                Some(r) => {
+                    let n = r.read(buf)?;
+                    if n > 0 {
+                        return Ok(n);
+                    }
+                    // Current clip exhausted — advance to the next SSIF.
+                    self.cur = self.remaining.next().map(libmvc::ssif::SsifReader::open).transpose()?;
+                }
+            }
+        }
+    }
+}
+
+/// Convert a Blu-ray 3D feature straight to packed-stereo output, with **no
+/// makemkvcon and no intermediate MKV**. `clips` is the feature's ordered
+/// `(ssif, m2ts)` pairs (from [`crate::rip::bd_playlist`]). libmvc's
+/// [`libmvc::ssif::SsifReader`] de-interleaves each SSIF and the clips are
+/// decoded as one continuous stream into full-side-by-side frames (bit-exact vs
+/// JM), streamed into ffmpeg; audio and subtitles are muxed from the clips'
+/// base `.m2ts` (concatenated via the `concat:` protocol for multi-clip
+/// features). `plan` supplies the output path, layout, codec and HW backend.
+/// Only works for unencrypted discs (no AACS).
 pub async fn convert_bd_ssif(
-    ssif: &Path,
-    av_source: &Path,
+    clips: &[(PathBuf, PathBuf)],
     plan: &ConversionPlan,
     event_tx: Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
 ) -> Result<PathBuf> {
+    let (_, first_m2ts) = clips.first().ok_or_else(|| anyhow!("no SSIF clips to convert"))?;
     ensure_parent_dir(&plan.output).await?;
-    // Per-view geometry + frame rate from the base-view m2ts (the widest video
-    // stream — the m2ts can also surface the MVC substream with no dimensions).
-    let report = ffprobe::probe(av_source).await?;
+    // Per-view geometry + frame rate from the first clip's base m2ts (all clips
+    // share geometry; the widest video stream skips the dimensionless MVC one).
+    let report = ffprobe::probe(first_m2ts).await?;
     let vstream = report
         .video_streams()
         .max_by_key(|v| v.width.unwrap_or(0))
-        .ok_or_else(|| anyhow!("no video stream in {}", av_source.display()))?;
+        .ok_or_else(|| anyhow!("no video stream in {}", first_m2ts.display()))?;
     let width = vstream.width.unwrap_or(1920);
     let height = vstream.height.unwrap_or(1080);
     let frame_rate = vstream.r_frame_rate.clone().unwrap_or_else(|| "24000/1001".to_string());
 
-    log(&event_tx, "Decoding the Blu-ray SSIF natively (libmvc) — no makemkvcon, no intermediate…");
-    let video: Box<dyn std::io::Read + Send> = Box::new(
-        libmvc::ssif::SsifReader::open(ssif).with_context(|| format!("opening SSIF {}", ssif.display()))?,
+    log(
+        &event_tx,
+        &format!("Decoding {} SSIF clip(s) natively (libmvc) — no makemkvcon, no intermediate…", clips.len()),
     );
-    match decode_pipe_encode(plan, &event_tx, video, av_source, width, height, &frame_rate).await? {
+    let ssifs: Vec<PathBuf> = clips.iter().map(|(s, _)| s.clone()).collect();
+    let video: Box<dyn std::io::Read + Send> =
+        Box::new(SeqSsifReader::open(ssifs).context("opening the feature's SSIF clips")?);
+
+    // ffmpeg reads audio/subtitles from the base m2ts — one path, or the clips
+    // joined via the `concat:` protocol (m2ts are byte-concatenable TS).
+    let av_arg: std::ffi::OsString = if clips.len() == 1 {
+        clips[0].1.clone().into_os_string()
+    } else {
+        let joined = clips.iter().map(|(_, m)| m.display().to_string()).collect::<Vec<_>>().join("|");
+        format!("concat:{joined}").into()
+    };
+
+    match decode_pipe_encode(plan, &event_tx, video, Path::new(&av_arg), width, height, &frame_rate).await? {
         PipeOutcome::Success => Ok(plan.output.clone()),
         PipeOutcome::DecodeFailed(e) => Err(e.context("decoding the Blu-ray SSIF")),
     }

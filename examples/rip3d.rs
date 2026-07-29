@@ -23,6 +23,7 @@ use ripsaw::convert::hw::{EncodeCodec, HwBackend};
 use ripsaw::convert::plan::{detect_stereo_source, ConversionPlan, StereoSource};
 use ripsaw::convert::runner::{convert_bd_ssif, run_conversion, ConversionEvent};
 use ripsaw::identify::pipeline::identify_iso;
+use ripsaw::rip::bd_playlist::find_feature_3d;
 use ripsaw::rip::iso_mount::MountedIso;
 use ripsaw::rip::makemkv::{extract_title, ExtractEvent};
 use tokio::sync::mpsc;
@@ -57,13 +58,15 @@ async fn main() -> Result<()> {
         eprintln!("Mounting {} …", input.display());
         if let Ok(m) = MountedIso::mount(&input).await {
             if !is_encrypted(&m.mount_point) {
-                if let Some((ssif, m2ts)) = find_bd_ssif(&m.mount_point) {
+                if let Some(feature) = find_feature_3d(&m.mount_point) {
+                    let clips = feature.clip_paths(&m.mount_point);
                     eprintln!(
-                        "Unencrypted 3D BD — decoding {} directly (no makemkvcon, no intermediate).",
-                        ssif.file_name().unwrap_or_default().to_string_lossy()
+                        "Unencrypted 3D BD — feature is {} clip(s), {} min; decoding directly (no makemkvcon, no intermediate).",
+                        clips.len(),
+                        feature.duration_seconds() / 60
                     );
                     let plan = ConversionPlan {
-                        input: m2ts.clone(),
+                        input: PathBuf::new(), // unused by convert_bd_ssif
                         output: output.clone(),
                         format: OutputFormat::FullSbs,
                         source: StereoSource::MvcWithBlockAdditions, // unused by convert_bd_ssif
@@ -72,7 +75,7 @@ async fn main() -> Result<()> {
                     };
                     let (tx, rx) = mpsc::channel::<ConversionEvent>(64);
                     let printer = spawn_convert_printer(rx);
-                    let result = convert_bd_ssif(&ssif, &m2ts, &plan, Some(tx)).await;
+                    let result = convert_bd_ssif(&clips, &plan, Some(tx)).await;
                     let _ = printer.await;
                     let _ = m.unmount().await;
                     result.context("decoding the Blu-ray SSIF")?;
@@ -80,8 +83,8 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
             }
-            // Not a plain SSIF disc (encrypted, or no SSIF) — release this mount;
-            // the makemkvcon path re-mounts as part of identify.
+            // Not a plain SSIF disc (encrypted, or no 3D playlist) — release this
+            // mount; the makemkvcon path re-mounts as part of identify.
             let _ = m.unmount().await;
         }
 
@@ -167,28 +170,6 @@ async fn main() -> Result<()> {
 
     eprintln!("Done → {}", output.display());
     Ok(())
-}
-
-/// Locate the feature title's SSIF on a mounted Blu-ray: the largest `.ssif`
-/// under `BDMV/STREAM/SSIF`, paired with its matching base-view `.m2ts` (same
-/// stem, used for audio/subtitles). A heuristic — good for a single-feature 3D
-/// disc; multi-title discs would need `.mpls` playlist navigation.
-fn find_bd_ssif(mount: &Path) -> Option<(PathBuf, PathBuf)> {
-    let ssif_dir = mount.join("BDMV/STREAM/SSIF");
-    let mut best: Option<(u64, PathBuf)> = None;
-    for entry in std::fs::read_dir(&ssif_dir).ok()?.flatten() {
-        let p = entry.path();
-        if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ssif")) {
-            let sz = entry.metadata().ok().map_or(0, |m| m.len());
-            if best.as_ref().is_none_or(|(bsz, _)| sz > *bsz) {
-                best = Some((sz, p));
-            }
-        }
-    }
-    let (_, ssif) = best?;
-    let stem = ssif.file_stem()?;
-    let m2ts = mount.join("BDMV/STREAM").join(stem).with_extension("m2ts");
-    m2ts.exists().then_some((ssif, m2ts))
 }
 
 /// True if the mounted disc looks AACS-encrypted (an AACS directory present).
