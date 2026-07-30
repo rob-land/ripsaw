@@ -8,7 +8,6 @@ use std::process::Stdio;
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
-use tokio::process::Command;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FfprobeReport {

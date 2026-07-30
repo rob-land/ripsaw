@@ -34,6 +34,22 @@ impl EncodeCodec {
             EncodeCodec::H265 => "libx265",
         }
     }
+
+    /// Row index in the Preferences codec ComboRow.
+    pub fn to_ui_index(self) -> u32 {
+        match self {
+            EncodeCodec::H264 => 0,
+            EncodeCodec::H265 => 1,
+        }
+    }
+
+    /// Inverse of [`to_ui_index`](Self::to_ui_index). Unknown → H.264.
+    pub fn from_ui_index(idx: u32) -> Self {
+        match idx {
+            1 => EncodeCodec::H265,
+            _ => EncodeCodec::H264,
+        }
+    }
 }
 
 /// Hardware-encode backend selection. `Auto` resolves to the first

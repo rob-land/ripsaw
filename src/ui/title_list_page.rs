@@ -942,6 +942,13 @@ impl TitleListPage {
             .conversion_hw_backend()
     }
 
+    fn selected_codec(&self) -> crate::convert::hw::EncodeCodec {
+        crate::settings::settings()
+            .lock()
+            .expect("settings mutex")
+            .conversion_codec()
+    }
+
     /// Single entry point for the header's `Process Selected` button.
     /// Dispatches based on input type: physical disc / ISO go through
     /// the rip pipeline (the orchestrator); a standalone MKV with a
@@ -1450,7 +1457,7 @@ impl TitleListPage {
             output,
             format,
             source,
-            codec: ConversionPlan::default_codec(),
+            codec: self.selected_codec(),
             hw_backend: self.selected_hw_backend(),
         };
 
@@ -1611,10 +1618,8 @@ impl TitleListPage {
         // 3D output format is now per-title (built below and passed to
         // plan_rip); the encoder backend is a global preference.
         naming_opts.conversion_hw_backend = self.selected_hw_backend();
-        // Codec stays at the default (H.264) until Phase B adds a
-        // separate codec selector to the UI.
-        naming_opts.conversion_codec =
-            crate::convert::plan::ConversionPlan::default_codec();
+        // Output codec is a global preference (Preferences → Encoding).
+        naming_opts.conversion_codec = self.selected_codec();
         let episode_titles = self.collect_episode_titles();
         // Per-title overrides from the TitleDetailPage: display title
         // → filename + segment.title; role → naming-scheme bucket
@@ -1647,7 +1652,7 @@ impl TitleListPage {
         let mut queue: Vec<RipQueueItem> = plan.into_iter().map(RipQueueItem::from).collect();
         // For an unencrypted 3D Blu-ray, let the orchestrator decode the feature
         // straight off the disc (SSIF) instead of a makemkvcon rip + convert.
-        attach_ssif_feature(&mut queue, &source, &identification_for_plan);
+        let ssif_note = attach_ssif_feature(&mut queue, &source, &identification_for_plan);
 
         let progress = RipProgressPage::default();
         progress.set_queue(&queue);
@@ -1660,6 +1665,9 @@ impl TitleListPage {
                 DiscContentKind::Series => "Treating as series",
             },
         ));
+        if let Some(note) = ssif_note {
+            progress.append_log(&note);
+        }
 
         if let Some(nav) = navigation_view(self) {
             nav.push(&progress);
@@ -1680,15 +1688,38 @@ fn attach_ssif_feature(
     queue: &mut [RipQueueItem],
     source: &crate::rip::makemkv::ScanSource,
     ident: &IdentificationResult,
-) {
+) -> Option<String> {
     use crate::rip::bd_playlist::{find_feature_3d, is_encrypted};
     use crate::rip::makemkv::ScanSource;
 
-    let ScanSource::Folder(mount) = source else { return };
+    // Only a mounted ISO/folder can take the SSIF fast path. Physical discs and
+    // MKV re-identifies go through MakeMKV — nothing to report.
+    let ScanSource::Folder(mount) = source else { return None };
     if is_encrypted(mount) {
-        return;
+        return Some("3D fast path unavailable: disc is AACS-encrypted — ripping via MakeMKV.".into());
     }
-    let Some(feature) = find_feature_3d(mount) else { return };
+    let feature = match find_feature_3d(mount) {
+        Some(f) => f,
+        None => {
+            // No 3D feature playlist found. Distinguish a genuine 2D/none disc
+            // from the Flatpak case where the /run/media mount exists but isn't
+            // visible inside our sandbox (host makemkvcon can still read it, so
+            // the scan succeeds while every in-sandbox disc read fails).
+            let readable = std::fs::read_dir(mount.join("BDMV")).is_ok();
+            return Some(if readable {
+                format!(
+                    "3D fast path unavailable: no MVC feature playlist under {} — ripping via MakeMKV.",
+                    mount.display()
+                )
+            } else {
+                format!(
+                    "3D fast path unavailable: can't read {} from inside the sandbox \
+                     (mount not propagated) — ripping via MakeMKV instead.",
+                    mount.display()
+                )
+            });
+        }
+    };
     let clips = feature.clip_paths(mount);
     let feat_secs = feature.duration_seconds();
     for item in queue.iter_mut() {
@@ -1701,9 +1732,16 @@ fn attach_ssif_feature(
         let tol = (feat_secs / 20).max(3);
         if t.has_mvc_stream() && feat_secs.abs_diff(t.duration_seconds.unwrap_or(0)) <= tol {
             item.ssif_clips = Some(clips.clone());
-            break;
+            return Some(format!(
+                "3D fast path: decoding {} SSIF clip(s) straight from the disc — no MakeMKV rip, no intermediate MKV.",
+                clips.len()
+            ));
         }
     }
+    Some(format!(
+        "3D fast path unavailable: found a {}-min MVC feature but no queued title matched its runtime — ripping via MakeMKV.",
+        feat_secs / 60
+    ))
 }
 
 fn build_pseudo_identification(

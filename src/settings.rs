@@ -31,6 +31,11 @@ pub struct UserSettings {
     /// hardware encoder, fall back to software.
     #[serde(default)]
     pub conversion_hw_backend: Option<crate::convert::hw::HwBackend>,
+    /// Video codec for the 3D convert step. Global preference. `None` means
+    /// the default (H.264) — broadest player compatibility, notably for the
+    /// Xreal Beam Pro and older TVs. H.265 roughly halves file size.
+    #[serde(default)]
+    pub conversion_codec: Option<crate::convert::hw::EncodeCodec>,
     /// Optional override for the local TheDiscDB mirror root. `None` uses
     /// the default under `$XDG_CACHE_HOME/ripsaw/thediscdb`. See
     /// `thediscdb_mirror_root`.
@@ -43,6 +48,12 @@ impl UserSettings {
     pub fn conversion_hw_backend(&self) -> crate::convert::hw::HwBackend {
         self.conversion_hw_backend
             .unwrap_or(crate::convert::hw::HwBackend::Auto)
+    }
+
+    /// Resolved output codec, defaulting to H.264 when unset.
+    pub fn conversion_codec(&self) -> crate::convert::hw::EncodeCodec {
+        self.conversion_codec
+            .unwrap_or(crate::convert::hw::EncodeCodec::H264)
     }
 }
 

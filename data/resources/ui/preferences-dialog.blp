@@ -40,6 +40,18 @@ template $RipsawPreferencesDialog: Adw.PreferencesDialog {
       title: _("Encoding");
       description: _("Applies to the 3D side-by-side / over-under conversion step.");
 
+      Adw.ComboRow codec_combo {
+        title: _("Video codec");
+        subtitle: _("H.264 plays everywhere (Xreal Beam Pro, older TVs). H.265 (HEVC) roughly halves file size at the same quality but needs a newer decoder.");
+
+        model: StringList {
+          strings [
+            _("H.264 / AVC (most compatible)"),
+            _("H.265 / HEVC (smaller files)"),
+          ]
+        };
+      }
+
       Adw.ComboRow encoder_backend_combo {
         title: _("Encoder backend");
         subtitle: _("CPU vs GPU encode. \"Auto\" picks the best available hardware encoder, falling back to software.");

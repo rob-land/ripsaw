@@ -5,7 +5,6 @@ use std::process::Stdio;
 
 use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
 use super::makemkv_parse::{to_makemkv_scan, Aggregator, MakemkvScan, MsgRecord, Record};
 
@@ -243,15 +242,33 @@ pub fn apply_record(state: &mut ExtractProgress, record: &Record) -> Option<Extr
 const KEEP_MVC_PROFILE_XML: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/data/makemkv/keep-mvc.mmcp.xml"));
 
-/// Write our keep-MVC profile to a temp file and return the path. The
-/// caller keeps the TempDir alive for the duration of the makemkvcon
-/// invocation so the file isn't yanked out from under it.
-fn write_keep_mvc_profile() -> Result<(tempfile::TempDir, PathBuf)> {
-    let dir = tempfile::TempDir::new().context("creating temp dir for MakeMKV profile")?;
-    let path = dir.path().join("ripsaw.mmcp.xml");
+/// A keep-MVC profile file on disk that removes itself when dropped.
+///
+/// It must be written somewhere `makemkvcon` can actually read it. In a Flatpak
+/// sandbox `makemkvcon` runs on the *host* (via `flatpak-spawn --host`) and
+/// cannot see our private `/tmp`, so a `tempfile::TempDir` path would be handed
+/// over as `--profile=` and silently fail — makemkvcon then falls back to its
+/// built-in default, which DROPS the MVC dependent view (flat 2D output). We
+/// instead drop it into `output_dir`, which is granted to us AND visible to the
+/// host at the identical real path (xdg-videos et al. map through unchanged).
+struct KeepMvcProfile {
+    path: PathBuf,
+}
+
+impl Drop for KeepMvcProfile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Write our keep-MVC profile into `output_dir` and return a guard that removes
+/// it on drop. The caller keeps the guard alive for the duration of the
+/// makemkvcon invocation.
+fn write_keep_mvc_profile(output_dir: &Path) -> Result<KeepMvcProfile> {
+    let path = output_dir.join(".ripsaw-keep-mvc.mmcp.xml");
     std::fs::write(&path, KEEP_MVC_PROFILE_XML)
-        .context("writing MakeMKV keep-MVC profile to temp file")?;
-    Ok((dir, path))
+        .with_context(|| format!("writing MakeMKV keep-MVC profile to {}", path.display()))?;
+    Ok(KeepMvcProfile { path })
 }
 
 pub async fn extract_title(
@@ -265,15 +282,16 @@ pub async fn extract_title(
         .await
         .with_context(|| format!("ensuring output dir {} exists", output_dir.display()))?;
 
-    // Hold the TempDir for the lifetime of this fn so the profile XML
-    // file we hand makemkvcon stays on disk until the rip finishes.
-    let (_profile_dir, profile_path) = write_keep_mvc_profile()?;
+    // Hold the guard for the lifetime of this fn so the profile XML file we
+    // hand makemkvcon stays on disk until the rip finishes (and is removed
+    // afterwards). It lives in output_dir so host makemkvcon can read it.
+    let profile = write_keep_mvc_profile(output_dir)?;
 
     let arg = source.as_argument();
     let mut child = crate::hostcmd::host_command("makemkvcon")
         .arg("-r")
         .arg("--noscan")
-        .arg(format!("--profile={}", profile_path.display()))
+        .arg(format!("--profile={}", profile.path.display()))
         .arg("--messages=-stdout")
         .arg("--progress=-stdout")
         .arg("mkv")

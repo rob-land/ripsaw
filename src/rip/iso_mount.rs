@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use tokio::process::Command;
 
 #[derive(Debug)]
 pub struct MountedIso {

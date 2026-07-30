@@ -49,6 +49,15 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.1" date="2026-07-30">
+      <description>
+        <p>Reliability fixes for 3D Blu-ray ripping inside the Flatpak sandbox:
+        the keep-MVC MakeMKV profile is now placed where the host MakeMKV can
+        read it, so the dependent view is retained (no more silent 2D output).
+        The rip log now explains whether the fast SSIF path was taken and why.
+        New Preferences option to choose the output codec (H.264 or H.265).</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-07-29">
       <description>
         <p>Working release. Disc identification, MakeMKV-driven ripping,

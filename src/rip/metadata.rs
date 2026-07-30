@@ -22,7 +22,6 @@ use std::path::Path;
 use std::process::Stdio;
 
 use anyhow::{anyhow, Context, Result};
-use tokio::process::Command;
 
 /// Apply chapter titles + segment title to `path`. Returns `Ok(())`
 /// whether or not changes were made; on individual failures, logs a
