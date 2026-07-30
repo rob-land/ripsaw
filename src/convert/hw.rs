@@ -438,6 +438,14 @@ pub fn encoder_args(
         }
     }
 
+    // Force a regular ~2 s keyframe interval (48 frames at ~24 fps, the frame
+    // rate of every 3D Blu-ray). Left unset, the encoders default to a very long
+    // GOP — QSV picked ~10 s — which seeks poorly and makes some hardware /
+    // embedded players show a black picture on cold start until the next
+    // keyframe. `-g` is honoured by libx264/libx265 and all the HW encoders.
+    out.encoder_args.push(O::from("-g"));
+    out.encoder_args.push(O::from("48"));
+
     out
 }
 

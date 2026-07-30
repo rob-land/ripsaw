@@ -49,6 +49,14 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.6" date="2026-07-30">
+      <description>
+        <p>Encode with a regular ~2-second keyframe interval instead of the
+        encoder's very long default GOP. This makes seeking precise and fixes
+        some players showing a black picture at the very start of a file until
+        you seek.</p>
+      </description>
+    </release>
     <release version="0.2.5" date="2026-07-30">
       <description>
         <p>Unencrypted 3D Blu-ray ISOs now decode straight from the image via a
