@@ -1652,7 +1652,9 @@ impl TitleListPage {
         let mut queue: Vec<RipQueueItem> = plan.into_iter().map(RipQueueItem::from).collect();
         // For an unencrypted 3D Blu-ray, let the orchestrator decode the feature
         // straight off the disc (SSIF) instead of a makemkvcon rip + convert.
-        let ssif_note = attach_ssif_feature(&mut queue, &source, &identification_for_plan);
+        let iso_path = self.imp().iso_path.borrow().clone();
+        let ssif_note =
+            attach_ssif_feature(&mut queue, &source, &identification_for_plan, iso_path.as_deref());
 
         let progress = RipProgressPage::default();
         progress.set_queue(&queue);
@@ -1688,40 +1690,72 @@ fn attach_ssif_feature(
     queue: &mut [RipQueueItem],
     source: &crate::rip::makemkv::ScanSource,
     ident: &IdentificationResult,
+    iso_path: Option<&std::path::Path>,
 ) -> Option<String> {
-    use crate::rip::bd_playlist::{find_feature_3d, is_encrypted};
-    use crate::rip::makemkv::ScanSource;
-
-    // Only a mounted ISO/folder can take the SSIF fast path. Physical discs and
-    // MKV re-identifies go through MakeMKV — nothing to report.
-    let ScanSource::Folder(mount) = source else { return None };
-    if is_encrypted(mount) {
-        return Some("3D fast path unavailable: disc is AACS-encrypted — ripping via MakeMKV.".into());
-    }
-    let feature = match find_feature_3d(mount) {
-        Some(f) => f,
-        None => {
-            // No 3D feature playlist found. Distinguish a genuine 2D/none disc
-            // from the Flatpak case where the /run/media mount exists but isn't
-            // visible inside our sandbox (host makemkvcon can still read it, so
-            // the scan succeeds while every in-sandbox disc read fails).
-            let readable = std::fs::read_dir(mount.join("BDMV")).is_ok();
-            return Some(if readable {
-                format!(
-                    "3D fast path unavailable: no MVC feature playlist under {} — ripping via MakeMKV.",
-                    mount.display()
-                )
-            } else {
-                format!(
-                    "3D fast path unavailable: can't read {} from inside the sandbox \
-                     (mount not propagated) — ripping via MakeMKV instead.",
-                    mount.display()
-                )
-            });
-        }
+    use crate::rip::bd_playlist::{
+        find_feature_3d, find_feature_3d_iso, is_encrypted, is_encrypted_iso, Feature, FeatureClips,
     };
-    let clips = feature.clip_paths(mount);
+    use crate::rip::makemkv::ScanSource;
+    use crate::rip::udf::Udf;
+
+    // Resolve the 3D feature + where its clips live. Prefer reading the ISO
+    // directly via the UDF reader — that works even inside a Flatpak sandbox,
+    // where the host-side /run/media loop mount isn't visible to us. Only fall
+    // back to walking a readable mount. Each branch either returns a note early
+    // or yields (feature, clip source).
+    let is_iso = |p: &std::path::Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("iso"));
+    let (feature, clips): (Feature, FeatureClips) = if let Some(iso) = iso_path.filter(|p| is_iso(p)) {
+        let mut f = match std::fs::File::open(iso) {
+            Ok(f) => f,
+            Err(e) => return Some(format!("3D fast path unavailable: couldn't open the ISO ({e}) — ripping via MakeMKV.")),
+        };
+        let udf = match Udf::open(&mut f) {
+            Ok(u) => u,
+            Err(e) => return Some(format!("3D fast path unavailable: couldn't read the ISO's filesystem ({e}) — ripping via MakeMKV.")),
+        };
+        if is_encrypted_iso(&udf, &mut f) {
+            return Some("3D fast path unavailable: disc is AACS-encrypted — ripping via MakeMKV.".into());
+        }
+        match find_feature_3d_iso(&udf, &mut f) {
+            Some(feat) => {
+                let clips = FeatureClips::Iso { iso: iso.to_path_buf(), clips: feat.clips.clone() };
+                (feat, clips)
+            }
+            None => return Some("3D fast path unavailable: no MVC feature playlist in the ISO — ripping via MakeMKV.".into()),
+        }
+    } else if let ScanSource::Folder(mount) = source {
+        if is_encrypted(mount) {
+            return Some("3D fast path unavailable: disc is AACS-encrypted — ripping via MakeMKV.".into());
+        }
+        match find_feature_3d(mount) {
+            Some(feat) => {
+                let clips = FeatureClips::Mount(feat.clip_paths(mount));
+                (feat, clips)
+            }
+            None => {
+                let readable = std::fs::read_dir(mount.join("BDMV")).is_ok();
+                return Some(if readable {
+                    format!("3D fast path unavailable: no MVC feature playlist under {} — ripping via MakeMKV.", mount.display())
+                } else {
+                    format!(
+                        "3D fast path unavailable: can't read {} from inside the sandbox \
+                         (mount not propagated) — ripping via MakeMKV instead.",
+                        mount.display()
+                    )
+                });
+            }
+        }
+    } else {
+        // Physical disc / MKV re-identify: MakeMKV path, nothing to report.
+        return None;
+    };
+
     let feat_secs = feature.duration_seconds();
+    let n_clips = feature.clips.len();
+    let via = match &clips {
+        FeatureClips::Iso { .. } => "straight from the ISO",
+        FeatureClips::Mount(_) => "straight from the disc",
+    };
     for item in queue.iter_mut() {
         if item.conversion_format.is_none() {
             continue;
@@ -1733,8 +1767,7 @@ fn attach_ssif_feature(
         if t.has_mvc_stream() && feat_secs.abs_diff(t.duration_seconds.unwrap_or(0)) <= tol {
             item.ssif_clips = Some(clips.clone());
             return Some(format!(
-                "3D fast path: decoding {} SSIF clip(s) straight from the disc — no MakeMKV rip, no intermediate MKV.",
-                clips.len()
+                "3D fast path: decoding {n_clips} SSIF clip(s) {via} — no MakeMKV rip, no intermediate MKV."
             ));
         }
     }

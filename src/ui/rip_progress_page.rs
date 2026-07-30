@@ -24,8 +24,8 @@ pub struct RipQueueItem {
     pub conversion_hw_backend: crate::convert::hw::HwBackend,
     /// When set (an unencrypted 3D-BD feature, attached by the title list), the
     /// orchestrator decodes these SSIF clips directly instead of ripping with
-    /// makemkvcon — disc → full-SBS output, no intermediate MKV.
-    pub ssif_clips: Option<Vec<(PathBuf, PathBuf)>>,
+    /// makemkvcon — disc/ISO → full-SBS output, no intermediate MKV.
+    pub ssif_clips: Option<crate::rip::bd_playlist::FeatureClips>,
 }
 
 impl From<PlannedTitle> for RipQueueItem {

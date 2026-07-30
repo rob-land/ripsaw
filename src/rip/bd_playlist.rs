@@ -12,7 +12,10 @@
 // understood. 3D is detected by the SSIF's presence on disk, not by decoding the
 // STN_table_SS extension.
 
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
+
+use crate::rip::udf::Udf;
 
 /// One PlayItem: the clip it plays and its IN/OUT presentation times (45 kHz).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +56,55 @@ impl Feature {
             })
             .collect()
     }
+}
+
+/// Where a feature's clips live — resolved for the orchestrator to decode.
+#[derive(Debug, Clone)]
+pub enum FeatureClips {
+    /// A readable mounted disc: `(ssif, m2ts)` filesystem paths.
+    Mount(Vec<(PathBuf, PathBuf)>),
+    /// A Blu-ray ISO read directly via UDF (no mount): the image path plus the
+    /// feature's clip names. Used when a Flatpak sandbox can't see the mount.
+    Iso { iso: PathBuf, clips: Vec<String> },
+}
+
+/// True if a Blu-ray ISO (read via UDF) looks AACS-encrypted. The native SSIF
+/// path only works on decrypted / unencrypted discs.
+pub fn is_encrypted_iso<R: Read + Seek>(udf: &Udf, r: &mut R) -> bool {
+    let mut is_dir = |p: &str| udf.lookup(r, p).ok().flatten().is_some_and(|e| e.is_dir);
+    is_dir("AACS") || is_dir("BDMV/AACS")
+}
+
+/// The ISO counterpart of [`find_feature_3d`]: scan the image's playlists via
+/// UDF and return the longest 3D feature (all clips have an SSIF + base m2ts
+/// inside the image). Reads nothing from a mount, so it works from inside a
+/// Flatpak sandbox where the loop mount isn't visible.
+pub fn find_feature_3d_iso<R: Read + Seek>(udf: &Udf, r: &mut R) -> Option<Feature> {
+    let entries = udf.list(r, "BDMV/PLAYLIST").ok()?;
+    let mut best: Option<Feature> = None;
+    for e in entries {
+        if !e.name.to_ascii_lowercase().ends_with(".mpls") {
+            continue;
+        }
+        let Ok(bytes) = udf.read_file(r, &format!("BDMV/PLAYLIST/{}", e.name)) else { continue };
+        let Some(items) = parse_mpls(&bytes) else { continue };
+        if items.is_empty() {
+            continue;
+        }
+        let all_3d = items.iter().all(|pi| {
+            udf.lookup(r, &format!("BDMV/STREAM/SSIF/{}.ssif", pi.clip)).ok().flatten().is_some()
+                && udf.lookup(r, &format!("BDMV/STREAM/{}.m2ts", pi.clip)).ok().flatten().is_some()
+        });
+        if !all_3d {
+            continue;
+        }
+        let duration_ticks: u64 = items.iter().map(PlayItem::duration_ticks).sum();
+        let clips: Vec<String> = items.into_iter().map(|pi| pi.clip).collect();
+        if best.as_ref().is_none_or(|b| duration_ticks > b.duration_ticks) {
+            best = Some(Feature { clips, duration_ticks });
+        }
+    }
+    best
 }
 
 /// Parse the PlayItems out of a `.mpls` file. Returns `None` if the header or

@@ -12,8 +12,12 @@
 //    per-frame BlockAdditions into an Annex B stream, then feeds the
 //    same ldecod -> ffmpeg compose tail as path 2.
 
+use std::fs::File;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+
+use crate::rip::udf::{ExtentReader, PhysExtent, Udf};
 
 use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -422,6 +426,224 @@ pub async fn convert_bd_ssif(
         PipeOutcome::Success => Ok(plan.output.clone()),
         PipeOutcome::DecodeFailed(e) => Err(e.context("decoding the Blu-ray SSIF")),
     }
+}
+
+/// `(size, physical byte extents)` of a file inside a Blu-ray ISO, as resolved
+/// by the UDF reader — enough to stream it with [`ExtentReader`].
+type ClipExtents = (u64, Vec<PhysExtent>);
+
+/// Video source for the ISO SSIF path: chains, one clip at a time, an
+/// [`libmvc::ssif::SsifReader`] over an [`ExtentReader`] reading each clip's
+/// `.ssif` straight out of the image. Each clip opens its own file handle so
+/// memory stays bounded regardless of feature length.
+struct IsoSsifChain {
+    iso: PathBuf,
+    remaining: std::vec::IntoIter<ClipExtents>,
+    cur: Option<libmvc::ssif::SsifReader<ExtentReader<File>>>,
+}
+
+impl IsoSsifChain {
+    fn open(iso: PathBuf, ssifs: Vec<ClipExtents>) -> std::io::Result<Self> {
+        let mut remaining = ssifs.into_iter();
+        let cur = match remaining.next() {
+            Some((sz, ex)) => Some(libmvc::ssif::SsifReader::new(ExtentReader::new(File::open(&iso)?, sz, ex))),
+            None => None,
+        };
+        Ok(IsoSsifChain { iso, remaining, cur })
+    }
+}
+
+impl std::io::Read for IsoSsifChain {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match self.cur.as_mut() {
+                None => return Ok(0),
+                Some(r) => {
+                    let n = r.read(buf)?;
+                    if n > 0 {
+                        return Ok(n);
+                    }
+                    self.cur = match self.remaining.next() {
+                        Some((sz, ex)) => Some(libmvc::ssif::SsifReader::new(ExtentReader::new(File::open(&self.iso)?, sz, ex))),
+                        None => None,
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// Raw-bytes counterpart of [`IsoSsifChain`] for the base `.m2ts` clips (audio /
+/// subtitles), byte-concatenated in play order (m2ts are concatenable TS).
+struct IsoM2tsChain {
+    iso: PathBuf,
+    remaining: std::vec::IntoIter<ClipExtents>,
+    cur: Option<ExtentReader<File>>,
+}
+
+impl IsoM2tsChain {
+    fn open(iso: PathBuf, m2tss: Vec<ClipExtents>) -> std::io::Result<Self> {
+        let mut remaining = m2tss.into_iter();
+        let cur = match remaining.next() {
+            Some((sz, ex)) => Some(ExtentReader::new(File::open(&iso)?, sz, ex)),
+            None => None,
+        };
+        Ok(IsoM2tsChain { iso, remaining, cur })
+    }
+}
+
+impl std::io::Read for IsoM2tsChain {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match self.cur.as_mut() {
+                None => return Ok(0),
+                Some(r) => {
+                    let n = r.read(buf)?;
+                    if n > 0 {
+                        return Ok(n);
+                    }
+                    self.cur = match self.remaining.next() {
+                        Some((sz, ex)) => Some(ExtentReader::new(File::open(&self.iso)?, sz, ex)),
+                        None => None,
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// Convert a Blu-ray 3D feature straight from an **ISO image** — no mount, no
+/// makemkvcon, no intermediate MKV. Reads the feature's SSIF (video) and base
+/// m2ts (audio/subtitles) directly out of the image via the pure-Rust UDF
+/// reader, so it works from inside a Flatpak sandbox where the loop mount isn't
+/// visible. `clip_names` are the feature's clips in play order (`00000`, …).
+pub async fn convert_bd_ssif_iso(
+    iso: &Path,
+    clip_names: &[String],
+    plan: &ConversionPlan,
+    event_tx: Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
+) -> Result<PathBuf> {
+    ensure_parent_dir(&plan.output).await?;
+    anyhow::ensure!(!clip_names.is_empty(), "no SSIF clips to convert");
+
+    // Resolve every clip's SSIF + m2ts extents up front (one UDF traversal).
+    let (ssifs, m2tss) = {
+        let iso = iso.to_path_buf();
+        let names = clip_names.to_vec();
+        tokio::task::spawn_blocking(move || -> Result<(Vec<ClipExtents>, Vec<ClipExtents>)> {
+            let mut f = File::open(&iso).with_context(|| format!("opening ISO {}", iso.display()))?;
+            let udf = Udf::open(&mut f).context("reading the ISO's UDF filesystem")?;
+            let mut ssifs = Vec::with_capacity(names.len());
+            let mut m2tss = Vec::with_capacity(names.len());
+            for c in &names {
+                ssifs.push(udf.extents(&mut f, &format!("BDMV/STREAM/SSIF/{c}.ssif"))?);
+                m2tss.push(udf.extents(&mut f, &format!("BDMV/STREAM/{c}.m2ts"))?);
+            }
+            Ok((ssifs, m2tss))
+        })
+        .await??
+    };
+
+    // Geometry + frame rate from a small prefix of the first clip's base m2ts.
+    let (width, height, frame_rate) = probe_iso_geometry(iso, &m2tss[0], &plan.output).await?;
+
+    log(
+        &event_tx,
+        &format!("Decoding {} SSIF clip(s) from the ISO natively (libmvc) — no mount, no makemkvcon…", clip_names.len()),
+    );
+
+    // Audio/subtitles: stream the base m2ts out of the ISO and remux just the
+    // audio + subtitle tracks into a small temp beside the output (host-visible,
+    // so the host ffmpeg can read it). Avoids extracting the whole m2ts.
+    let audio = extract_iso_audio(iso, m2tss, &plan.output, &event_tx).await?;
+
+    let video: Box<dyn std::io::Read + Send> =
+        Box::new(IsoSsifChain::open(iso.to_path_buf(), ssifs).context("opening the ISO's SSIF clips")?);
+    let result = decode_pipe_encode(plan, &event_tx, video, &audio, width, height, &frame_rate).await;
+    let _ = tokio::fs::remove_file(&audio).await;
+
+    match result? {
+        PipeOutcome::Success => Ok(plan.output.clone()),
+        PipeOutcome::DecodeFailed(e) => Err(e.context("decoding the Blu-ray SSIF from the ISO")),
+    }
+}
+
+/// Probe per-view geometry + frame rate by extracting a small prefix of the base
+/// m2ts (enough for the SPS/PMT) beside the output and ffprobing it.
+async fn probe_iso_geometry(
+    iso: &Path,
+    m2ts: &ClipExtents,
+    output: &Path,
+) -> Result<(u32, u32, String)> {
+    let probe_path = output.with_extension("ripsaw-probe.ts");
+    {
+        let (iso, (size, extents), pp) = (iso.to_path_buf(), m2ts.clone(), probe_path.clone());
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let rd = ExtentReader::new(File::open(&iso)?, size, extents);
+            let mut prefix = rd.take(8 * 1024 * 1024);
+            let mut out = File::create(&pp)?;
+            std::io::copy(&mut prefix, &mut out)?;
+            Ok(())
+        })
+        .await??;
+    }
+    let report = ffprobe::probe(&probe_path).await;
+    let _ = tokio::fs::remove_file(&probe_path).await;
+    let report = report?;
+    let v = report
+        .video_streams()
+        .max_by_key(|v| v.width.unwrap_or(0))
+        .ok_or_else(|| anyhow!("no video stream found in the ISO's base m2ts"))?;
+    Ok((
+        v.width.unwrap_or(1920),
+        v.height.unwrap_or(1080),
+        v.r_frame_rate.clone().unwrap_or_else(|| "24000/1001".to_string()),
+    ))
+}
+
+/// Stream the base m2ts clips out of the ISO and copy just their audio +
+/// subtitle tracks into a small temp beside the output. Returns the temp path.
+async fn extract_iso_audio(
+    iso: &Path,
+    m2tss: Vec<ClipExtents>,
+    output: &Path,
+    event_tx: &Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
+) -> Result<PathBuf> {
+    let audio_path = output.with_extension("ripsaw-audio.mkv");
+    let (pipe_reader, pipe_writer) = std::io::pipe().context("creating m2ts→ffmpeg pipe")?;
+
+    let mut child = crate::hostcmd::host_command("ffmpeg")
+        .arg("-y").arg("-hide_banner").arg("-loglevel").arg("error")
+        .arg("-i").arg("pipe:0")
+        .arg("-map").arg("0:a?")
+        .arg("-map").arg("0:s?")
+        .arg("-c").arg("copy")
+        .arg(&audio_path)
+        .stdin(Stdio::from(pipe_reader))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn ffmpeg (m2ts audio extract)")?;
+    forward_stderr(&mut child, event_tx.clone());
+
+    let feed = {
+        let iso = iso.to_path_buf();
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let mut chain = IsoM2tsChain::open(iso, m2tss)?;
+            let mut w = pipe_writer;
+            // Broken pipe (ffmpeg done reading) is a normal end, not an error.
+            match std::io::copy(&mut chain, &mut w) {
+                Ok(_) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+                Err(e) => Err(e),
+            }
+        })
+    };
+    let _ = feed.await;
+    let status = child.wait().await.context("waiting for ffmpeg (audio extract)")?;
+    anyhow::ensure!(status.success(), "extracting audio from the ISO m2ts failed");
+    Ok(audio_path)
 }
 
 /// Decode the extracted MVC stream with libmvc and stream composed full-SBS

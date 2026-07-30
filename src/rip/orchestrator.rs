@@ -85,9 +85,16 @@ pub fn run_rip_queue(
                         },
                     )))
                     .await;
-                let result = crate::convert::runner::convert_bd_ssif(clips, &plan, None)
-                    .await
-                    .map(|_| output);
+                use crate::rip::bd_playlist::FeatureClips;
+                let result = match clips {
+                    FeatureClips::Mount(pairs) => {
+                        crate::convert::runner::convert_bd_ssif(pairs, &plan, None).await
+                    }
+                    FeatureClips::Iso { iso, clips } => {
+                        crate::convert::runner::convert_bd_ssif_iso(iso, clips, &plan, None).await
+                    }
+                }
+                .map(|_| output);
                 let _ = rip_tx.send(RipMessage::Finished(index_in_queue, result)).await;
                 continue;
             }

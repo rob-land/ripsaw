@@ -49,6 +49,14 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.5" date="2026-07-30">
+      <description>
+        <p>Unencrypted 3D Blu-ray ISOs now decode straight from the image via a
+        pure-Rust UDF reader — no loop mount, no MakeMKV rip, and no giant
+        intermediate file. This finally makes the fast SSIF path work inside the
+        Flatpak sandbox, where the disc mount isn't visible.</p>
+      </description>
+    </release>
     <release version="0.2.4" date="2026-07-30">
       <description>
         <p>H.265/HEVC is now the default output codec — roughly half the file
