@@ -2,6 +2,7 @@
 
 pub mod iso_mount;
 pub mod bd_playlist;
+pub mod udf;
 pub mod makemkv;
 pub mod makemkv_parse;
 pub mod makemkv_install;
