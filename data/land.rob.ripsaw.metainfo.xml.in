@@ -49,6 +49,14 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.2" date="2026-07-30">
+      <description>
+        <p>Major performance fix: the Flatpak was compiling the native MVC
+        decoder in debug mode, making 3D conversion roughly 13× slower than it
+        should be. It now builds optimised (release), so decoding a 3D Blu-ray
+        to side-by-side runs many times faster.</p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-07-30">
       <description>
         <p>Reliability fixes for 3D Blu-ray ripping inside the Flatpak sandbox:

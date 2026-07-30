@@ -4,7 +4,11 @@
 
 cargo_target_dir = meson.project_build_root() / 'cargo'
 
-if get_option('buildtype') == 'release'
+# Map any optimised meson buildtype to cargo's --release (see cargo_build.py).
+# Critical for performance: libmvc's MVC decode is ~13x slower in a debug build,
+# so a debug binary makes 3D conversion painfully slow. Only an explicitly
+# unoptimised buildtype (debug/plain) yields a debug cargo build.
+if get_option('buildtype') in ['release', 'debugoptimized', 'minsize']
   rust_target_subdir = 'release'
 else
   rust_target_subdir = 'debug'
