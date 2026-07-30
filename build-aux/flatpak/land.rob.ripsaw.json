@@ -38,18 +38,6 @@
 
   "modules": [
     {
-      "name": "blueprint-compiler",
-      "buildsystem": "meson",
-      "cleanup": ["*"],
-      "sources": [
-        {
-          "type": "git",
-          "url": "https://gitlab.gnome.org/jwestman/blueprint-compiler.git",
-          "tag": "v0.12.0"
-        }
-      ]
-    },
-    {
       "name": "ripsaw",
       "buildsystem": "meson",
       "sources": [
