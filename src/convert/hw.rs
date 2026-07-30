@@ -52,6 +52,67 @@ impl EncodeCodec {
     }
 }
 
+/// A coarse quality target for the convert step. Maps, per encoder, to a good
+/// CRF / QP / global-quality value — so users pick an intent, not a raw number
+/// that means different things per codec and backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum QualityPreset {
+    /// Larger files, near-transparent quality.
+    Higher,
+    /// The default: ~VMAF 95 (visually near-transparent) at a sensible size.
+    #[default]
+    Balanced,
+    /// Smaller files, still good quality.
+    Smaller,
+}
+
+impl QualityPreset {
+    pub fn to_ui_index(self) -> u32 {
+        match self {
+            QualityPreset::Higher => 0,
+            QualityPreset::Balanced => 1,
+            QualityPreset::Smaller => 2,
+        }
+    }
+
+    pub fn from_ui_index(idx: u32) -> Self {
+        match idx {
+            0 => QualityPreset::Higher,
+            2 => QualityPreset::Smaller,
+            _ => QualityPreset::Balanced,
+        }
+    }
+}
+
+/// Resolve a quality preset to the CRF / QP / global-quality number for a given
+/// encoder. All of these scales run "lower = better"; the `Balanced` base per
+/// (backend, codec) targets ~VMAF 95, tuned from measured VMAF on real 3D
+/// content (QSV H.264 GQ18 ≈ HEVC GQ18 ≈ VMAF 95; software x265 needs a higher
+/// CRF than x264 for the same quality). Higher/Smaller shift the number by a
+/// perceptually-even step. A raw override in the config file bypasses this.
+pub fn quality_for(preset: QualityPreset, backend: HwBackend, codec: EncodeCodec) -> u32 {
+    use EncodeCodec::{H264, H265};
+    use HwBackend::*;
+    // Balanced base per (backend, codec).
+    let base: i32 = match (backend, codec) {
+        (Software | Auto, H264) => 18,
+        (Software | Auto, H265) => 21, // x265's CRF scale sits ~3 above x264 for equal quality
+        (Qsv, H264) => 18,
+        (Qsv, H265) => 18, // measured: HEVC GQ18 ≈ H.264 GQ18 quality, ~half the size
+        (Nvenc, H264) => 19,
+        (Nvenc, H265) => 21,
+        (Vaapi | Amf, H264) => 20,
+        (Vaapi | Amf, H265) => 22,
+        (V4l2M2m, _) => 18, // feeds the quality→bitrate formula in encoder_args
+    };
+    let offset = match preset {
+        QualityPreset::Higher => -3,
+        QualityPreset::Balanced => 0,
+        QualityPreset::Smaller => 4,
+    };
+    (base + offset).clamp(12, 32) as u32
+}
+
 /// Hardware-encode backend selection. `Auto` resolves to the first
 /// available backend at runtime in a vendor order chosen for "lowest
 /// CPU strain" -- NVENC first (dedicated NVENC silicon is the fastest),
@@ -417,6 +478,31 @@ pub fn encoder_smoke_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quality_preset_ui_index_roundtrips() {
+        for p in [QualityPreset::Higher, QualityPreset::Balanced, QualityPreset::Smaller] {
+            assert_eq!(QualityPreset::from_ui_index(p.to_ui_index()), p);
+        }
+        assert_eq!(QualityPreset::default(), QualityPreset::Balanced);
+    }
+
+    #[test]
+    fn quality_for_anchors_and_ordering() {
+        use EncodeCodec::{H264, H265};
+        use HwBackend::{Qsv, Software};
+        // Measured anchors (~VMAF 95) stay put at Balanced.
+        assert_eq!(quality_for(QualityPreset::Balanced, Qsv, H264), 18);
+        assert_eq!(quality_for(QualityPreset::Balanced, Qsv, H265), 18);
+        // x265's CRF sits above x264's for equal quality.
+        assert_eq!(quality_for(QualityPreset::Balanced, Software, H264), 18);
+        assert_eq!(quality_for(QualityPreset::Balanced, Software, H265), 21);
+        // Higher = lower number (better), Smaller = higher number, monotonic.
+        let hi = quality_for(QualityPreset::Higher, Qsv, H265);
+        let ba = quality_for(QualityPreset::Balanced, Qsv, H265);
+        let sm = quality_for(QualityPreset::Smaller, Qsv, H265);
+        assert!(hi < ba && ba < sm, "presets must be monotonic: {hi} < {ba} < {sm}");
+    }
 
     #[test]
     fn ffmpeg_encoder_names_match_codec() {

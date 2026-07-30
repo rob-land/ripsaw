@@ -36,6 +36,16 @@ pub struct UserSettings {
     /// Xreal Beam Pro and older TVs. H.265 roughly halves file size.
     #[serde(default)]
     pub conversion_codec: Option<crate::convert::hw::EncodeCodec>,
+    /// Quality target for the convert step (Higher / Balanced / Smaller).
+    /// `None` = Balanced. Maps per encoder to a good CRF/QP/global-quality.
+    #[serde(default)]
+    pub conversion_quality_preset: Option<crate::convert::hw::QualityPreset>,
+    /// Power-user escape hatch: an explicit CRF / QP / global-quality number
+    /// that overrides the preset entirely. Not shown in the GUI — set it by
+    /// hand in `config.json`. Interpreted directly by the chosen encoder
+    /// (lower = better), so its meaning depends on codec + backend.
+    #[serde(default)]
+    pub conversion_quality_override: Option<u32>,
     /// Optional override for the local TheDiscDB mirror root. `None` uses
     /// the default under `$XDG_CACHE_HOME/ripsaw/thediscdb`. See
     /// `thediscdb_mirror_root`.
@@ -54,6 +64,11 @@ impl UserSettings {
     pub fn conversion_codec(&self) -> crate::convert::hw::EncodeCodec {
         self.conversion_codec
             .unwrap_or(crate::convert::hw::EncodeCodec::H264)
+    }
+
+    /// Resolved quality preset, defaulting to Balanced when unset.
+    pub fn conversion_quality_preset(&self) -> crate::convert::hw::QualityPreset {
+        self.conversion_quality_preset.unwrap_or_default()
     }
 }
 

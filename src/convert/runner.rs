@@ -706,7 +706,24 @@ fn resolve_encoder_args(
                 .unwrap_or("libx264"),
         )));
     }
-    encoder_args(chosen, plan.codec, 18, support.vaapi_device.as_deref())
+    // Quality: an explicit config-file override wins; otherwise map the user's
+    // quality preset to the right CRF/QP/global-quality for this encoder.
+    let (preset, override_q) = {
+        let s = crate::settings::settings().lock().expect("settings mutex");
+        (s.conversion_quality_preset(), s.conversion_quality_override)
+    };
+    let quality = override_q
+        .unwrap_or_else(|| crate::convert::hw::quality_for(preset, chosen, plan.codec));
+    if let Some(tx) = event_tx {
+        let _ = tx.try_send(ConversionEvent::Log(format!(
+            "Quality: {} (encoder quality value {quality})",
+            match override_q {
+                Some(_) => "custom override".to_string(),
+                None => format!("{preset:?}"),
+            }
+        )));
+    }
+    encoder_args(chosen, plan.codec, quality, support.vaapi_device.as_deref())
 }
 
 async fn ensure_parent_dir(p: &Path) -> Result<()> {

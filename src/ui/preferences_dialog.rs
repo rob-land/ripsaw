@@ -15,6 +15,7 @@ mod imp {
     pub struct PreferencesDialog {
         #[template_child] pub library_root_row: TemplateChild<adw::ActionRow>,
         #[template_child] pub scheme_combo: TemplateChild<adw::ComboRow>,
+        #[template_child] pub quality_combo: TemplateChild<adw::ComboRow>,
         #[template_child] pub codec_combo: TemplateChild<adw::ComboRow>,
         #[template_child] pub encoder_backend_combo: TemplateChild<adw::ComboRow>,
         #[template_child] pub sonarr_url_row: TemplateChild<adw::EntryRow>,
@@ -70,6 +71,9 @@ impl PreferencesDialog {
         let current = settings().lock().expect("settings mutex").clone();
         self.imp().library_root_row.set_subtitle(&format_root(&current.library_root));
         self.imp().scheme_combo.set_selected(current.scheme.to_index());
+        self.imp()
+            .quality_combo
+            .set_selected(current.conversion_quality_preset().to_ui_index());
         self.imp()
             .codec_combo
             .set_selected(current.conversion_codec().to_ui_index());
@@ -174,6 +178,23 @@ impl PreferencesDialog {
                     }
                 }
                 let _ = dialog; // keep weak alive for the closure
+            }
+        ));
+
+        // Quality preset -> persist.
+        self.imp().quality_combo.connect_selected_notify(clone!(
+            #[weak(rename_to = dialog)]
+            self,
+            move |combo| {
+                let preset = crate::convert::hw::QualityPreset::from_ui_index(combo.selected());
+                let mut guard = settings().lock().expect("settings mutex");
+                if guard.conversion_quality_preset != Some(preset) {
+                    guard.conversion_quality_preset = Some(preset);
+                    if let Err(e) = guard.save() {
+                        tracing::warn!("failed to save quality preference: {e}");
+                    }
+                }
+                let _ = dialog;
             }
         ));
 

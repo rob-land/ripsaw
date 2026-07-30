@@ -40,6 +40,19 @@ template $RipsawPreferencesDialog: Adw.PreferencesDialog {
       title: _("Encoding");
       description: _("Applies to the 3D side-by-side / over-under conversion step.");
 
+      Adw.ComboRow quality_combo {
+        title: _("Quality");
+        subtitle: _("Balanced ≈ visually near-transparent at a sensible size. Higher = larger files; Smaller = more compression. (For an exact CRF/QP, set conversion_quality_override in config.json.)");
+
+        model: StringList {
+          strings [
+            _("Higher quality (larger files)"),
+            _("Balanced (recommended)"),
+            _("Smaller files"),
+          ]
+        };
+      }
+
       Adw.ComboRow codec_combo {
         title: _("Video codec");
         subtitle: _("H.264 plays everywhere (Xreal Beam Pro, older TVs). H.265 (HEVC) roughly halves file size at the same quality but needs a newer decoder.");
