@@ -49,6 +49,14 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.4" date="2026-07-30">
+      <description>
+        <p>H.265/HEVC is now the default output codec — roughly half the file
+        size at the same picture quality, and played by current 3D targets such
+        as the Xreal Beam Pro. Pick H.264 in Preferences if you need maximum
+        player compatibility.</p>
+      </description>
+    </release>
     <release version="0.2.3" date="2026-07-30">
       <description>
         <p>Encoding quality is now a simple choice: a Quality preset (Higher /

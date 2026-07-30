@@ -60,10 +60,12 @@ impl UserSettings {
             .unwrap_or(crate::convert::hw::HwBackend::Auto)
     }
 
-    /// Resolved output codec, defaulting to H.264 when unset.
+    /// Resolved output codec, defaulting to H.265 when unset — roughly half the
+    /// file size at the same quality, and played by current 3D targets (e.g. the
+    /// Xreal Beam Pro). Users needing maximum compatibility can pick H.264.
     pub fn conversion_codec(&self) -> crate::convert::hw::EncodeCodec {
         self.conversion_codec
-            .unwrap_or(crate::convert::hw::EncodeCodec::H264)
+            .unwrap_or(crate::convert::hw::EncodeCodec::H265)
     }
 
     /// Resolved quality preset, defaulting to Balanced when unset.

@@ -20,9 +20,10 @@ pub struct ConversionPlan {
 }
 
 impl ConversionPlan {
-    /// Pre-2026-05-30 default: libx264 software encode.
+    /// Default output codec: H.265/HEVC — ~half the size at the same quality,
+    /// played by current 3D targets. Mirrors `UserSettings::conversion_codec`.
     pub fn default_codec() -> EncodeCodec {
-        EncodeCodec::H264
+        EncodeCodec::H265
     }
 
     /// Default to `Auto`: probe for a hardware encoder (NVENC/QSV/VAAPI/
