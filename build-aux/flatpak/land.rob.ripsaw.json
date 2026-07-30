@@ -3,11 +3,11 @@
 
   "id": "land.rob.ripsaw",
   "runtime": "org.gnome.Platform",
-  "runtime-version": "47",
+  "runtime-version": "50",
   "sdk": "org.gnome.Sdk",
   "sdk-extensions": [
     "org.freedesktop.Sdk.Extension.rust-stable",
-    "org.freedesktop.Sdk.Extension.llvm18"
+    "org.freedesktop.Sdk.Extension.llvm20"
   ],
   "command": "ripsaw",
 
@@ -29,7 +29,7 @@
   ],
 
   "build-options": {
-    "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm18/bin",
+    "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin",
     "build-args": ["--share=network"],
     "env": {
       "CARGO_HOME": "/run/build/ripsaw/cargo"

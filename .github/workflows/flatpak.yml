@@ -25,7 +25,7 @@ concurrency:
 env:
   APP_ID: land.rob.ripsaw
   MANIFEST: build-aux/flatpak/land.rob.ripsaw.json
-  RUNTIME_VERSION: "47"
+  RUNTIME_VERSION: "50"
 
 jobs:
   build:
