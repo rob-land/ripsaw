@@ -49,6 +49,15 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.8" date="2026-07-31">
+      <description>
+        <p>Fix 3D rips playing only audio with a black picture in GNOME Videos,
+        mpv and other players. The muxer was writing a large audio lead ahead of
+        the first video frame (triggered by the sparse PGS subtitle track), so
+        players started audio but never reached a video packet. Output is now
+        strictly interleaved by timestamp.</p>
+      </description>
+    </release>
     <release version="0.2.7" date="2026-07-30">
       <description>
         <p>The 3D conversion progress bar now advances. The native decode/encode

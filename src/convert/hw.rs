@@ -364,6 +364,16 @@ pub fn encoder_args(
                 O::from("-crf"),
                 O::from(quality.to_string()),
             ];
+            // libx265 defaults to open GOPs and NOT repeating the parameter
+            // sets — a combination that decodes in ffmpeg but wedges GStreamer
+            // (GNOME Videos) and mpv into a black picture once a file is long
+            // enough that the player does an initial seek/index pass (it lands
+            // on an open-GOP keyframe it can't cleanly start from). Force closed
+            // GOPs with per-keyframe headers, and drop the bulky x265 info SEI.
+            if codec == EncodeCodec::H265 {
+                out.encoder_args.push(O::from("-x265-params"));
+                out.encoder_args.push(O::from("open-gop=0:repeat-headers=1:info=0"));
+            }
         }
         HwBackend::Vaapi => {
             // VAAPI requires the encoder consume NV12 frames in GPU

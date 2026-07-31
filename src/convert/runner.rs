@@ -83,6 +83,13 @@ async fn run_stereo3d_filter(
         cmd.arg(a);
     }
     cmd.arg("-c:a").arg("copy").arg("-c:s").arg("copy");
+    // Interleave strictly by timestamp (`0` = never write one stream far ahead
+    // of another). Video is produced slowly (libmvc decode / SBS encode) while
+    // audio is read instantly from a file, so the default muxer flushes a large
+    // audio lead ahead of the first video packet — tens of MB in for a feature.
+    // Players then start audio but show a black picture until they finally reach
+    // a video packet. This forces correct A/V interleaving.
+    cmd.arg("-max_interleave_delta").arg("0");
     apply_stereo_mode_tag(&mut cmd, plan.format);
     cmd.arg(&plan.output)
         .stdout(Stdio::piped())
@@ -325,6 +332,13 @@ async fn run_mvc_pipeline(
         cmd.arg(a);
     }
     cmd.arg("-c:a").arg("copy").arg("-c:s").arg("copy");
+    // Interleave strictly by timestamp (`0` = never write one stream far ahead
+    // of another). Video is produced slowly (libmvc decode / SBS encode) while
+    // audio is read instantly from a file, so the default muxer flushes a large
+    // audio lead ahead of the first video packet — tens of MB in for a feature.
+    // Players then start audio but show a black picture until they finally reach
+    // a video packet. This forces correct A/V interleaving.
+    cmd.arg("-max_interleave_delta").arg("0");
     apply_stereo_mode_tag(&mut cmd, plan.format);
     let status = cmd
         .arg(&plan.output)
@@ -762,6 +776,13 @@ async fn decode_pipe_encode(
         cmd.arg(a);
     }
     cmd.arg("-c:a").arg("copy").arg("-c:s").arg("copy");
+    // Interleave strictly by timestamp (`0` = never write one stream far ahead
+    // of another). Video is produced slowly (libmvc decode / SBS encode) while
+    // audio is read instantly from a file, so the default muxer flushes a large
+    // audio lead ahead of the first video packet — tens of MB in for a feature.
+    // Players then start audio but show a black picture until they finally reach
+    // a video packet. This forces correct A/V interleaving.
+    cmd.arg("-max_interleave_delta").arg("0");
     apply_stereo_mode_tag(&mut cmd, plan.format);
     let mut child = cmd
         .arg(&plan.output)
