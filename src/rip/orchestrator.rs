@@ -12,8 +12,37 @@ use std::path::PathBuf;
 
 use gtk::glib;
 
-use crate::rip::makemkv::{extract_title, ExtractEvent, ScanSource};
+use crate::convert::runner::ConversionEvent;
+use crate::rip::makemkv::{extract_title, ExtractEvent, ExtractProgress, ScanSource};
+use crate::rip::makemkv_parse::MsgRecord;
 use crate::ui::rip_progress_page::{RipProgressPage, RipQueueItem};
+
+/// Translate a convert-step [`ConversionEvent`] into the [`ExtractEvent`] the
+/// progress page already understands: `Progress` drives the bar (seconds encoded
+/// vs total runtime), `Log` becomes a status line.
+fn conversion_event_to_extract(ev: &ConversionEvent) -> Option<ExtractEvent> {
+    match ev {
+        ConversionEvent::Progress { current_seconds, total_seconds, label } => {
+            let current = *current_seconds as u32;
+            let max = match total_seconds {
+                Some(t) if *t > 0.0 => *t as u32,
+                _ => 0, // unknown total → indeterminate (fraction stays 0)
+            };
+            Some(ExtractEvent::Progress(ExtractProgress {
+                current,
+                total: current,
+                max,
+                current_label: Some(label.to_string()),
+                total_label: None,
+            }))
+        }
+        ConversionEvent::Log(line) => Some(ExtractEvent::Message(MsgRecord {
+            code: 0,
+            priority: 0,
+            text: line.clone(),
+        })),
+    }
+}
 
 #[derive(Debug)]
 enum RipMessage {
@@ -85,16 +114,35 @@ pub fn run_rip_queue(
                         },
                     )))
                     .await;
-                use crate::rip::bd_playlist::FeatureClips;
-                let result = match clips {
-                    FeatureClips::Mount(pairs) => {
-                        crate::convert::runner::convert_bd_ssif(pairs, &plan, None).await
-                    }
-                    FeatureClips::Iso { iso, clips } => {
-                        crate::convert::runner::convert_bd_ssif_iso(iso, clips, &plan, None).await
+                // Run the native decode on a task and pump its progress events to
+                // the UI so the bar advances (the SSIF path has no makemkvcon
+                // progress records to lean on).
+                let (conv_tx, mut conv_rx) =
+                    tokio::sync::mpsc::channel::<crate::convert::runner::ConversionEvent>(64);
+                let convert_handle = {
+                    let plan = plan.clone();
+                    let clips = clips.clone();
+                    tokio::spawn(async move {
+                        use crate::rip::bd_playlist::FeatureClips;
+                        match &clips {
+                            FeatureClips::Mount { clips, duration_seconds } => {
+                                crate::convert::runner::convert_bd_ssif(clips, *duration_seconds, &plan, Some(conv_tx)).await
+                            }
+                            FeatureClips::Iso { iso, clips, duration_seconds } => {
+                                crate::convert::runner::convert_bd_ssif_iso(iso, clips, *duration_seconds, &plan, Some(conv_tx)).await
+                            }
+                        }
+                    })
+                };
+                while let Some(ev) = conv_rx.recv().await {
+                    if let Some(event) = conversion_event_to_extract(&ev) {
+                        let _ = rip_tx.send(RipMessage::Event(event)).await;
                     }
                 }
-                .map(|_| output);
+                let result = match convert_handle.await {
+                    Ok(r) => r.map(|_| output),
+                    Err(e) => Err(anyhow::anyhow!("conversion task panicked: {e}")),
+                };
                 let _ = rip_tx.send(RipMessage::Finished(index_in_queue, result)).await;
                 continue;
             }

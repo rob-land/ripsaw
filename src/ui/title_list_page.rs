@@ -1718,7 +1718,11 @@ fn attach_ssif_feature(
         }
         match find_feature_3d_iso(&udf, &mut f) {
             Some(feat) => {
-                let clips = FeatureClips::Iso { iso: iso.to_path_buf(), clips: feat.clips.clone() };
+                let clips = FeatureClips::Iso {
+                    iso: iso.to_path_buf(),
+                    clips: feat.clips.clone(),
+                    duration_seconds: feat.duration_seconds(),
+                };
                 (feat, clips)
             }
             None => return Some("3D fast path unavailable: no MVC feature playlist in the ISO — ripping via MakeMKV.".into()),
@@ -1729,7 +1733,10 @@ fn attach_ssif_feature(
         }
         match find_feature_3d(mount) {
             Some(feat) => {
-                let clips = FeatureClips::Mount(feat.clip_paths(mount));
+                let clips = FeatureClips::Mount {
+                    clips: feat.clip_paths(mount),
+                    duration_seconds: feat.duration_seconds(),
+                };
                 (feat, clips)
             }
             None => {
@@ -1754,7 +1761,7 @@ fn attach_ssif_feature(
     let n_clips = feature.clips.len();
     let via = match &clips {
         FeatureClips::Iso { .. } => "straight from the ISO",
-        FeatureClips::Mount(_) => "straight from the disc",
+        FeatureClips::Mount { .. } => "straight from the disc",
     };
     for item in queue.iter_mut() {
         if item.conversion_format.is_none() {

@@ -59,13 +59,14 @@ impl Feature {
 }
 
 /// Where a feature's clips live — resolved for the orchestrator to decode.
+/// Carries the feature runtime so the convert step can report a progress %.
 #[derive(Debug, Clone)]
 pub enum FeatureClips {
     /// A readable mounted disc: `(ssif, m2ts)` filesystem paths.
-    Mount(Vec<(PathBuf, PathBuf)>),
+    Mount { clips: Vec<(PathBuf, PathBuf)>, duration_seconds: u64 },
     /// A Blu-ray ISO read directly via UDF (no mount): the image path plus the
     /// feature's clip names. Used when a Flatpak sandbox can't see the mount.
-    Iso { iso: PathBuf, clips: Vec<String> },
+    Iso { iso: PathBuf, clips: Vec<String>, duration_seconds: u64 },
 }
 
 /// True if a Blu-ray ISO (read via UDF) looks AACS-encrypted. The native SSIF

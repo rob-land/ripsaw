@@ -33,7 +33,7 @@ fn main() -> anyhow::Result<()> {
             while let Some(ev) = rx.recv().await {
                 match ev {
                     ConversionEvent::Log(l) => eprintln!("[runner] {l}"),
-                    ConversionEvent::Progress { current_seconds, total_seconds } => {
+                    ConversionEvent::Progress { current_seconds, total_seconds, .. } => {
                         eprintln!("[progress] {current_seconds:.1}s / {total_seconds:?}")
                     }
                 }

@@ -13,7 +13,7 @@
 //    same ldecod -> ffmpeg compose tail as path 2.
 
 use std::fs::File;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -31,8 +31,9 @@ use crate::identify::ffprobe;
 pub enum ConversionEvent {
     /// Free-form line of stderr from a subprocess.
     Log(String),
-    /// Filled in when ffmpeg reports `out_time_us` via `-progress`.
-    Progress { current_seconds: f64, total_seconds: Option<f64> },
+    /// Progress within the convert step. `label` names the current phase (e.g.
+    /// "Preparing audio track" vs "Decoding & encoding 3D").
+    Progress { current_seconds: f64, total_seconds: Option<f64>, label: &'static str },
 }
 
 pub async fn run_conversion(
@@ -237,7 +238,12 @@ async fn run_mvc_pipeline(
     let video: Box<dyn std::io::Read + Send> = Box::new(std::io::BufReader::new(
         std::fs::File::open(&h264_path).with_context(|| format!("opening {}", h264_path.display()))?,
     ));
-    match decode_pipe_encode(plan, &event_tx, video, &plan.input, width, height, &frame_rate).await? {
+    let total_seconds = ffprobe::probe(&plan.input)
+        .await
+        .ok()
+        .and_then(|r| r.duration_seconds())
+        .map(|s| s as f64);
+    match decode_pipe_encode(plan, &event_tx, video, &plan.input, width, height, &frame_rate, total_seconds).await? {
         PipeOutcome::Success => return Ok(plan.output.clone()),
         PipeOutcome::DecodeFailed(e) => {
             log(
@@ -389,6 +395,7 @@ impl std::io::Read for SeqSsifReader {
 /// Only works for unencrypted discs (no AACS).
 pub async fn convert_bd_ssif(
     clips: &[(PathBuf, PathBuf)],
+    duration_seconds: u64,
     plan: &ConversionPlan,
     event_tx: Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
 ) -> Result<PathBuf> {
@@ -422,7 +429,12 @@ pub async fn convert_bd_ssif(
         format!("concat:{joined}").into()
     };
 
-    match decode_pipe_encode(plan, &event_tx, video, Path::new(&av_arg), width, height, &frame_rate).await? {
+    // Prefer the .mpls feature runtime; fall back to the probed clip duration.
+    let total_seconds = Some(duration_seconds)
+        .filter(|d| *d > 0)
+        .or_else(|| report.duration_seconds())
+        .map(|s| s as f64);
+    match decode_pipe_encode(plan, &event_tx, video, Path::new(&av_arg), width, height, &frame_rate, total_seconds).await? {
         PipeOutcome::Success => Ok(plan.output.clone()),
         PipeOutcome::DecodeFailed(e) => Err(e.context("decoding the Blu-ray SSIF")),
     }
@@ -520,6 +532,7 @@ impl std::io::Read for IsoM2tsChain {
 pub async fn convert_bd_ssif_iso(
     iso: &Path,
     clip_names: &[String],
+    duration_seconds: u64,
     plan: &ConversionPlan,
     event_tx: Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
 ) -> Result<PathBuf> {
@@ -547,19 +560,24 @@ pub async fn convert_bd_ssif_iso(
     // Geometry + frame rate from a small prefix of the first clip's base m2ts.
     let (width, height, frame_rate) = probe_iso_geometry(iso, &m2tss[0], &plan.output).await?;
 
+    let total_seconds = (duration_seconds > 0).then_some(duration_seconds as f64);
+
+    // Audio/subtitles: stream the base m2ts out of the ISO and remux just the
+    // audio + subtitle tracks into a small temp beside the output (host-visible,
+    // so the host ffmpeg can read it). Avoids extracting the whole m2ts. This
+    // reads the full base view, so for a movie it's the slow first phase — it
+    // reports progress under a "Preparing audio" label.
+    log(&event_tx, "Preparing audio track from the ISO…");
+    let audio = extract_iso_audio(iso, m2tss, &plan.output, total_seconds, &event_tx).await?;
+
     log(
         &event_tx,
         &format!("Decoding {} SSIF clip(s) from the ISO natively (libmvc) — no mount, no makemkvcon…", clip_names.len()),
     );
-
-    // Audio/subtitles: stream the base m2ts out of the ISO and remux just the
-    // audio + subtitle tracks into a small temp beside the output (host-visible,
-    // so the host ffmpeg can read it). Avoids extracting the whole m2ts.
-    let audio = extract_iso_audio(iso, m2tss, &plan.output, &event_tx).await?;
-
     let video: Box<dyn std::io::Read + Send> =
         Box::new(IsoSsifChain::open(iso.to_path_buf(), ssifs).context("opening the ISO's SSIF clips")?);
-    let result = decode_pipe_encode(plan, &event_tx, video, &audio, width, height, &frame_rate).await;
+    let result =
+        decode_pipe_encode(plan, &event_tx, video, &audio, width, height, &frame_rate, total_seconds).await;
     let _ = tokio::fs::remove_file(&audio).await;
 
     match result? {
@@ -607,11 +625,15 @@ async fn extract_iso_audio(
     iso: &Path,
     m2tss: Vec<ClipExtents>,
     output: &Path,
+    total_seconds: Option<f64>,
     event_tx: &Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
 ) -> Result<PathBuf> {
     let audio_path = output.with_extension("ripsaw-audio.mkv");
     let (pipe_reader, pipe_writer) = std::io::pipe().context("creating m2ts→ffmpeg pipe")?;
 
+    // ffmpeg can't derive an output timestamp from a piped `-c copy` TS
+    // (`out_time` stays N/A), so progress for this phase comes from the feeder
+    // below, by bytes of the m2ts streamed (≈ proportional to runtime).
     let mut child = crate::hostcmd::host_command("ffmpeg")
         .arg("-y").arg("-hide_banner").arg("-loglevel").arg("error")
         .arg("-i").arg("pipe:0")
@@ -627,17 +649,42 @@ async fn extract_iso_audio(
         .context("spawn ffmpeg (m2ts audio extract)")?;
     forward_stderr(&mut child, event_tx.clone());
 
+    let total_bytes: u64 = m2tss.iter().map(|(sz, _)| *sz).sum();
     let feed = {
         let iso = iso.to_path_buf();
+        let tx = event_tx.clone();
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             let mut chain = IsoM2tsChain::open(iso, m2tss)?;
             let mut w = pipe_writer;
-            // Broken pipe (ffmpeg done reading) is a normal end, not an error.
-            match std::io::copy(&mut chain, &mut w) {
-                Ok(_) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-                Err(e) => Err(e),
+            let mut buf = vec![0u8; 1 << 20];
+            let (mut done, mut last) = (0u64, 0u64);
+            loop {
+                let n = match chain.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) => return Err(e),
+                };
+                if let Err(e) = w.write_all(&buf[..n]) {
+                    // Broken pipe = ffmpeg finished reading; a normal end.
+                    if e.kind() == std::io::ErrorKind::BrokenPipe {
+                        break;
+                    }
+                    return Err(e);
+                }
+                done += n as u64;
+                // Emit progress every ~32 MB, scaled to runtime by bytes read.
+                if let (Some(total_s), Some(tx)) = (total_seconds, &tx) {
+                    if total_bytes > 0 && done - last >= (32 << 20) {
+                        last = done;
+                        let _ = tx.try_send(ConversionEvent::Progress {
+                            current_seconds: total_s * (done as f64 / total_bytes as f64),
+                            total_seconds: Some(total_s),
+                            label: "Preparing audio track",
+                        });
+                    }
+                }
             }
+            Ok(())
         })
     };
     let _ = feed.await;
@@ -666,6 +713,9 @@ async fn decode_pipe_encode(
     width: u32,
     height: u32,
     frame_rate: &str,
+    // Total output duration in seconds, if known — lets the progress events carry
+    // a percentage. `None` reports elapsed seconds without a fraction.
+    total_seconds: Option<f64>,
 ) -> Result<PipeOutcome> {
     log(event_tx, "Decoding MVC natively (libmvc), streaming into ffmpeg…");
 
@@ -691,7 +741,10 @@ async fn decode_pipe_encode(
     let fsbs_size = format!("{}x{}", width * 2, height);
 
     let mut cmd = crate::hostcmd::host_command("ffmpeg");
-    cmd.arg("-y").arg("-hide_banner");
+    // `-progress pipe:1` writes machine-readable progress (out_time_us=…) to
+    // stdout so we can drive the UI progress bar. `-loglevel error` keeps stderr
+    // to genuine errors (no per-frame stats spam) so it's safe to surface.
+    cmd.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error").arg("-progress").arg("pipe:1");
     for a in &encoder.init {
         cmd.arg(a);
     }
@@ -713,11 +766,12 @@ async fn decode_pipe_encode(
     let mut child = cmd
         .arg(&plan.output)
         .stdin(Stdio::from(pipe_reader))
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .context("spawn ffmpeg (piped compose)")?;
+    forward_ffmpeg_progress(&mut child, total_seconds, event_tx.clone());
     forward_stderr(&mut child, event_tx.clone());
 
     // Decode on a blocking thread, writing composed FSBS frames into the pipe.
@@ -974,6 +1028,36 @@ fn forward_stderr(
         while let Ok(Some(line)) = reader.next_line().await {
             if let Some(tx) = &tx {
                 let _ = tx.try_send(ConversionEvent::Log(line));
+            }
+        }
+    });
+}
+
+/// Parse ffmpeg's `-progress` stream on the child's stdout (key=value lines) and
+/// emit a [`ConversionEvent::Progress`] each time `out_time_us` advances.
+fn forward_ffmpeg_progress(
+    child: &mut tokio::process::Child,
+    total_seconds: Option<f64>,
+    tx: Option<tokio::sync::mpsc::Sender<ConversionEvent>>,
+) {
+    let Some(stdout) = child.stdout.take() else { return; };
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            // ffmpeg emits `out_time_us=<micros>` (or `N/A` before the first
+            // frame) in each progress block.
+            if let Some(rest) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = rest.trim().parse::<i64>() {
+                    if us >= 0 {
+                        if let Some(tx) = &tx {
+                            let _ = tx.try_send(ConversionEvent::Progress {
+                                current_seconds: us as f64 / 1_000_000.0,
+                                total_seconds,
+                                label: "Decoding & encoding 3D",
+                            });
+                        }
+                    }
+                }
             }
         }
     });

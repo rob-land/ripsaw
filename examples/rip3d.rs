@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
                     };
                     let (tx, rx) = mpsc::channel::<ConversionEvent>(64);
                     let printer = spawn_convert_printer(rx);
-                    let result = convert_bd_ssif(&clips, &plan, Some(tx)).await;
+                    let result = convert_bd_ssif(&clips, 0, &plan, Some(tx)).await;
                     let _ = printer.await;
                     let _ = m.unmount().await;
                     result.context("decoding the Blu-ray SSIF")?;
@@ -176,7 +176,7 @@ fn spawn_convert_printer(mut rx: mpsc::Receiver<ConversionEvent>) -> tokio::task
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev {
-                ConversionEvent::Progress { current_seconds, total_seconds } => match total_seconds {
+                ConversionEvent::Progress { current_seconds, total_seconds, .. } => match total_seconds {
                     Some(t) => eprint!("\r  encode {current_seconds:.0}/{t:.0}s   "),
                     None => eprint!("\r  encode {current_seconds:.0}s   "),
                 },

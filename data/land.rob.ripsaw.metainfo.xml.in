@@ -49,6 +49,14 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.7" date="2026-07-30">
+      <description>
+        <p>The 3D conversion progress bar now advances. The native decode/encode
+        path reports real progress — audio preparation by bytes read, then the
+        video encode by ffmpeg's reported time — so a direct-from-ISO 3D rip no
+        longer sits at "Starting… 0%".</p>
+      </description>
+    </release>
     <release version="0.2.6" date="2026-07-30">
       <description>
         <p>Encode with a regular ~2-second keyframe interval instead of the

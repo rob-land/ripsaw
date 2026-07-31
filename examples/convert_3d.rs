@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
         while let Some(ev) = rx.recv().await {
             match ev {
                 ConversionEvent::Log(line) => eprintln!("[convert] {line}"),
-                ConversionEvent::Progress { current_seconds, total_seconds } => {
+                ConversionEvent::Progress { current_seconds, total_seconds, .. } => {
                     let total = total_seconds
                         .map(|t| format!("/{t:.1}s"))
                         .unwrap_or_default();
